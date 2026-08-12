@@ -1,0 +1,117 @@
+"""
+Мелкие хелперы над LangChain-сообщениями, не завязанные ни на self-heal
+цикл, ни на сборку тулов: сериализация content в текст (_content_text),
+дедуп буквально одинаковых ToolMessage внутри одного хода
+(_dedupe_identical_tool_results + _DedupeToolResultsMiddleware) и перевод
+входных сообщений cli.py в формат LangChain (_to_lc_messages).
+"""
+import json
+from typing import Any
+
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import AIMessage, ToolMessage
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, sort_keys=True, default=str)
+
+
+# Живой прогон (mail-server, 20260707-155842-8b900098): MCP tool results
+# normally come back as a LIST of content blocks ([{'type': 'text', 'text':
+# '...'}, ...]), not a plain string — langchain_mcp_adapters' standard shape
+# for every filesystem/git/bash_exec/fs_extra tool result. str() on that
+# list stringifies the whole Python structure and, critically, ESCAPES any
+# real newlines inside the text into literal two-character '\n' sequences.
+# That silently broke several things that assumed m.content was already
+# clean text:
+#   - self_heal.py's _execution_evidence_shows_failure did
+#     str(m.content).startswith("error") — never matches, since the string
+#     actually starts with "[{'type': 'text'..." — a failed bash_exec (even
+#     a fatal crash) was never caught, letting the model report success
+#     off nothing but an unrelated earlier `php -l`.
+#   - ui/stream.py's tool_end renderer splits the result on real newlines to
+#     detect and color a unified diff (replace_lines' own diff output) —
+#     with newlines escaped to text, a multi-line diff collapses into ONE
+#     "line", so the diff never rendered; the user saw a truncated garbled
+#     repr instead of the actual (tool-generated, not LLM-generated) diff.
+# _content_text (above) doesn't fix this — json.dumps has the exact same
+# escaping problem. This extracts and joins the real text blocks instead;
+# falls back to str() for a plain string or an unrecognized shape.
+def _tool_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        if parts:
+            return "\n".join(parts)
+    return str(content)
+
+
+def _dedupe_identical_tool_results(messages: list) -> list:
+    """Между несколькими раундами тул-коллинга ВНУТРИ ОДНОГО хода (create_agent
+    зовёт модель заново на каждый раунд, таща за собой всю историю) иногда
+    накапливаются два ToolMessage с одним и тем же тулом+аргументами И
+    ДОСЛОВНО одинаковым результатом — например, модель дважды вызвала
+    один и тот же bash_exec, не заметив, что уже это сделала.
+
+    В отличие от _dedupe_read_tool (который блокирует ПОВТОРНОЕ выполнение
+    read_file/read_text_file — они идемпотентны, блокировать безопасно),
+    здесь мы НИКОГДА не трогаем сам вызов тула: bash_exec и любой другой тул
+    с побочными эффектами обязан выполняться каждый раз, когда модель его
+    зовёт — состояние могло измениться между вызовами (git status, pytest
+    после правки), и повторный вызов часто НАМЕРЕННО перепроверяет текущее
+    состояние. Мы срезаем только то, что уходит МОДЕЛИ НА ВХОД в следующих
+    раундах этого же хода: если результат ДОСЛОВНО совпал с уже показанным
+    раньше — старая копия заменяется плейсхолдером вместо повторной отправки
+    того же текста. Если контент отличается (состояние реально изменилось
+    между вызовами) — обе копии остаются нетронутыми: это не дубликат, а
+    полезная разница, которую нельзя терять."""
+    call_info: dict[str, tuple[str, str]] = {}
+    for m in messages:
+        if isinstance(m, AIMessage):
+            for tc in (m.tool_calls or []):
+                call_info[tc["id"]] = (
+                    tc["name"],
+                    json.dumps(tc.get("args", {}), sort_keys=True, default=str),
+                )
+
+    total_count: dict[tuple, int] = {}
+    for m in messages:
+        if isinstance(m, ToolMessage) and m.tool_call_id in call_info:
+            name, args_json = call_info[m.tool_call_id]
+            key = (name, args_json, _content_text(m.content))
+            total_count[key] = total_count.get(key, 0) + 1
+
+    seen_count: dict[tuple, int] = {}
+    result = []
+    for m in messages:
+        if isinstance(m, ToolMessage) and m.tool_call_id in call_info:
+            name, args_json = call_info[m.tool_call_id]
+            key = (name, args_json, _content_text(m.content))
+            if total_count.get(key, 0) > 1:
+                seen_count[key] = seen_count.get(key, 0) + 1
+                if seen_count[key] < total_count[key]:
+                    m = m.model_copy(update={
+                        "content": (
+                            f"(Identical result to a later `{name}` call in this turn "
+                            "with the same arguments — collapsed here to save context; "
+                            "see the later call below for the actual output.)"
+                        )
+                    })
+        result.append(m)
+    return result
+
+
+class _DedupeToolResultsMiddleware(AgentMiddleware):
+    """Применяет _dedupe_identical_tool_results к истории ПЕРЕД каждым
+    вызовом модели — request.override(messages=...) не трогает реальное
+    состояние графа/чекпоинтер, только то, что физически уйдёт в этот
+    конкретный запрос к Ollama."""
+
+    async def awrap_model_call(self, request, handler):
+        return await handler(request.override(messages=_dedupe_identical_tool_results(request.messages)))
+
+
+def _to_lc_messages(messages: list[dict]) -> list[tuple[str, str]]:
+    return [(m["role"], m.get("content", "")) for m in messages if m.get("content")]

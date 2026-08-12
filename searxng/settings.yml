@@ -1,0 +1,28 @@
+use_default_settings: true
+
+server:
+  secret_key: "flowai_searxng_change_me"
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: d
+    # Стабильно ловит CAPTCHA (searx.exceptions.SearxEngineCaptchaException,
+    # см. `docker logs flowai-searxng`) — известная, практически неизлечимая
+    # для self-hosted SearXNG проблема (DuckDuckGo агрессивно блокирует такой
+    # скрейпинг). bing/wikipedia отвечают нормально — не тратим время каждого
+    # запроса и место в логах на заведомо провальный движок.
+    disabled: true
+  - name: bing
+    engine: bing
+    shortcut: b

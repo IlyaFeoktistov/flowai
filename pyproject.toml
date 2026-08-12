@@ -1,0 +1,68 @@
+[build-system]
+# hatchling, НЕ setuptools — setuptools' build_meta пытается выполнить
+# корневой setup.py как часть сборки пакета (легаси-поведение), а он у нас —
+# отдельный bootstrap-скрипт под опциональные ML-подсистемы (свой argparse,
+# `--only`/`--dry-run`), не упаковщик. hatchling вообще не трогает setup.py.
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flowai"
+# Держать в синхроне с version.py:__version__ вручную — см. его докстринг.
+version = "1.2.1"
+description = "Python CLI AI chat application powered by Ollama"
+license = "MIT"
+requires-python = ">=3.12"
+# Тот же список, что requirements.txt (используется и `setup.py`'s main-venv
+# шагом, `pip install -r requirements.txt`, см. setup.py:143) — hatchling не
+# умеет читать зависимости ИЗ файла нативно (в отличие от setuptools), так
+# что список продублирован; при изменении requirements.txt поправить и тут.
+dependencies = [
+    "ollama>=0.4.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+    "crawl4ai>=0.3.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+    "distro>=1.9.0",
+    "psutil>=7.0.0",
+    "python-lsp-server>=1.14.0",
+    "langchain>=1.3.11",
+    "langchain-core>=1.4.8",
+    "langgraph>=1.2.7",
+    "langchain-mcp-adapters>=0.3.0",
+    "langchain-ollama>=1.1.0",
+    "langchain-openai>=1.1.0",
+    "mcp>=1.28.1",
+    "pydantic>=2.13.4",
+]
+
+[project.scripts]
+flowai = "cli:run"
+
+[tool.hatch.build.targets.wheel]
+# Плоский layout (не src/flowai/...) — модули лежат прямо в корне репозитория.
+# Список — "main" (см. README:"Установка"): то, что покрывает requirements.txt
+# и обязательно для базового чата. Тяжёлые опциональные части (веса/расчёты
+# image-gen/whisper/tts/gen3d-пайплайна, vendor/*) вне пакета — они ставятся
+# отдельно через `python3 setup.py --only ...` в СВОИ изолированные venv
+# (конфликтующие версии torch/CUDA между ними), не через `pip install .`.
+#
+# gen3d/*.py (БЕЗ blender_scripts/) — включены, хотя это папка "тяжёлого"
+# 3D-пайплайна: cli.py импортирует tools.gen_model, тот — gen3d.pipeline и
+# gen3d.animato_client напрямую при старте (не лениво), а сами эти конкретные
+# файлы — только оркестрация/subprocess (httpx/ollama/stdlib), без torch —
+# в отличие от hunyuan_wrapper.py/texture_wrapper.py/material_wrapper.py
+# (те импортируют torch/diffusers/hy3dgen, но выполняются КАК ОТДЕЛЬНЫЕ
+# скрипты внутри vendor/*/venv через subprocess, а не импортируются сюда).
+# Живой баг, найденный на реальной non-editable установке в чистый venv:
+# без gen3d/*.py `import cli` падал с ModuleNotFoundError уже на старте,
+# даже без единого вызова /gen_model.
+include = [
+    "cli.py", "compress.py", "main.py", "memory_admin.py",
+    "model_lifecycle.py", "settings.py", "storage.py", "usage.py",
+    "episodic/**", "mcp_agent/**", "memory/**", "rag/**", "tools/**",
+    "ui/**", "utils/**", "gen3d/*.py",
+]

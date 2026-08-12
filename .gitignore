@@ -1,0 +1,78 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+venv-*/
+
+# Конфиг с секретами
+.env
+
+# LoRA-дообучение (finetune/README.md) — генерируется заново из flowai.db,
+# и веса/чекпоинты сюда не место (велики для git)
+finetune/dataset.jsonl
+finetune/lora_adapter/
+finetune/merged_model/
+finetune/*.gguf
+finetune/*.Modelfile
+
+# Python кэш
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Генерированные картинки (могут быть большими)
+generated/
+
+# /gen_model — внешние инструменты, клонируются и ставятся gen3d/setup.py
+# (десятки ГБ с моделями/venv'ами, не коммитятся)
+vendor/
+
+# /gen_model @name-ref картинки пользователя — личные, не коммитятся
+img-refs/
+
+# Устаревшие локальные данные — перенесены в SQLite/project_dir
+# (~/.local/share/flowai/): memory.json/usage.json (память, usage-статистика),
+# settings.json (настройки), episodes/ (история диалога), rag_index/
+# (семантические индексы) — не создаются заново, оставлены в .gitignore
+# на случай, если где-то остался старый файл со старой установки.
+memory.json
+usage.json
+settings.json
+episodes/
+rag_index/
+
+# Playwright / браузеры
+.playwright/
+
+# HuggingFace кэш моделей
+.cache/
+*.ckpt
+*.safetensors
+
+# Логи
+*.log
+logs/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Редакторы
+.idea/
+.vscode/
+.claude/
+.gigacode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# SearXNG данные (монтируются в Docker)
+searxng/data/
+
+# Локальная debug-база (не создаётся кодом проекта, мусор от внешнего тула)
+llmdebug.db

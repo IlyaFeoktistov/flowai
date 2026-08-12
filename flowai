@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Лаунчер flowAI — запускает CLI напрямую через Python из .venv.
+# Активировать окружение не нужно: venv-интерпретатор сам видит свои пакеты.
+# Работает из любой директории — пути считаются от расположения скрипта.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+exec "$HERE/.venv/bin/python" "$HERE/cli.py" "$@"
