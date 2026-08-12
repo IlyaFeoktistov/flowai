@@ -80,6 +80,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, _PROJECT_ROOT)
 
 import storage  # noqa: E402
+from utils.proc import kill_process_tree  # noqa: E402
 
 mcp = FastMCP("bash_exec")
 
@@ -190,21 +191,60 @@ async def bash_exec(command: str, timeout: int = TIMEOUT) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
-        stdout = stdout_b.decode("utf-8", errors="replace").strip()
-        stderr = stderr_b.decode("utf-8", errors="replace").strip()
-        output = "\n".join(x for x in [stdout, stderr] if x)
+    except Exception as e:
+        return f"Error: {e}"
 
-        if proc.returncode == 0 or _is_non_error_exit(command):
-            result = output or "(no output)"
-        else:
-            result = f"Error (exit {proc.returncode}): {output}"
+    timed_out = False
 
-        if len(result) > MAX_OUTPUT:
-            result = _sandwich_truncate(result, MAX_OUTPUT)
-        return result
+    async def _watchdog() -> None:
+        nonlocal timed_out
+        await asyncio.sleep(effective_timeout)
+        if proc.returncode is None:
+            timed_out = True
+            kill_process_tree(proc.pid)
 
-    except asyncio.TimeoutError:
+    # Отдельная задача-таймер + kill_process_tree, а НЕ asyncio.wait_for(proc.
+    # communicate(), timeout=...) + proc.kill() (как было раньше) — живой
+    # инцидент (20260812, тот же паттерн на "!команда" в
+    # cli.py:_run_shell_command): таймаут там ни разу не сработал — процесс
+    # провисел 269с при коде 60с, и остались живы ОБА процесса (sh-обёртка и
+    # её потомок), хотя proc.kill() шлёт SIGKILL, который нельзя ни поймать,
+    # ни проигнорировать — если бы он реально вызвался, wrapper был бы
+    # мёртв. Точная причина не установлена (в этом окружении нет живого
+    # питон-дебаггера, чтобы посмотреть, где именно терялась отмена
+    # wait_for — изолированный повтор ровно этого паттерна сработал
+    # штатно), но полагаться на то, что отмена communicate() надёжно
+    # достаёт до заблокированного чтения из pipe, — само по себе хрупкое
+    # допущение. Независимый таймер ничего не отменяет, просто убивает по
+    # будильнику.
+    #
+    # kill_process_tree, а не голый proc.kill(), — отдельная находка при
+    # тестировании этого фикса: /bin/sh -c форкает РЕАЛЬНОГО потомка даже
+    # для одиночной команды без ";"/пайпов (живой тест: "sleep 5" — уже два
+    # разных PID, не exec-замена). Потомок наследует те же файловые
+    # дескрипторы stdout/stderr pipe, что и sh-обёртка — kill() только
+    # обёртки оставляет его сиротой, всё ещё держащим pipe открытым, и
+    # proc.communicate() не увидит EOF, пока НЕ ЗАКРОЮТСЯ ВСЕ держатели
+    # pipe. Для команды, которую убивают именно потому, что она сама
+    # никогда не завершится, это означает, что communicate() после
+    # kill() может зависнуть заново — kill() формально "сработал", а
+    # результат так и не возвращается. kill_process_tree (utils/proc.py)
+    # убивает всё дерево, а не только обёртку — communicate() ниже
+    # возвращается почти сразу же, поэтому частичный вывод до убийства
+    # по-прежнему захватывается, а не теряется.
+    watchdog = asyncio.create_task(_watchdog())
+    try:
+        stdout_b, stderr_b = await proc.communicate()
+    except Exception as e:
+        watchdog.cancel()
+        return f"Error: {e}"
+    watchdog.cancel()
+
+    stdout = stdout_b.decode("utf-8", errors="replace").strip()
+    stderr = stderr_b.decode("utf-8", errors="replace").strip()
+    output = "\n".join(x for x in [stdout, stderr] if x)
+
+    if timed_out:
         # Live run: a repo-wide `find . -exec php -l {} \;` (no path/name
         # narrowing) hit this timeout, and the model retried essentially
         # the SAME broad scan again later in the same turn instead of
@@ -219,16 +259,16 @@ async def bash_exec(command: str, timeout: int = TIMEOUT) -> str:
         # proc.kill() (only the immediate wrapper) — an orphaned grandchild
         # process is a smaller problem than accidentally signaling
         # processes outside this tool call.
-        proc.kill()
-        try:
-            await proc.wait()
-        except Exception:
-            pass
+        #
         # Two different retries make sense depending on WHY it timed out —
         # narrowing helps a broad/unscoped scan, a bigger timeout= helps a
         # single, genuinely slow command — so name both instead of only
         # ever telling the model to narrow (a real live query it needs to
         # wait longer for isn't "too broad", it's just legitimately slow).
+        # A command trying to read stdin is a THIRD possibility — stdin is
+        # DEVNULL here, so that normally fails fast with EOF well before
+        # this timeout, but a program that ignores EOF and retries could
+        # still end up here, hence the explicit mention.
         if effective_timeout < MAX_TIMEOUT:
             retry_hint = (
                 f"If this specific command is known to legitimately need "
@@ -244,15 +284,27 @@ async def bash_exec(command: str, timeout: int = TIMEOUT) -> str:
                 "(doesn't block this turn at all), not a bigger timeout= "
                 "here."
             )
+        partial = f" Output captured before it was killed:\n{output}" if output else ""
         return (
-            f"Error: command timed out after {effective_timeout}s. This "
-            "can mean the command itself was too broad/slow (e.g. scanning "
-            "the whole repo or vendor/ instead of specific files) — that "
-            "says nothing about whether any particular file is correct — "
-            f"or that it's a single command that genuinely needs more time. {retry_hint}"
+            f"Error: command timed out after {effective_timeout}s and was "
+            "killed. This can mean the command itself was too broad/slow "
+            "(e.g. scanning the whole repo or vendor/ instead of specific "
+            "files) — that says nothing about whether any particular file "
+            "is correct — that it's a single command that genuinely needs "
+            "more time, OR that it was waiting on input it was never going "
+            "to get (stdin is closed for this tool) — if so, this is not "
+            "an interactive shell; rerun the underlying program with its "
+            f"input passed non-interactively instead. {retry_hint}{partial}"
         )
-    except Exception as e:
-        return f"Error: {e}"
+
+    if proc.returncode == 0 or _is_non_error_exit(command):
+        result = output or "(no output)"
+    else:
+        result = f"Error (exit {proc.returncode}): {output}"
+
+    if len(result) > MAX_OUTPUT:
+        result = _sandwich_truncate(result, MAX_OUTPUT)
+    return result
 
 
 def _jobs_conn():

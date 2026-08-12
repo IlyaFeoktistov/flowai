@@ -76,6 +76,7 @@ from ui.header import print_header
 from ui.images import get_clipboard_image, load_image_file, store_image, resolve_image_paths, clear_store as _clear_images
 from ui.paste_store import resolve_pastes, clear_store as _clear_pastes
 from ui.suggestions import looks_like_question, suggest_reply
+from utils.proc import kill_process_tree
 
 def clear_store():
     _clear_images()
@@ -108,27 +109,92 @@ async def _run_shell_command(command: str) -> tuple[str, str, int | None]:
     """"!command" input (see _handle_input) — runs it directly (not through
     the model's own bash_exec MCP tool, no permission prompt: the user typed
     it themselves). Returns (stdout, stderr, returncode); returncode is None
-    if the command was killed after _SHELL_COMMAND_TIMEOUT."""
+    if the command was killed after _SHELL_COMMAND_TIMEOUT.
+
+    stdin is left alone (inherited from this process' real terminal, NOT
+    DEVNULL like bash_exec_server.py's own bash_exec) — this is a command
+    the USER typed themselves specifically to run it directly, so a program
+    that reads stdin should be able to. What it can't do is show a live
+    prompt: stdout/stderr are captured wholesale and only printed after the
+    command finishes (see _handle_input's use of the return value) — a
+    program that prints "Enter a number:" and waits looks INSTANTLY frozen,
+    with nothing on screen to explain why, even before the timeout below
+    has any chance to fire.
+
+    Live bug (20260812): a compiled Go binary that reads stdin
+    (bufio.NewReader(os.Stdin)) was run this way, got no input (nothing
+    typed reaches it — same terminal is also owned by prompt_toolkit's own
+    input loop), and the OLD implementation here — asyncio.wait_for(proc.
+    communicate(), timeout=...) — never actually fired its timeout: the
+    process was still alive, unkilled, 269s after the coded 60s cap (ps
+    evidence: both the /bin/sh -c wrapper AND the binary itself still
+    running — proc.kill() sends SIGKILL, which cannot be caught/ignored, so
+    if it had actually run, the wrapper would be dead). Root cause not
+    fully pinned down (no live Python debugger available in this
+    environment to inspect exactly where wait_for's cancellation got lost
+    inside the full app — an isolated repro of just this pattern DID fire
+    correctly), but wrapping a subprocess's own communicate() in wait_for
+    and trusting its cancellation to reliably reach a blocked pipe read is
+    exactly the kind of thing that's fragile to depend on. Replaced with a
+    plain, independent watchdog task (asyncio.sleep + kill, no cancellation
+    involved at all).
+
+    Separately (found while testing the fix above): asyncio.subprocess.
+    Process.kill() only signals the immediate `sh -c` wrapper — confirmed
+    live that `/bin/sh -c` FORKS a real child for basically any external
+    command (not just multi-command scripts; even a single bare command
+    like "sleep 5" gets its own child PID here, not an exec() replacement).
+    The child inherits the wrapper's own stdout/stderr pipe file
+    descriptors, so if we kill only the wrapper, that orphaned child keeps
+    holding the pipe's write end open — and proc.communicate() (what
+    reads that pipe) does not see EOF until EVERY holder of the write end
+    is gone. For a command being killed specifically because it never
+    exits on its own, this means communicate() right after kill() can
+    still hang forever even though the kill "succeeded". kill_process_tree
+    (utils/proc.py) kills the whole spawned tree, not just the wrapper —
+    verified live that communicate() then returns within the same tick."""
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(), timeout=_SHELL_COMMAND_TIMEOUT,
-        )
-        return (
-            stdout_b.decode("utf-8", errors="replace"),
-            stderr_b.decode("utf-8", errors="replace"),
-            proc.returncode,
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return "", f"killed — did not finish within {_SHELL_COMMAND_TIMEOUT}s", None
     except OSError as e:
         return "", str(e), None
+
+    timed_out = False
+
+    async def _watchdog() -> None:
+        nonlocal timed_out
+        await asyncio.sleep(_SHELL_COMMAND_TIMEOUT)
+        if proc.returncode is None:
+            timed_out = True
+            kill_process_tree(proc.pid)
+
+    watchdog = asyncio.create_task(_watchdog())
+    try:
+        stdout_b, stderr_b = await proc.communicate()
+    finally:
+        watchdog.cancel()
+
+    stdout = stdout_b.decode("utf-8", errors="replace")
+    stderr = stderr_b.decode("utf-8", errors="replace")
+    if timed_out:
+        # Not necessarily interactive-input specifically (could just be a
+        # genuinely slow command) — worded as a hint, not a diagnosis, since
+        # this tool has no way to actually tell the difference.
+        note = (
+            f"[killed — did not finish within {_SHELL_COMMAND_TIMEOUT}s. If "
+            "it was waiting for input, this terminal's keyboard doesn't "
+            "reach it live while it's captured this way — rerun it "
+            "non-interactively instead (pipe the input in: `echo ... | "
+            "cmd`, redirect from a file: `cmd < input.txt`, or use "
+            "command-line flags/args instead of a stdin prompt). Output "
+            "captured before it was killed is shown above, if any.]"
+        )
+        stderr = f"{stderr}\n{note}" if stderr else note
+        return stdout, stderr, None
+    return stdout, stderr, proc.returncode
 
 
 def _format_bash_transcript(command: str, stdout: str, stderr: str, returncode: int | None) -> str:
