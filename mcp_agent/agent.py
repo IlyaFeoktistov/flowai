@@ -205,6 +205,20 @@ async def _stream_round(
             ):
                 if mode == "messages":
                     msg_chunk, _meta = payload
+                    # Live bug (user report): the live token counter only
+                    # ticked on msg_chunk.content (plain text) — a tool call
+                    # being generated (write_file's whole new file content,
+                    # replace_lines' new_content, ...) is real, often slow,
+                    # generation too, but arrives as tool_call_chunks with
+                    # content usually empty, so the counter looked frozen for
+                    # the entire duration and only jumped once at tool_start
+                    # (mcp_agent/agent.py below), well after the fact. Same
+                    # AIMessageChunk can carry both fields — check
+                    # independently of the content branch below, not elif.
+                    if isinstance(msg_chunk, AIMessageChunk) and msg_chunk.tool_call_chunks and on_event:
+                        arg_text = "".join(tc.get("args") or "" for tc in msg_chunk.tool_call_chunks)
+                        if arg_text:
+                            await on_event({"type": "tool_arg_chunk", "text": arg_text})
                     if isinstance(msg_chunk, AIMessageChunk) and msg_chunk.content:
                         if msg_chunk.id != streaming_msg_id:
                             streaming_msg_id = msg_chunk.id

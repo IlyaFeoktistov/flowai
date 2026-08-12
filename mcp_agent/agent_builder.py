@@ -284,9 +284,20 @@ async def _build_tools(repo_path: str | None = None):
     tools = [_wrap_read_invalidation(t, read_history) for t in tools]
     tools = [_wrap_read_invalidation(t, line_content_cache) for t in tools]
     tools = [_add_verify_reminder(t) if t.name in ("write_file", "edit_file", "replace_lines", "copy_lines", "insert_lines") else t for t in tools]
-    tools = [_require_expected_lines(t, read_history) if t.name in ("replace_lines", "copy_lines", "insert_lines") else t for t in tools]
-    # Outer layer относительно _require_expected_lines — см. докстринг
-    # _autofill_expected_lines для почему именно в этом порядке.
+    # _require_expected_lines TEMPORARILY DISABLED (20260812): now that
+    # replace_lines/insert_lines/copy_lines check expected_*_hash against
+    # the real line content (fs_extra_server.py) instead of full line text,
+    # live runs show the model landing on the right lines far more often —
+    # but it also frequently just omits expected_*_hash on calls where
+    # _autofill_expected_lines below has no cache hit (range not read this
+    # turn), and the hard "required" rejection this wrapper used to add on
+    # top burned a turn on an edit that would otherwise have gone through
+    # fine unverified. fs_extra_server.py's own hash check still runs
+    # whenever a value IS passed (by the model or by autofill below) — this
+    # only removes the wrapper that made passing one mandatory. Re-enable
+    # by uncommenting the line below if blind/stale edits become a problem
+    # again without it.
+    # tools = [_require_expected_lines(t, read_history) if t.name in ("replace_lines", "copy_lines", "insert_lines") else t for t in tools]
     tools = [
         _autofill_expected_lines(t, line_content_cache) if t.name in ("replace_lines", "copy_lines", "insert_lines") else t
         for t in tools
@@ -642,7 +653,18 @@ async def _build_agent(repo_path: str | None = None):
     # инстанс, никакой второй подгрузки весов), а tools-кэш собирается один
     # раз на процесс, ещё до выбора модели. voice_mode пропускает его по
     # той же причине, что и остальные тулы, — пустой список.
-    agent_tools = [] if voice_mode else tools + [build_delegate_tool(model, full_tools)]
+    #
+    # ПЕРВЫМ в списке (не последним, как было) — тот же живой прогон
+    # (20260812, XOR-в-Go задача), что и переупорядочивание write_file в
+    # optimized_tools.py: tools_available залогировал delegate ПОСЛЕДНИМ
+    # из ~20 тулов (просто дописан в конец списка), а delegate_tool.py's
+    # docstring (см. delegate_nudge middleware ниже) отдельно фиксирует,
+    # что модель почти никогда не вызывает его сама, даже когда задача явно
+    # многофайловая. Позиционное смещение LLM tool-choice к тулам В НАЧАЛЕ
+    # списка — тот же эффект, что подтолкнул write_file быть overused —
+    # здесь стоит развернуть в пользу delegate, а не оставлять его в самом
+    # невыгодном месте.
+    agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools)] + tools
 
     # Отдельный от "tools_loaded" в _build_tools лог — тот пишется ДО
     # optimized_tools/voice_mode/delegate, то есть показывает "что подняли из

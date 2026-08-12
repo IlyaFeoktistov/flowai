@@ -80,6 +80,20 @@ model_config.py) и пропускает ОБА пути (write-triggered и per
 если контекст ещё далеко не заполнен. settings.compact_history_enabled — общий
 выключатель поверх этого (/settings), на случай если даже гейтед-по-размеру
 компакт где-то потеряет для конкретной задачи что-то важное.
+
+Живой прогон #6 (XOR-на-Go задача, 20260812): _needs_compaction сравнивал
+объём истории с OLLAMA_NUM_CTX*COMPACT_HISTORY_CTX_RATIO — той же
+захардкоженной-на-импорте константой (65536 по умолчанию), а не с
+settings.get("num_ctx"), реально переданным в ChatOllama для этой чат/
+judge-модели (agent_builder.py:_build_chat_model). num_ctx на этом прогоне
+был занижен до 16384 (см. settings.py, тестировали expert_streaming_enabled)
+— порог компакта получился 32768, вдвое больше реального окна модели.
+Компакт не сработал НИ РАЗУ за весь ~14-минутный ход (3393 сообщения),
+модель потеряла ориентацию в файле и один раз выдумала expected_first_hash,
+которого не было ни в одном её собственном read_file_range. _needs_
+compaction и num_ctx в options _summarize_research теперь читают
+settings.get("num_ctx") — тот же параметр, что реально уходит в Ollama для
+этого вызова, а не отдельную, независимо выставленную константу.
 """
 import hashlib
 import json
@@ -90,7 +104,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from mcp_agent.debug_log import log_event
 from mcp_agent.message_utils import _tool_text
-from mcp_agent.model_config import COMPACT_HISTORY_CTX_RATIO, DEBUG, OLLAMA_NUM_CTX
+from mcp_agent.model_config import COMPACT_HISTORY_CTX_RATIO, DEBUG
 from mcp_agent.self_heal import _failed_write_messages
 from ui.console import console
 from utils.parsing import parse_json_loose
@@ -238,9 +252,24 @@ def _needs_compaction(messages: list) -> bool:
     "there's a successful write in history" trigger (live-run 20260810: a
     3-message, ~1-2k-token prefix got compacted into a 108-char digest for
     zero real benefit, purely because a write had happened, not because
-    context was anywhere near full)."""
+    context was anywhere near full).
+
+    Threshold is settings.get("num_ctx") — the value actually handed to
+    ChatOllama for this session's chat/judge model (agent_builder.py:
+    _build_chat_model) — NOT model_config.OLLAMA_NUM_CTX. That constant is
+    read once at import and frozen; num_ctx is a runtime-editable setting
+    (see its own docstring in settings.py) that can sit well below it. Live
+    run (20260812, XOR-in-Go task): num_ctx had been lowered to 16384
+    (leftover from an expert_streaming_enabled test) while this gate still
+    compared against OLLAMA_NUM_CTX=65536 — the threshold ended up at
+    32768, TWICE the model's actual window, so compaction never fired for
+    the whole ~14-minute run and the model eventually lost track of the
+    file (hallucinated a expected_first_hash that appears nowhere in its
+    own read history). Compaction's whole job is protecting THIS call's
+    real context, so it must measure against the same number that call
+    actually uses."""
     total = sum(_estimate_message_tokens(m) for m in messages)
-    return total > OLLAMA_NUM_CTX * COMPACT_HISTORY_CTX_RATIO
+    return total > settings.get("num_ctx") * COMPACT_HISTORY_CTX_RATIO
 
 
 def _group_turns(messages: list) -> list[list]:
@@ -333,13 +362,18 @@ async def _summarize_research(judge_model, prefix: list) -> str:
         # more room than a binary verdict. num_keep gets re-injected
         # automatically by _ChatOllamaWithNumKeep._chat_params regardless of
         # what's passed here (see agent_builder.py), so it doesn't need to
-        # be repeated in this dict.
+        # be repeated in this dict. num_ctx here must match settings.get(
+        # "num_ctx") — judge_model itself was already built with that value
+        # (agent_builder.py:_build_chat_model); passing the stale
+        # model_config.OLLAMA_NUM_CTX constant here would silently ask
+        # Ollama to re-negotiate a different context size than the one the
+        # rest of this session's judge-model calls use, for this one call.
         resp = await judge_model.ainvoke(
             [
                 {"role": "system", "content": _COMPACT_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            options={"num_ctx": OLLAMA_NUM_CTX, "num_predict": 600},
+            options={"num_ctx": settings.get("num_ctx"), "num_predict": 600},
         )
         data = parse_json_loose(resp.content) or {}
         findings = str(data.get("findings") or "").strip()

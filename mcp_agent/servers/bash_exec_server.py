@@ -170,8 +170,23 @@ async def bash_exec(command: str, timeout: int = TIMEOUT) -> str:
     effective_timeout = max(1, min(int(timeout), MAX_TIMEOUT))
 
     try:
+        # stdin=DEVNULL — БЕЗ этого create_subprocess_shell оставляет
+        # дочернему процессу stdin ЭТОГО (bash_exec_server'а) процесса как
+        # есть, то есть настоящий терминальный stdin (stdio-транспорт MCP,
+        # см. модульный docstring). Живой инцидент (20260812): скомпилированный
+        # Go-бинарник читал ввод через bufio.NewReader(os.Stdin) — bash_exec
+        # его честно запустил и завис на 60-секундном таймауте... кроме
+        # того, что таймаут не успел сработать (родительский процесс
+        # оборвался раньше), и осиротевший бинарник остался висеть НАПРЯМУЮ
+        # на реальном терминале пользователя (pts/3), блокируя его вплоть до
+        # ручного kill -9. С DEVNULL любое чтение stdin получает
+        # МГНОВЕННЫЙ EOF вместо зависания — интерактивная программа тут же
+        # падает с понятной ошибкой (модель это видит и может поправить
+        # программу или передать вход через pipe/`<file`), а не блокируется
+        # незаметно на неопределённый срок, воруя чужой терминал в придачу.
         proc = await asyncio.create_subprocess_shell(
             command,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

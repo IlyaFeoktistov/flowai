@@ -82,6 +82,24 @@ OPTIMIZED_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
+# Приоритет ТОЛЬКО для "write"-семейства (см. докстринг модуля выше про
+# edit_file) — сортировка стабильна, так что порядок всего остального
+# сохраняется как есть, меняется только позиция write_file относительно
+# replace_lines/insert_lines/copy_lines. Живой прогон (20260812, XOR-в-Go
+# задача): tools_available залогировал write_file ПЕРВЫМ из 20 тулов —
+# чистая случайность порядка регистрации MCP-серверов (filesystem-сервер
+# первым в build_mcp_connections), а не решение — replace_lines/
+# insert_lines/copy_lines оказались на местах 16-18, почти в конце. Модель
+# в этом же прогоне трижды перезаписала файл целиком через write_file
+# вместо точечной правки, один раз со случайной потерей большей части
+# содержимого файла при реконструкции по памяти. Известное свойство
+# LLM-tool-choice — смещение к тулам, стоящим раньше в списке, особенно
+# под неопределённостью/после отказов — здесь работало ровно в обратную
+# сторону от желаемого: узкий, безопасный точечный инструмент должен идти
+# раньше тупого "перепиши всё", а не после него.
+_WRITE_FAMILY_PRIORITY = {"replace_lines": 0, "insert_lines": 0, "copy_lines": 0, "write_file": 1}
+
+
 def build_optimized_tools(tools: list) -> tuple[list, dict]:
     """Фильтрует уже загруженный и обёрнутый список тулов (agent_builder.py:
     _get_tools — dedupe/verify-reminder/snapshot-обёртки уже применены к
@@ -89,4 +107,5 @@ def build_optimized_tools(tools: list) -> tuple[list, dict]:
     подмножество, ничего пересобирать не нужно) под OPTIMIZED_TOOL_NAMES.
     Возвращает (tools, tools_by_name) — та же форма, что _get_tools()."""
     filtered = [t for t in tools if t.name in OPTIMIZED_TOOL_NAMES]
+    filtered.sort(key=lambda t: _WRITE_FAMILY_PRIORITY.get(t.name, -1))
     return filtered, {t.name: t for t in filtered}

@@ -15,23 +15,32 @@
 - _add_verify_reminder/_add_glob_warning/_add_regex_warning — дописывают
   напоминание/предупреждение прямо в description тула, видимое модели ДО
   вызова.
-- _require_expected_lines — делает expected_first_line/expected_last_line/
-  expected_line ОБЯЗАТЕЛЬНЫМИ для replace_lines/copy_lines/insert_lines
+- _require_expected_lines — делает expected_first_hash/expected_last_hash/
+  expected_hash ОБЯЗАТЕЛЬНЫМИ для replace_lines/copy_lines/insert_lines
   (в схеме тула они опциональны) — без них правка по номерам строк
   выполняется вслепую, без проверки актуальности после сдвига от
-  предыдущей правки. Также считает по turn_state (= read_history с другим
+  предыдущей правки. Хеш (utils/parsing.py:line_hash), не полный текст
+  строки — модели ненадёжно ДОСЛОВНО его воспроизвести, короткий хеш
+  скопировать проще. Также считает по turn_state (= read_history с другим
   namespace ключей), сколько раз за ход каждый из этих тулов словил
   несовпадение строки/формата, и с 1-й же ошибки усиливает подсказку.
+  ВРЕМЕННО ОТКЛЮЧЕНА (см. agent_builder.py:_build_tools, строка с
+  закомментированным вызовом) — с переходом на хеш модель стала чаще
+  попадать в нужные строки, но и чаще просто не передаёт expected_*_hash,
+  а этот тул раньше жёстко валил такой вызов ошибкой "required" вместо
+  того чтобы просто отредактировать. Проверка в fs_extra_server.py
+  (сравнение хеша, ЕСЛИ он передан) продолжает работать как есть — это
+  ниже, отдельно от этой обёртки.
 - _cache_line_content_tool/_autofill_expected_lines — модель на живых
-  прогонах регулярно НЕ может корректно перепечатать expected_first_line/
-  expected_last_line/expected_line (весь старый многострочный блок, пустая
+  прогонах регулярно НЕ может корректно перепечатать expected_first_hash/
+  expected_last_hash/expected_hash (весь старый многострочный блок, пустая
   строка после отказа, и т.п.), даже когда только что сама прочитала
   нужный диапазон. Первая кэширует реальное содержимое строк с диска после
   каждого удачного read_file/read_text_file/read_file_range/
   read_multiple_files; вторая при вызове replace_lines/insert_lines/
-  copy_lines подставляет expected_*_line из этого кэша сама, если диапазон
-  им покрыт — вместо того чтобы полагаться на то, что модель донесёт его
-  без искажений. Промах кэша падает обратно на _require_expected_lines.
+  copy_lines сама считает expected_*_hash от этого кэша — вместо того
+  чтобы полагаться на то, что модель донесёт его без искажений. Промах
+  кэша падает обратно на _require_expected_lines.
 - _bind_constant_args — прячет от модели аргументы, значение которых и так
   константно на всю сессию (repo_path у git-тулов).
 """
@@ -41,6 +50,7 @@ import re
 from langchain_core.tools import BaseTool, StructuredTool
 
 from mcp_agent.message_utils import _content_text
+from utils.parsing import line_hash
 
 # Голова получает больше бюджета, чем хвост (60/40) — там обычно заголовок/
 # аргументы команды, но хвост остаётся достаточно большим, чтобы вместить
@@ -462,30 +472,40 @@ def _add_regex_warning(tool: BaseTool) -> BaseTool:
 def _is_line_mismatch_error(text: str) -> bool:
     t = text.lstrip()
     return t.startswith("Error") and (
-        "expected_first_line" in t or "expected_last_line" in t or "expected_line" in t
+        "expected_first_hash" in t or "expected_last_hash" in t or "expected_hash" in t
     )
 
 
 def _require_expected_lines(tool: BaseTool, turn_state: dict) -> BaseTool:
-    """replace_lines/copy_lines (expected_first_line/expected_last_line) и
-    insert_lines (expected_line) — все три принимают их как ОПЦИОНАЛЬНЫЕ
+    """replace_lines/copy_lines (expected_first_hash/expected_last_hash) и
+    insert_lines (expected_hash) — все три принимают их как ОПЦИОНАЛЬНЫЕ
     (fs_extra_server.py, default ""), проверка срабатывает только если
     непусто. Промпт везде говорит "ALWAYS pass... every single call, not
     just when unsure" — живой прогон (mail-server, Coder-стадия): 4 подряд
     replace_lines НИ РАЗУ их не передали. Первая правка сдвинула номера
     строк ниже себя, вторая (на СТАРЫХ номерах) попала не туда, третья и
     четвёртая начали чинить друг друга на тех же двух диапазонах взад-
-    вперёд — потому что без expected_*_line тул тихо режет по номерам без
+    вперёд — потому что без expected_*_hash тул тихо режет по номерам без
     единой проверки, что там вообще то, что модель думает. Раз промпт-
     инструкция это не гарантирует, тул сам отказывается работать вслепую —
     громкая ошибка вместо тихой неверной правки, вынуждающая перечитать
     актуальное содержимое перед повтором.
 
+    Изначально это было expected_first_line/expected_last_line/expected_line
+    (полный текст строки) — перешло на короткий хеш (utils/parsing.py:
+    line_hash), не по номеру строки (тот сам дрейфует после правок этого же
+    хода) и не по полному тексту (модели ненадёжно ДОСЛОВНО его
+    воспроизвести — ровно источник обоих живых багов ниже), см.
+    github.com/anthropics/claude-code/issues/25775 про этот же класс
+    решения ("hashline addressing") в чужом проекте. Комментарии про живые
+    баги ниже относятся к старой text-версии проверки, но тот же класс
+    ошибки (сформатировано не так, как тул ожидает) актуален и для хеша.
+
     turn_state — тот же словарь, что read_history (агент_builder.py:
     _build_tools), просто с другим namespace ключей (кортеж вместо пути) —
     он уже чистится в нужные моменты (начало stream_chat, каждый self-heal
     retry в _start_next_attempt), так что отдельный словарь с собственной
-    жизнью заводить не нужно. Считает подряд/за ход рубежи expected_*_line-
+    жизнью заводить не нужно. Считает подряд/за ход рубежи expected_*_hash-
     несовпадений на КАЖДОМ из трёх тулов отдельно и дописывает усиленную
     подсказку с САМОЙ ПЕРВОЙ ошибки формата, не дожидаясь повтора. Живой
     прогон (some-site, styles.css): один и тот же класс ошибки
@@ -497,9 +517,8 @@ def _require_expected_lines(tool: BaseTool, turn_state: dict) -> BaseTool:
     себе было понятным и точным, но ничего не заставляло модель заметить
     повторяющийся ПАТТЕРН между попытками достаточно рано; она каждый раз
     чинила только номер строки, а не сам формат аргумента. Раз конкретно
-    этот класс ошибки (многострочный expected_*_line вместо одной строки)
-    почти никогда не проходит бесследно сам собой на следующей попытке —
-    эскалация не ждёт повтора."""
+    этот класс ошибки почти никогда не проходит бесследно сам собой на
+    следующей попытке — эскалация не ждёт повтора."""
     original_coroutine = tool.coroutine
     if original_coroutine is None:
         return tool
@@ -518,8 +537,10 @@ def _require_expected_lines(tool: BaseTool, turn_state: dict) -> BaseTool:
                 "to target, confirm it's the right SELECTOR/SYMBOL and not a "
                 "similarly-named one nearby (e.g. '.container' vs "
                 "'.nav-container' vs '.hero-container' are different rules at "
-                "different lines), then copy that ONE line's exact text into "
-                "expected_first_line/expected_last_line/expected_line.]"
+                "different lines), then copy that ONE line's hash (ONLY "
+                "what's inside the brackets in read_file_range's "
+                "\"N [HHHH] ...\" output) into "
+                "expected_first_hash/expected_last_hash/expected_hash.]"
             )
             if isinstance(content, list):
                 content = [*content, {"type": "text", "text": hint}]
@@ -534,32 +555,34 @@ def _require_expected_lines(tool: BaseTool, turn_state: dict) -> BaseTool:
     # валидации формата раньше, чем модель вообще увидит текст ошибки.
     if tool.name == "insert_lines":
         async def _call(**kwargs):
-            if not kwargs.get("expected_line") and kwargs.get("line", -1) != 0:
+            if not kwargs.get("expected_hash") and kwargs.get("line", -1) != 0:
                 return _with_escalation(
-                    "Error: expected_line is required (unless line=0, appending "
-                    "at the very end) — pass the EXACT current text of the line "
-                    "you're inserting before, verbatim from a recent "
-                    "read_file_range/read_file result. This tool refuses to "
-                    "insert blind: if the file shifted since you last read it "
-                    "(e.g. from an earlier edit to it this same turn), re-read "
-                    "it with read_file_range first to get the current line "
-                    "number and text, then retry with expected_line set.",
+                    "Error: expected_hash is required (unless line=0, appending "
+                    "at the very end) — pass ONLY the 4-char hash read_file_range "
+                    "showed in brackets next to the line you're inserting before "
+                    "(\"N [HHHH] ...\"), not the brackets/line number/line text, "
+                    "from a recent read_file_range result. This tool refuses to insert blind: "
+                    "if the file shifted since you last read it (e.g. from an "
+                    "earlier edit to it this same turn), re-read it with "
+                    "read_file_range first to get the current line number and "
+                    "hash, then retry with expected_hash set.",
                     None,
                 )
             content, artifact = await original_coroutine(**kwargs)
             return _with_escalation(content, artifact)
     else:  # replace_lines, copy_lines
         async def _call(**kwargs):
-            if not kwargs.get("expected_first_line") or not kwargs.get("expected_last_line"):
+            if not kwargs.get("expected_first_hash") or not kwargs.get("expected_last_hash"):
                 return _with_escalation(
-                    "Error: expected_first_line AND expected_last_line are both "
-                    "required — pass the EXACT current text of the first and "
-                    "last line of the range, verbatim from a recent "
-                    "read_file_range/read_file result. This tool refuses to "
-                    "edit blind: if the file shifted since you last read it "
-                    "(e.g. from an earlier edit to it this same turn), re-read "
-                    "it with read_file_range first to get the current line "
-                    "numbers and text, then retry with both set.",
+                    "Error: expected_first_hash AND expected_last_hash are both "
+                    "required — pass ONLY the 4-char hash read_file_range showed "
+                    "in brackets next to the first and last line of the range "
+                    "(\"N [HHHH] ...\"), not the brackets/line number/line text, "
+                    "from a recent read_file_range result. This "
+                    "tool refuses to edit blind: if the file shifted since you "
+                    "last read it (e.g. from an earlier edit to it this same "
+                    "turn), re-read it with read_file_range first to get the "
+                    "current line numbers and hashes, then retry with both set.",
                     None,
                 )
             content, artifact = await original_coroutine(**kwargs)
@@ -669,8 +692,8 @@ def _lookup_cached_lines(cache: dict, path: str, lo: int, hi: int) -> list[str] 
 def _autofill_expected_lines(tool: BaseTool, cache: dict) -> BaseTool:
     """Live runs (theme-toggle task, twice): the model reliably FOUND the
     right line range (read_file_range right before editing, sometimes even
-    on the correct line) but unreliably TRANSCRIBED expected_first_line/
-    expected_last_line/expected_line into the next call — passing the whole
+    on the correct line) but unreliably TRANSCRIBED expected_first_hash/
+    expected_last_hash/expected_hash into the next call — passing the whole
     multi-line new_content block instead, or the whole old block, or (after
     a rejection) just omitting the field outright, sometimes 3+ times in a
     row without ever converging on 'the one line the tool itself just
@@ -680,20 +703,22 @@ def _autofill_expected_lines(tool: BaseTool, cache: dict) -> BaseTool:
     Since the exact current text at any [start_line, end_line]/line the
     model JUST read this turn is already known — from _cache_line_content_
     tool above, itself read straight off disk — there's no need to trust a
-    retyped copy of it when one is available: this wrapper overwrites
-    whatever the model passed (right, wrong, or empty) with the cached
-    text whenever the requested range is fully covered by the model's own
-    most recent read of that path. This does not weaken the staleness
-    check _require_expected_lines/fs_extra_server.py's own comparison
-    still perform — `cache` is invalidated (see _wrap_read_invalidation in
-    agent_builder.py) on every successful write to the path, so a hit here
-    always reflects a read that is still current, not a stale one; a MISS
-    (range not covered, or covered by a since-invalidated entry) falls
-    through unchanged to _require_expected_lines, which still refuses to
-    edit blind and asks for a fresh read_file_range. Must run AFTER
-    _require_expected_lines in the wrapping order (i.e. applied to the
-    tool list AFTER it) so this filled-in value reaches that gate BEFORE
-    it decides whether expected_*_line is missing."""
+    retyped copy of it when one is available: this wrapper computes the
+    hash itself (utils.parsing.line_hash, same function fs_extra_server.py
+    verifies against) and overwrites whatever the model passed (right,
+    wrong, or empty) whenever the requested range is fully covered by the
+    model's own most recent read of that path. This does not weaken the
+    staleness check _require_expected_lines/fs_extra_server.py's own
+    comparison still perform — `cache` is invalidated (see
+    _wrap_read_invalidation in agent_builder.py) on every successful write
+    to the path, so a hit here always reflects a read that is still
+    current, not a stale one; a MISS (range not covered, or covered by a
+    since-invalidated entry) falls through unchanged to
+    _require_expected_lines, which still refuses to edit blind and asks
+    for a fresh read_file_range. Must run AFTER _require_expected_lines in
+    the wrapping order (i.e. applied to the tool list AFTER it) so this
+    filled-in value reaches that gate BEFORE it decides whether
+    expected_*_hash is missing."""
     original_coroutine = tool.coroutine
     if original_coroutine is None:
         return tool
@@ -707,13 +732,13 @@ def _autofill_expected_lines(tool: BaseTool, cache: dict) -> BaseTool:
                 if line:
                     hit = _lookup_cached_lines(cache, path, line, line)
                     if hit:
-                        kwargs = {**kwargs, "expected_line": hit[0]}
+                        kwargs = {**kwargs, "expected_hash": line_hash(hit[0])}
             else:  # replace_lines, copy_lines
                 start_line, end_line = kwargs.get("start_line"), kwargs.get("end_line")
                 if start_line is not None and end_line is not None:
                     hit = _lookup_cached_lines(cache, path, start_line, end_line)
                     if hit:
-                        kwargs = {**kwargs, "expected_first_line": hit[0], "expected_last_line": hit[-1]}
+                        kwargs = {**kwargs, "expected_first_hash": line_hash(hit[0]), "expected_last_hash": line_hash(hit[-1])}
         return await original_coroutine(**kwargs)
 
     return StructuredTool(

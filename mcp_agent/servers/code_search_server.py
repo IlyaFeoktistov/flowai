@@ -11,10 +11,17 @@ tools/code_search.py как есть, просто через MCP-транспо
 Запуск: python3 -m mcp_agent.servers.code_search_server
 """
 import asyncio
+import os
 import re
 import shutil
+import sys
 
-from mcp.server.fastmcp import FastMCP
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _PROJECT_ROOT)
+
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+from utils.parsing import line_hash  # noqa: E402
 
 mcp = FastMCP("code_search")
 
@@ -210,7 +217,17 @@ async def read_file_range(path: str, start_line: int, end_line: int) -> str:
     already know roughly where the relevant code is — a line number from
     search_code/search_symbols, a stack trace, or a diff hunk header — so you
     don't have to guess a head/tail size and re-read overlapping chunks of
-    the same file to home in on it."""
+    the same file to home in on it.
+
+    Each line is shown as "N [HHHH] content" — N is the line number, HHHH
+    (inside the brackets, 4 hex chars, nothing else) is a short content
+    hash. Copy ONLY what's inside the brackets into replace_lines/
+    insert_lines/copy_lines' expected_first_hash/expected_last_hash/
+    expected_hash — those tools check it instead of the full line text, so
+    a stale edit (file changed, or an earlier edit this turn shifted every
+    line number after it) fails loudly with a hash mismatch instead of
+    silently landing on the wrong line. Do NOT include "N ", the brackets
+    themselves, or the line content — just the 4 characters between them."""
     if start_line < 1 or end_line < start_line:
         return "Error: start_line must be >= 1 and end_line >= start_line"
     if end_line - start_line + 1 > MAX_RANGE_LINES:
@@ -226,7 +243,10 @@ async def read_file_range(path: str, start_line: int, end_line: int) -> str:
         return f"Error: file has only {total} lines, start_line={start_line} is past the end"
 
     selected = lines[start_line - 1:end_line]
-    numbered = [f"{start_line + i}. {line.rstrip(chr(10))}" for i, line in enumerate(selected)]
+    numbered = [
+        f"{start_line + i} [{line_hash(line)}] {line.rstrip(chr(10))}"
+        for i, line in enumerate(selected)
+    ]
     result = "\n".join(numbered)
     if end_line > total:
         result += f"\n\n[end_line {end_line} is past the end — file has {total} lines, showing through EOF]"

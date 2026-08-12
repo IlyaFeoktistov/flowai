@@ -35,6 +35,7 @@ search_files дописывается предупреждением, а не н
 Запуск: python3 -m mcp_agent.servers.fs_extra_server
 """
 import os
+import re
 import shutil
 import sys
 import uuid
@@ -46,7 +47,7 @@ sys.path.insert(0, _PROJECT_ROOT)
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from storage import connect, data_dir  # noqa: E402
-from utils.parsing import unified_diff_at  # noqa: E402
+from utils.parsing import line_hash, unified_diff_at  # noqa: E402
 
 mcp = FastMCP("fs_extra")
 
@@ -139,56 +140,65 @@ async def restore_deleted_path(trash_id: int) -> str:
     return f"Restored {original_path!r} from trash."
 
 
-def _multiline_guard(*named_values: tuple[str, str]) -> str:
-    """Catches the single most common misuse of expected_*_line: passing the
-    whole old multi-line block (e.g. reused from a previous read or diff)
-    instead of just the ONE line at that position. A multi-line value can
-    never equal a single `line.rstrip("\\n")` from the file, so without this
-    guard the call always fails downstream — but that mismatch error talks
-    about "the file changed / line numbers shifted", which sends the model
-    chasing the wrong cause (recounting start_line) instead of the real one
-    (wrong argument shape). Live run (some-site, styles.css): the model
-    passed the entire 6-line old .container block as expected_first_line
-    three separate times, each time "fixing" start_line instead of the
-    actual bug, before giving up on this tool entirely."""
+_HASH_RE = re.compile(r"^[0-9a-f]{4}$")
+
+
+def _hash_guard(*named_values: tuple[str, str]) -> str:
+    """Catches an obviously-wrong expected_*_hash value early — anything
+    that isn't a bare 4-hex-char token (exactly what's inside the brackets
+    in read_file_range's "N [HHHH] ..." output) is either a full line of
+    text left over from before this tool switched to hash-based
+    verification, or something typed/guessed instead of copied. Failing
+    here with a specific reason beats the generic hash-mismatch error
+    below, which would otherwise send the model chasing the wrong cause
+    (recounting line numbers) instead of the real one (wrong argument
+    shape) — the same live-bug pattern that used to hit the old
+    expected_*_line text field.
+
+    Live run (20260812, XOR-in-Go task): even with the bracket format, the
+    model twice passed "155:d8e9|" / "170:c8a0|" — the whole old
+    colon/pipe-glued token verbatim, not just the hash — so the format
+    itself was changed (brackets, not colon+pipe) to make the boundary of
+    "just the hash" visually unambiguous, on top of this guard."""
     for name, value in named_values:
-        if "\n" in value:
-            n = value.count("\n") + 1
+        if value and not _HASH_RE.match(value):
             return (
-                f"Error: {name} must be the exact text of a SINGLE line — you "
-                f"passed {n} lines instead (looks like the whole old block "
-                f"you're replacing). Pass ONLY the one line at that exact "
-                f"position, not the range."
+                f"Error: {name} must be the exact 4-character hash "
+                f"read_file_range showed in brackets next to that line "
+                f"(e.g. \"a3f2\" from \"N [a3f2] ...\"), not the line's text, "
+                f"its line number, or the brackets themselves — copy ONLY "
+                f"what's between the brackets, from that tool's most recent "
+                f"output for this exact line."
             )
     return ""
 
 
-def _suggest_range(lines: list[str], expected_first_line: str, expected_last_line: str) -> str:
-    """Best-effort: if the (first, last) line pair the model expects still
-    exists elsewhere in the CURRENT file, say where. Turns a bare mismatch
-    into an actionable correction instead of forcing another blind read+
-    recount round-trip — the file already contains the answer, no need to
-    make the model guess again."""
-    starts = [i for i, l in enumerate(lines) if l.rstrip("\n") == expected_first_line]
+def _suggest_range(lines: list[str], expected_first_hash: str, expected_last_hash: str) -> str:
+    """Best-effort: if a line matching the (first, last) hash pair the model
+    expects still exists elsewhere in the CURRENT file, say where. Turns a
+    bare mismatch into an actionable correction instead of forcing another
+    blind read+recount round-trip — the file already contains the answer,
+    no need to make the model guess again."""
+    starts = [i for i, l in enumerate(lines) if line_hash(l) == expected_first_hash]
     if not starts:
         return ""
-    if expected_first_line == expected_last_line:
-        return f" Found that exact line at line {starts[0] + 1} instead — did you mean start_line={starts[0] + 1}?"
+    if expected_first_hash == expected_last_hash:
+        return f" Found a line with that hash at line {starts[0] + 1} instead — did you mean start_line={starts[0] + 1}?"
     for i in starts:
         for j in range(i, min(i + 500, len(lines))):
-            if lines[j].rstrip("\n") == expected_last_line:
-                return f" Found that line pair at lines {i + 1}-{j + 1} instead — did you mean start_line={i + 1}, end_line={j + 1}?"
+            if line_hash(lines[j]) == expected_last_hash:
+                return f" Found a matching line pair at lines {i + 1}-{j + 1} instead — did you mean start_line={i + 1}, end_line={j + 1}?"
     return ""
 
 
 def _duplicate_block_warning(lines: list[str], new_lines: list[str], insert_at: int, window: int = 80, min_run: int = 3) -> str:
     """Live incident: insert_lines was called with the CORRECT target line
-    (right before an existing `const TokenTtl = 15`), so expected_line
+    (right before an existing `const TokenTtl = 15`), so expected_hash
     matched and the call succeeded — but new_content had been "reconstructed"
     from memory as a whole desired end-state (import block + two new
     functions + that same const) instead of ONLY the two new functions,
     duplicating an 8-line import block that already existed a few lines
-    above. expected_line only checks the ONE anchor line, so it cannot catch
+    above. expected_hash only checks the ONE anchor line, so it cannot catch
     this class of mistake at all. Scans a small window of the file around the
     insertion point for a run of >= min_run consecutive lines that's already
     identical inside new_content — a near-certain sign of exactly that
@@ -221,11 +231,11 @@ def _duplicate_block_warning(lines: list[str], new_lines: list[str], insert_at: 
     return ""
 
 
-def _suggest_line(lines: list[str], expected: str) -> str:
-    matches = [i for i, l in enumerate(lines) if l.rstrip("\n") == expected]
+def _suggest_line(lines: list[str], expected_hash: str) -> str:
+    matches = [i for i, l in enumerate(lines) if line_hash(l) == expected_hash]
     if not matches:
         return ""
-    return f" Found that exact line at line {matches[0] + 1} instead — did you mean line={matches[0] + 1}?"
+    return f" Found a line with that hash at line {matches[0] + 1} instead — did you mean line={matches[0] + 1}?"
 
 
 @mcp.tool()
@@ -234,8 +244,8 @@ async def replace_lines(
     start_line: int,
     end_line: int,
     new_content: str,
-    expected_first_line: str = "",
-    expected_last_line: str = "",
+    expected_first_hash: str = "",
+    expected_last_hash: str = "",
 ) -> str:
     """Replace an EXACT [start_line, end_line] range (1-indexed, inclusive)
     with new_content — the PREFERRED way to edit an existing file whenever
@@ -244,21 +254,23 @@ async def replace_lines(
     NEVER need to reproduce the file's existing content — only the NEW
     lines — cutting the code you generate roughly in half and eliminating
     the byte-for-byte oldText matching that regularly fails on quoting/
-    escaping. Pass expected_first_line/expected_last_line (the exact text
-    of those two lines as you last saw them) to catch a stale line range —
-    the file changed since you read it, or an earlier edit in this same
-    turn shifted line numbers; the call then fails loudly with the file's
-    ACTUAL current content at that range instead of silently overwriting
-    the wrong lines. Leave them empty only when you just read this exact
-    range in this same turn. Pass new_content='' to delete the range
-    outright. Returns a diff of what actually changed — check it matches
-    your intent before reporting success."""
+    escaping. Pass expected_first_hash/expected_last_hash — ONLY the 4-char
+    hash read_file_range showed in brackets next to those two lines
+    ("N [HHHH] ..."), not the brackets/line number/line text — to catch a
+    stale line range: the
+    file changed since you read it, or an earlier edit in this same turn
+    shifted line numbers; the call then fails loudly with the file's ACTUAL
+    current content at that range instead of silently overwriting the wrong
+    lines. Leave them empty only when you just read this exact range in
+    this same turn. Pass new_content='' to delete the range outright.
+    Returns a diff of what actually changed — check it matches your intent
+    before reporting success."""
     path = path.strip()
     if not path:
         return "Error: path is required"
     if start_line < 1 or end_line < start_line:
         return "Error: start_line must be >= 1 and end_line >= start_line"
-    guard = _multiline_guard(("expected_first_line", expected_first_line), ("expected_last_line", expected_last_line))
+    guard = _hash_guard(("expected_first_hash", expected_first_hash), ("expected_last_hash", expected_last_hash))
     if guard:
         return guard
 
@@ -275,22 +287,22 @@ async def replace_lines(
     current_first = lines[start_line - 1].rstrip("\n")
     current_last = lines[end_line - 1].rstrip("\n")
 
-    if expected_first_line and current_first != expected_first_line:
+    if expected_first_hash and line_hash(current_first) != expected_first_hash:
         return (
-            f"Error: line {start_line} doesn't match expected_first_line — the file "
+            f"Error: line {start_line} doesn't match expected_first_hash — the file "
             f"changed since you last read it, or an earlier edit shifted line numbers."
-            f"{_suggest_range(lines, expected_first_line, expected_last_line)}\n"
-            f"Expected: {expected_first_line!r}\n"
-            f"Actual line {start_line}: {current_first!r}\n"
+            f"{_suggest_range(lines, expected_first_hash, expected_last_hash)}\n"
+            f"Expected hash: {expected_first_hash!r}\n"
+            f"Actual line {start_line}: {current_first!r} (hash {line_hash(current_first)!r})\n"
             f"Re-read the current range (read_file_range) before retrying."
         )
-    if expected_last_line and current_last != expected_last_line:
+    if expected_last_hash and line_hash(current_last) != expected_last_hash:
         return (
-            f"Error: line {end_line} doesn't match expected_last_line — the file "
+            f"Error: line {end_line} doesn't match expected_last_hash — the file "
             f"changed since you last read it, or an earlier edit shifted line numbers."
-            f"{_suggest_range(lines, expected_first_line, expected_last_line)}\n"
-            f"Expected: {expected_last_line!r}\n"
-            f"Actual line {end_line}: {current_last!r}\n"
+            f"{_suggest_range(lines, expected_first_hash, expected_last_hash)}\n"
+            f"Expected hash: {expected_last_hash!r}\n"
+            f"Actual line {end_line}: {current_last!r} (hash {line_hash(current_last)!r})\n"
             f"Re-read the current range (read_file_range) before retrying."
         )
 
@@ -319,7 +331,7 @@ async def insert_lines(
     path: str,
     line: int,
     new_content: str,
-    expected_line: str = "",
+    expected_hash: str = "",
 ) -> str:
     """Insert new_content as new lines BEFORE `line` (1-indexed) in path,
     WITHOUT touching or replacing any existing line — the tool for adding
@@ -332,19 +344,21 @@ async def insert_lines(
     replace_lines(start_line=end_line=N, new_content=<line N verbatim> +
     '\\n' + <new code>) requires reproducing line N byte-for-byte, and
     getting that wrong either duplicates or silently drops it. Pass
-    expected_line (the exact current text of the line you intend to insert
-    before, as you last read it) to catch a stale line number — an earlier
-    edit in this same turn shifted every line number after it, and a
-    mismatch here fails loudly with the file's actual content instead of
-    inserting at the wrong spot. Leave it empty only for line=0 (append) or
-    when you just read this exact line in this same turn. Returns a diff of
-    what was inserted — check it lands where you intended."""
+    expected_hash — ONLY the 4-char hash read_file_range showed in brackets
+    next to the line you intend to insert before ("N [HHHH] ..."), not the
+    brackets/line number/line text — to catch a stale line number: an
+    earlier edit in this same turn shifted every line number after it, and
+    a mismatch here fails loudly with the file's actual content instead of
+    inserting at the wrong
+    spot. Leave it empty only for line=0 (append) or when you just read
+    this exact line in this same turn. Returns a diff of what was inserted
+    — check it lands where you intended."""
     path = path.strip()
     if not path:
         return "Error: path is required"
     if line < 0:
         return "Error: line must be >= 0 (0 = append at end of file)"
-    guard = _multiline_guard(("expected_line", expected_line))
+    guard = _hash_guard(("expected_hash", expected_hash))
     if guard:
         return guard
 
@@ -363,14 +377,14 @@ async def insert_lines(
         insert_at = line - 1
         if insert_at < total:
             current = lines[insert_at].rstrip("\n")
-            if expected_line and current != expected_line:
+            if expected_hash and line_hash(current) != expected_hash:
                 return (
-                    f"Error: line {line} doesn't match expected_line — the file "
+                    f"Error: line {line} doesn't match expected_hash — the file "
                     f"changed since you last read it, or an earlier edit in this "
                     f"same turn shifted line numbers."
-                    f"{_suggest_line(lines, expected_line)}\n"
-                    f"Expected: {expected_line!r}\n"
-                    f"Actual line {line}: {current!r}\n"
+                    f"{_suggest_line(lines, expected_hash)}\n"
+                    f"Expected hash: {expected_hash!r}\n"
+                    f"Actual line {line}: {current!r} (hash {line_hash(current)!r})\n"
                     f"Re-read the current range (read_file_range) before retrying."
                 )
 
@@ -407,8 +421,8 @@ async def copy_lines(
     dest_path: str,
     dest_line: int = 0,
     create_dest: bool = False,
-    expected_first_line: str = "",
-    expected_last_line: str = "",
+    expected_first_hash: str = "",
+    expected_last_hash: str = "",
 ) -> str:
     """Copy an EXACT [start_line, end_line] range (1-indexed, inclusive)
     from source_path into dest_path VERBATIM, byte-for-byte — no need to
@@ -425,16 +439,17 @@ async def copy_lines(
     dest_path. Set create_dest=True to create dest_path if it doesn't exist
     yet (e.g. the first extraction into a brand-new module); without it, a
     missing dest_path is an error, to catch a typo'd path before it silently
-    creates garbage. Pass expected_first_line/expected_last_line (as in
-    replace_lines) to catch a stale source range instead of silently copying
-    the wrong lines."""
+    creates garbage. Pass expected_first_hash/expected_last_hash (as in
+    replace_lines — the short hash read_file_range showed, not the line
+    text) to catch a stale source range instead of silently copying the
+    wrong lines."""
     source_path = source_path.strip()
     dest_path = dest_path.strip()
     if not source_path or not dest_path:
         return "Error: source_path and dest_path are required"
     if start_line < 1 or end_line < start_line:
         return "Error: start_line must be >= 1 and end_line >= start_line"
-    guard = _multiline_guard(("expected_first_line", expected_first_line), ("expected_last_line", expected_last_line))
+    guard = _hash_guard(("expected_first_hash", expected_first_hash), ("expected_last_hash", expected_last_hash))
     if guard:
         return guard
 
@@ -450,20 +465,20 @@ async def copy_lines(
 
     current_first = source_lines[start_line - 1].rstrip("\n")
     current_last = source_lines[end_line - 1].rstrip("\n")
-    if expected_first_line and current_first != expected_first_line:
+    if expected_first_hash and line_hash(current_first) != expected_first_hash:
         return (
-            f"Error: line {start_line} of {source_path!r} doesn't match expected_first_line "
+            f"Error: line {start_line} of {source_path!r} doesn't match expected_first_hash "
             f"— the file changed since you last read it, or an earlier edit shifted line "
-            f"numbers.{_suggest_range(source_lines, expected_first_line, expected_last_line)}\n"
-            f"Expected: {expected_first_line!r}\nActual: {current_first!r}\n"
+            f"numbers.{_suggest_range(source_lines, expected_first_hash, expected_last_hash)}\n"
+            f"Expected hash: {expected_first_hash!r}\nActual: {current_first!r} (hash {line_hash(current_first)!r})\n"
             "Re-read the current range (read_file_range) before retrying."
         )
-    if expected_last_line and current_last != expected_last_line:
+    if expected_last_hash and line_hash(current_last) != expected_last_hash:
         return (
-            f"Error: line {end_line} of {source_path!r} doesn't match expected_last_line "
+            f"Error: line {end_line} of {source_path!r} doesn't match expected_last_hash "
             f"— the file changed since you last read it, or an earlier edit shifted line "
-            f"numbers.{_suggest_range(source_lines, expected_first_line, expected_last_line)}\n"
-            f"Expected: {expected_last_line!r}\nActual: {current_last!r}\n"
+            f"numbers.{_suggest_range(source_lines, expected_first_hash, expected_last_hash)}\n"
+            f"Expected hash: {expected_last_hash!r}\nActual: {current_last!r} (hash {line_hash(current_last)!r})\n"
             "Re-read the current range (read_file_range) before retrying."
         )
 

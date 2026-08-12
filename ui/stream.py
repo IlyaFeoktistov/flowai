@@ -524,6 +524,28 @@ class StreamDisplay:
                     elapsed = time.monotonic() - self._t_wall
                     set_title(f"AI: ~{self._tok_approx} tok · {_format_duration(elapsed)}")
 
+        # ── TOOL ARG CHUNK (real streaming, not shown — just counted) ─────
+        # Live bug (user report): the live "~N tok" counter only ticked on
+        # answer_chunk (the model's own text) — a tool call's own arguments
+        # (write_file's whole new file content, replace_lines' new_content,
+        # ...) are real generation too, sometimes the bulk of a slow round,
+        # but arrive as tool_call_chunks with .content usually empty (see
+        # mcp_agent/agent.py:_stream_round's "messages" mode loop), so the
+        # counter looked frozen for the ENTIRE duration and only jumped once
+        # at tool_start, well after the fact — "506 tok · 9m 47s" looked
+        # like the model was stuck. len//4 here (not +=1 per chunk like
+        # answer_chunk) because a tool_call_chunks fragment's size varies by
+        # provider/backend in a way plain content chunks don't seem to on
+        # this project's own backends — a length-based estimate stays
+        # roughly right regardless of how big each individual fragment is.
+        elif t == "tool_arg_chunk":
+            text = event.get("text", "")
+            if text:
+                self._tok_approx += max(1, len(text) // 4)
+                if self._tok_approx % 5 == 0:
+                    elapsed = time.monotonic() - self._t_wall
+                    set_title(f"AI: ~{self._tok_approx} tok · {_format_duration(elapsed)}")
+
         elif t == "answer_end":
             self._flush_speech_round()
             if event.get("had_tool_calls"):

@@ -1,7 +1,28 @@
 import difflib
+import hashlib
 import json
 import re
 from typing import Any
+
+
+def line_hash(text: str) -> str:
+    """Short (4 hex char) content hash for ONE line — read_file_range shows
+    it next to each line's number; replace_lines/insert_lines/copy_lines
+    take it back (expected_first_hash/expected_last_hash/expected_hash) as
+    the staleness check instead of the exact line text. Community research
+    on this exact class of tool ("hashline addressing", see
+    github.com/anthropics/claude-code/issues/25775) converged on the same
+    idea: a raw line NUMBER silently drifts once an earlier edit in the same
+    turn shifts everything after it, and reproducing the exact TEXT is
+    error-prone to retype (whitespace, quoting) even when the model
+    correctly identified the right line — a short hash is trivial to copy
+    verbatim and, being content-derived, doubles as an integrity check
+    (mismatch = file changed since you read it, not just "some number is
+    off"). Truncated to 4 hex chars on purpose: collisions across a whole
+    file are possible but rare, and the caller already re-reads on ANY
+    mismatch rather than trusting a hash blindly, so a false-positive match
+    is not silently fatal the way it would be for content-addressed storage."""
+    return hashlib.sha1(text.rstrip("\n").encode("utf-8", errors="replace")).hexdigest()[:4]
 
 
 def unified_diff_at(old_lines: list[str], new_lines: list[str], path: str, start_line: int) -> str:

@@ -57,6 +57,7 @@ from mcp_agent.debug_log import log_event
 from mcp_agent.model_config import DEBUG
 from mcp_agent.pipeline import stream_chat as _pipeline_stream_chat
 from mcp_agent.snapshots import clear_session_file_snapshots
+import expert_streaming
 import model_lifecycle
 from compress import compress_history
 from episodic import EpisodicWriter
@@ -1208,6 +1209,16 @@ async def main() -> None:
         # memory/episodic — чистим при выходе, чтобы они не накапливались
         # вечно в общей базе между запусками.
         clear_session_file_snapshots()
+        # expert-streaming (порт 8090) — не системный демон вроде Ollama,
+        # это ПОДПРОЦЕСС этого самого flowai (см. expert_streaming.py) —
+        # умирать вместе с ним, а не переживать выход. Живой баг (отчёт
+        # пользователя): без этого он оставался висеть после Ctrl+D/выхода,
+        # и следующий запуск flowai видел порт занятым "каким-то другим
+        # процессом" (ensure_running's health-check guard, см. там же) —
+        # ложный "не запустился", хотя это был осиротевший процесс от
+        # предыдущего же запуска. No-op, если expert-streaming не включён/
+        # не запускался в этой сессии (stop_server сам проверяет _proc).
+        expert_streaming.stop_server()
 
     console.print("\n[dim]Пока![/]")
 
