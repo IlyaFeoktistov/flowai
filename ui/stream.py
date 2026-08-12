@@ -583,10 +583,17 @@ class StreamDisplay:
             elif result:
                 lines = result.splitlines()
                 if len(lines) > 1:
+                    # Live bug (user report): this branch is reached exactly
+                    # when `diffish` above was None, i.e. the result is NOT
+                    # diff-shaped (no "@@" hunk header) — a plain bash_exec
+                    # output like `ls -la` still has lines starting with "-"
+                    # (a regular file's "-rw-r--r--" permission string), and
+                    # _diff_line_style would color those red as if removed,
+                    # exactly like a git diff, even though this is plain
+                    # command output with nothing to do with a diff at all.
                     show = lines[:20]
                     for ln in show:
-                        style = _diff_line_style(ln) or "bright_black"
-                        console.print(f"[{style}]     {_escape_markup(ln)}[/]")
+                        console.print(f"[bright_black]     {_escape_markup(ln)}[/]")
                     if len(lines) > 20:
                         console.print(f"[bright_black]     … ещё {len(lines) - 20} строк[/]")
                 else:
