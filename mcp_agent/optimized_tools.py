@@ -16,8 +16,11 @@ Write/...) обсуждалось и было отклонено — цепоч�
 задачи (см. router.py/roles.py — ровно то, чего у легаси-агента НЕТ и что
 уже чинит новый пайплайн). Этот флаг — узкая, отдельная от пайплайна мера:
 статичный (не per-запрос, без classify_intent) урезанный список в духе
-Claude Code — по одному тулу на "смысл" (bash/read/grep/glob/write/edit)
-вместо 5-6 читающих и 5 пишущих вариантов сразу. НЕ трогает новый пайплайн
+Claude Code — по одному тулу на "смысл" (bash/read/grep/glob/write), но
+write здесь НЕ один: write_file (целиком) + replace_lines/insert_lines/
+copy_lines (точечно, по номерам строк) — БЕЗ edit_file, см.
+_CORE_TOOL_NAMES про то, почему именно edit_file исключён, а точечные
+line-based тулы оставлены. НЕ трогает новый пайплайн
 (mcp_agent/pipeline.py/roles.py) — там своя, per-request композиция уже
 решает эту же задачу иначе.
 
@@ -41,9 +44,20 @@ _CORE_TOOL_NAMES = {
     # glob — один поиск по имени файла, без search_files/list_directory/
     # directory_tree/project_tree (листинг директории — bash_exec("ls ...")).
     "find_files_by_name",
-    # write/edit — ровно два, как в Claude Code (Write целиком, Edit по
-    # anchor'у), без replace_lines/insert_lines/copy_lines.
-    "write_file", "edit_file",
+    # write — write_file (целиком) + точечные replace_lines/insert_lines/
+    # copy_lines, БЕЗ edit_file. Живой прогон: qwen3-coder:30b на edit_file
+    # регулярно проваливал byte-for-byte oldText-совпадение после
+    # нескольких правок подряд (файл на диске расходился с тем, что модель
+    # "помнила" о нём) — 2-3 провала "Could not find exact match", потом
+    # сдавалась и переписывала файл целиком через write_file всё равно, но
+    # только после нескольких потерянных раундов на пустые попытки.
+    # replace_lines/insert_lines не страдают тем же — они адресуются по
+    # номеру строки, а не по повторению существующего текста, так что тот
+    # же класс провала для них не воспроизводится; убирать их вместе с
+    # edit_file было бы перебором — точечная правка нужна для больших
+    # файлов, где переписывать всё целиком через write_file дорого и
+    # рискованно (шанс невольно потерять кусок при пересборке по памяти).
+    "write_file", "replace_lines", "insert_lines", "copy_lines",
     # web
     "web_search", "fetch", "analyze_image",
     # ask_user — HITL, не тул с диверсией смысла.

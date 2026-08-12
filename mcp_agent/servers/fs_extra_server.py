@@ -34,7 +34,6 @@ search_files дописывается предупреждением, а не н
 
 Запуск: python3 -m mcp_agent.servers.fs_extra_server
 """
-import difflib
 import os
 import shutil
 import sys
@@ -47,6 +46,7 @@ sys.path.insert(0, _PROJECT_ROOT)
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from storage import connect, data_dir  # noqa: E402
+from utils.parsing import unified_diff_at  # noqa: E402
 
 mcp = FastMCP("fs_extra")
 
@@ -228,40 +228,6 @@ def _suggest_line(lines: list[str], expected: str) -> str:
     return f" Found that exact line at line {matches[0] + 1} instead — did you mean line={matches[0] + 1}?"
 
 
-def _unified_diff_at(old_lines: list[str], new_lines: list[str], path: str, start_line: int) -> str:
-    """Like difflib.unified_diff, but hunk headers ("@@ -N,M +N,M @@") use
-    real 1-indexed file line numbers instead of always starting at 1 —
-    difflib.unified_diff has no offset parameter, and a hunk that always
-    reads "@@ -1 +1 @@" regardless of whether the edit was at line 5 or
-    line 549 forces whoever's reading the diff to re-derive the real
-    location themselves. get_grouped_opcodes gives (tag, i1, i2, j1, j2)
-    per hunk with i/j indexed into old_lines/new_lines (0-based, relative
-    to start_line) — offsetting by start_line converts those into the
-    file's actual line numbers."""
-    sm = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
-    groups = list(sm.get_grouped_opcodes(3))
-    if not groups:
-        return ""
-    out = [f"--- {path} (before)\n", f"+++ {path} (after)\n"]
-    for group in groups:
-        old_start = start_line + group[0][1]
-        old_len = group[-1][2] - group[0][1]
-        new_start = start_line + group[0][3]
-        new_len = group[-1][4] - group[0][3]
-        old_range = f"{old_start}" if old_len == 1 else f"{old_start},{old_len}"
-        new_range = f"{new_start}" if new_len == 1 else f"{new_start},{new_len}"
-        out.append(f"@@ -{old_range} +{new_range} @@\n")
-        for tag, i1, i2, j1, j2 in group:
-            if tag == "equal":
-                out.extend(" " + l for l in old_lines[i1:i2])
-                continue
-            if tag in ("replace", "delete"):
-                out.extend("-" + l for l in old_lines[i1:i2])
-            if tag in ("replace", "insert"):
-                out.extend("+" + l for l in new_lines[j1:j2])
-    return "".join(out)
-
-
 @mcp.tool()
 async def replace_lines(
     path: str,
@@ -344,7 +310,7 @@ async def replace_lines(
     except OSError as e:
         return f"Error: {e}"
 
-    diff = _unified_diff_at(old_block, new_lines, path, start_line)
+    diff = unified_diff_at(old_block, new_lines, path, start_line)
     return f"Replaced lines {start_line}-{end_line} in {path!r}.\n\n{diff}"
 
 
@@ -429,7 +395,7 @@ async def insert_lines(
         return f"Error: {e}"
 
     where = "the end of" if line == 0 else f"before line {line} in"
-    diff = _unified_diff_at([], new_lines, path, insert_at + 1)
+    diff = unified_diff_at([], new_lines, path, insert_at + 1)
     return f"Inserted {len(new_lines)} line(s) {where} {path!r}.\n\n{diff}"
 
 

@@ -1,6 +1,41 @@
+import difflib
 import json
 import re
 from typing import Any
+
+
+def unified_diff_at(old_lines: list[str], new_lines: list[str], path: str, start_line: int) -> str:
+    """Like difflib.unified_diff, but hunk headers ("@@ -N,M +N,M @@") use
+    real 1-indexed file line numbers instead of always starting at 1 —
+    difflib.unified_diff has no offset parameter, and a hunk that always
+    reads "@@ -1 +1 @@" regardless of whether the edit was at line 5 or
+    line 549 forces whoever's reading the diff to re-derive the real
+    location themselves. get_grouped_opcodes gives (tag, i1, i2, j1, j2)
+    per hunk with i/j indexed into old_lines/new_lines (0-based, relative
+    to start_line) — offsetting by start_line converts those into the
+    file's actual line numbers."""
+    sm = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    groups = list(sm.get_grouped_opcodes(3))
+    if not groups:
+        return ""
+    out = [f"--- {path} (before)\n", f"+++ {path} (after)\n"]
+    for group in groups:
+        old_start = start_line + group[0][1]
+        old_len = group[-1][2] - group[0][1]
+        new_start = start_line + group[0][3]
+        new_len = group[-1][4] - group[0][3]
+        old_range = f"{old_start}" if old_len == 1 else f"{old_start},{old_len}"
+        new_range = f"{new_start}" if new_len == 1 else f"{new_start},{new_len}"
+        out.append(f"@@ -{old_range} +{new_range} @@\n")
+        for tag, i1, i2, j1, j2 in group:
+            if tag == "equal":
+                out.extend(" " + l for l in old_lines[i1:i2])
+                continue
+            if tag in ("replace", "delete"):
+                out.extend("-" + l for l in old_lines[i1:i2])
+            if tag in ("replace", "insert"):
+                out.extend("+" + l for l in new_lines[j1:j2])
+    return "".join(out)
 
 
 def strip_json_comments(text: str) -> str:
