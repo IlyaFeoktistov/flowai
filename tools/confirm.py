@@ -20,6 +20,43 @@ _permission_lock = asyncio.Lock()
 # tool_call молча улетает в status=error без права на ответ.
 _pending_prompts = 0
 
+# Живой баг: авто-approve по первому слову команды ("bash:cd") небезопасен,
+# как только в команде есть цепочка/пайп — "cd /tmp && rm -rf ~" и "cd /tmp"
+# начинаются одним и тем же первым словом, но вторая половина первой команды
+# никогда не проверялась пользователем. Тот же класс проблемы уже был
+# признан и пофикшен для git_* тулов (см. ask_user_tool.py:_action_and_detail
+# — у каждого своя action-ключ вместо общего "bash" с матчем по первому
+# слову), просто тот фикс не покрывал сам bash_exec, где команда — не
+# фиксированное имя тула, а произвольная строка, которая ЛЕГКО дополняется
+# после уже одобренного префикса. Когда в команде есть эти маркеры,
+# гранулярность "первое слово" отключается — approve/remember работает
+# только по ТОЧНОМУ совпадению всей строки команды, не по префиксу.
+_SHELL_CHAIN_MARKERS = ("&&", "||", ";", "|", "`", "$(")
+
+
+def _bash_auto_approve_key(detail: str) -> str | None:
+    """None — небезопасно приближать/запоминать по первому слову (есть
+    цепочка/пайп/подстановка); вызывающий код должен в этом случае матчить
+    ТОЛЬКО полную строку команды, не префикс."""
+    stripped = detail.strip()
+    if not stripped or any(marker in stripped for marker in _SHELL_CHAIN_MARKERS):
+        return None
+    return stripped.split()[0]
+
+
+def _remember_bash_approval(detail: str) -> str:
+    """Общая логика для всех трёх мест, где пользователь жмёт "A" (всегда) —
+    возвращает текст для вывода в консоль. Составная команда запоминается
+    целиком (не даёт разрешения на "любую команду с тем же первым словом"),
+    простая — по первому слову, как и раньше."""
+    stripped = detail.strip()
+    cmd_name = _bash_auto_approve_key(detail)
+    if cmd_name is not None:
+        _approved_actions.add(f"bash:{cmd_name}")
+        return f"[dim]  → {cmd_name} авто-одобрен на эту сессию[/]\n"
+    _approved_actions.add(stripped)
+    return "[dim]  → эта составная команда авто-одобрена на эту сессию (точное совпадение, не префикс)[/]\n"
+
 
 def has_pending_prompt() -> bool:
     return _pending_prompts > 0
@@ -133,9 +170,7 @@ def _ask_permission_sync(action: str, detail: str) -> bool:
             return True
         elif ch_lower == "a":
             if action == "bash" and detail.strip():
-                cmd_name = detail.strip().split()[0]
-                _approved_actions.add(f"bash:{cmd_name}")
-                _console.print(f"[dim]  → {cmd_name} авто-одобрен на эту сессию[/]\n")
+                _console.print(_remember_bash_approval(detail))
             else:
                 _approved_actions.add(action)
                 _console.print(f"[dim]  → {label} авто-одобрены на эту сессию[/]\n")
@@ -219,10 +254,15 @@ async def ask_permission(action: str, detail: str) -> bool:
     def _is_auto_approved() -> bool:
         if _always_approve or action in _approved_actions:
             return True
-        # bash approvals are per-command-name (e.g. "bash:pwd")
+        # bash approvals are per-command-name (e.g. "bash:pwd") ТОЛЬКО для
+        # простой, нецепочечной команды — см. _bash_auto_approve_key.
+        # Составная (cd X && Y, ls | grep) матчится по ПОЛНОЙ строке, иначе
+        # одобрение "cd" один раз тихо одобрило бы любое "cd X && <что угодно>".
         if action == "bash" and detail.strip():
-            cmd_name = detail.strip().split()[0]
-            return f"bash:{cmd_name}" in _approved_actions
+            cmd_name = _bash_auto_approve_key(detail)
+            if cmd_name is not None:
+                return f"bash:{cmd_name}" in _approved_actions
+            return detail.strip() in _approved_actions
         return False
 
     if _is_auto_approved():
@@ -248,9 +288,7 @@ async def ask_permission(action: str, detail: str) -> bool:
                 result = await _app.show_permission_dialog(action, detail)
                 if result == "a":
                     if action == "bash" and detail.strip():
-                        cmd_name = detail.strip().split()[0]
-                        _approved_actions.add(f"bash:{cmd_name}")
-                        _console.print(f"[dim]  → {cmd_name} авто-одобрен на эту сессию[/]\n")
+                        _console.print(_remember_bash_approval(detail))
                     else:
                         _approved_actions.add(action)
                         _console.print(f"[dim]  → {label} авто-одобрены на эту сессию[/]\n")
@@ -278,9 +316,7 @@ async def ask_permission(action: str, detail: str) -> bool:
                     return True
                 elif ch_lower == "a":
                     if action == "bash" and detail.strip():
-                        cmd_name = detail.strip().split()[0]
-                        _approved_actions.add(f"bash:{cmd_name}")
-                        _console.print(f"[dim]  → {cmd_name} авто-одобрен на эту сессию[/]\n")
+                        _console.print(_remember_bash_approval(detail))
                     else:
                         _approved_actions.add(action)
                         _console.print(f"[dim]  → {label} авто-одобрены на эту сессию[/]\n")
