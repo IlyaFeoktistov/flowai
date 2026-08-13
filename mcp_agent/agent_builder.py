@@ -257,6 +257,14 @@ async def _build_tools(repo_path: str | None = None):
     connections = build_mcp_connections(resolved_repo_path)
     client = MultiServerMCPClient(connections)
     tools = await _load_tools_resilient(client, list(connections.keys()), resolved_repo_path)
+    # search_files (filesystem MCP-сервер) временно убран: excludePatterns у
+    # него по умолчанию пустой (index.js:124 в самом пакете), так что без
+    # явной передачи он рекурсивно обходит ВСЁ дерево repo_path без единого
+    # исключения — на живом прогоне это означало обход vendor/+venv-tts
+    # (42 ГБ, 322k файлов в этом самом репозитории). find_files_by_name
+    # (code_search_server.py) закрывает тот же случай — умеет настоящий glob
+    # и уже пропускает vendor/node_modules/.venv/venv/.git и т.п.
+    tools = [t for t in tools if t.name != "search_files"]
     tools = [_cap_tool_output(t, TOOL_OUTPUT_CHAR_CAP) for t in tools]
     tools = [_normalize_edit_file_args(t) if t.name == "edit_file" else t for t in tools]
     # read_history — общий для read_file/read_text_file (ключ — путь) И для
