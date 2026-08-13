@@ -174,10 +174,27 @@ def _execution_evidence_shows_failure(round_msgs: list) -> bool:
          a real non-zero exit ('Error (exit N):') is evidence about the
          code — a bare 'Error: ...' (timeout, no command, an exception
          raised by bash_exec itself) says nothing either way and must not
-         overwrite a real prior result for that same command."""
+         overwrite a real prior result for that same command.
+
+    Live run (2026-08-13): Verifier guessed two nonexistent project
+    directories ('cd /home/ifeoktistov/neural_network', ...) before finding
+    the real one — both `cd`s failed with 'Error (exit 2): ... cd: can't cd
+    to ...'. The correct dir it settled on ran a real, clean check right
+    after ('Создание нейронной сети...' printed, exit 0) — but that's a
+    DIFFERENT command string (different cd target), so it never overwrote
+    the two wrong-dir failures already recorded. `any(...)` stayed True on
+    those alone, and the whole round — including a verifier report that
+    read as 100% passing — got marked execution_failure and reverted. A `cd`
+    that fails because the AGENT guessed a directory that doesn't exist is
+    evidence about the agent's own navigation, not about whether the CODE
+    works — must not count as execution evidence either way, same as the
+    bare-error case above."""
+    _NAV_ERROR_MARKERS = ("cd: can't cd to", "cd: no such file or directory")
     last_verdict_by_command: dict[str, bool] = {}
     for cmd, result in _bash_commands(round_msgs):
         text = result.lstrip().lower()
+        if text.startswith("error (exit") and any(marker in text for marker in _NAV_ERROR_MARKERS):
+            continue
         if text.startswith("error (exit"):
             last_verdict_by_command[cmd] = True
         elif not text.startswith("error"):
