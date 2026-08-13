@@ -900,15 +900,18 @@ class FlowAIApp:
 
         # Plan checklist (mcp_agent/pipeline.py) — non-blocking, unlike
         # perm_win/ask_win above (no future to wait on), just a persistent
-        # status board while/after Planner->Coder run.
+        # status board while/after Planner->Coder run. No divider of its own
+        # here — live bug: stats_win's own comment below ("above the divider
+        # line") already assumes exactly ONE divider for this whole block
+        # (the `divider` window further down, right before input_display).
+        # A second divider here doubled that line the moment a plan was
+        # visible, with only stats_win/recap_win (1-2 often-blank lines)
+        # between the two — read as one bar duplicated, not two intentional
+        # separators.
         has_plan = Condition(lambda: bool(self._plan_steps))
         plan_ctrl = FormattedTextControl(self._plan_formatted_text)
         plan_win = ConditionalContainer(
             content=Window(content=plan_ctrl, dont_extend_height=True),
-            filter=has_plan,
-        )
-        plan_divider = ConditionalContainer(
-            content=Window(height=1, char="─", style="class:footer-divider"),
             filter=has_plan,
         )
 
@@ -947,7 +950,6 @@ class FlowAIApp:
             content=HSplit([
                 output_win,
                 plan_win,    # plan checklist (conditional, above the footer)
-                plan_divider,
                 stats_win,   # spinner/counter above the divider line
                 perm_win,    # permission dialog (conditional)
                 perm_divider,
