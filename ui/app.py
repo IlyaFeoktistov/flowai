@@ -435,6 +435,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("/gen_texture", "repaint an existing model's texture from a reference image (@model @ref, any order)"),
     ("/talk",      "speak text directly, no model"),
     ("/usage",    "session statistics"),
+    ("/doctor",   "health check: Ollama/model/MCP servers/storage"),
     ("/settings", "model and GPU settings"),
     ("/memory",   "view and delete remembered facts/knowledge"),
     ("/dnd",      "D&D mode: list saves / new game / continue / exit"),

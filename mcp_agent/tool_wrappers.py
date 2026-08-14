@@ -50,6 +50,7 @@
   константно на всю сессию (repo_path у git-тулов).
 """
 import json
+import os
 import re
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -108,6 +109,86 @@ def _cap_tool_output(tool: BaseTool, max_chars: int) -> BaseTool:
         elif isinstance(content, str) and len(content) > max_chars:
             content = _sandwich_truncate(content, max_chars)
         return content, artifact
+
+    return StructuredTool(
+        name=tool.name,
+        description=tool.description,
+        args_schema=tool.args_schema,
+        coroutine=_call,
+        response_format=tool.response_format,
+        metadata=tool.metadata,
+        handle_tool_error=tool.handle_tool_error,
+    )
+
+
+# Same order of magnitude as claw-code's file_ops.rs MAX_READ_SIZE — past
+# this, a single read_file/read_multiple_files call would dump more raw
+# content into one tool result than any turn should carry, regardless of
+# what _cap_tool_output does afterward (that only truncates AFTER the whole
+# file is already read into memory and tokenized).
+_MAX_READABLE_FILE_BYTES = 10 * 1024 * 1024
+
+
+def _is_binary_file(path: str) -> bool:
+    """A NUL byte in the first chunk is a reliable binary signal (same
+    check claw-code's file_ops.rs uses) — real text files essentially never
+    contain one, while compiled binaries/images/databases almost always do
+    within the first few KB."""
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(8192)
+    except OSError:
+        return False
+    return b"\x00" in chunk
+
+
+def _guard_unreadable_file(tool: BaseTool, is_multi_path: bool = False) -> BaseTool:
+    """Rejects read_file/read_text_file/read_file_range/read_multiple_files
+    calls against a binary file or one over _MAX_READABLE_FILE_BYTES BEFORE
+    the underlying tool actually reads it. Neither the filesystem MCP
+    server (@modelcontextprotocol/server-filesystem) nor code_search_server.py
+    (read_file_range) guards against either case today: a binary file
+    (compiled artifact, image, .db, ...) decodes to garbage/replacement
+    characters that burns context for nothing the model can use, and a huge
+    file dumps far more into one tool result than any turn should carry.
+
+    Best-effort — a path this can't stat/open at all (missing, permission
+    error) is left for the real tool to report properly, not swallowed here."""
+    original_coroutine = tool.coroutine
+    if original_coroutine is None:
+        return tool
+
+    def _rejection(path: str) -> str | None:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return None
+        if size > _MAX_READABLE_FILE_BYTES:
+            return (
+                f"Error: {path!r} is {size / (1024 * 1024):.1f}MB — over "
+                f"the {_MAX_READABLE_FILE_BYTES // (1024 * 1024)}MB limit "
+                "for a single read. Narrow the request (read_file_range for "
+                "a specific line span, or bash_exec with grep/head/tail) "
+                "instead of reading the whole file."
+            )
+        if _is_binary_file(path):
+            return (
+                f"Error: {path!r} looks like a binary file, not text — "
+                "reading it here would only produce garbage/replacement "
+                "characters. Use bash_exec's `file` command to confirm the "
+                "type if you need to know what it is."
+            )
+        return None
+
+    async def _call(**kwargs):
+        paths = kwargs.get("paths") if is_multi_path else [kwargs.get("path")]
+        for path in paths or []:
+            if not path:
+                continue
+            reason = _rejection(path)
+            if reason:
+                return reason, None
+        return await original_coroutine(**kwargs)
 
     return StructuredTool(
         name=tool.name,

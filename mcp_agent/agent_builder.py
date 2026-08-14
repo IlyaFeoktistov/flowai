@@ -132,6 +132,7 @@ def _sampling_overrides_for(model_tag: str) -> dict:
 
 def _build_chat_model(
     *, model_tag: str, num_predict: int, reasoning: bool, num_keep: int, format: str | None = None,
+    has_tools: bool = True,
 ):
     """Единая точка сборки и для основной, и для judge-модели (обоих
     вызывающих — _build_agent ниже и _build_role_agent, см. их обе) —
@@ -153,13 +154,41 @@ def _build_chat_model(
     не меняется, процесс просто переиспользуется как есть, даже если
     num_keep/reasoning с прошлого вызова успели измениться. Это осознанное
     огрубление экспериментального пути, не забытый баг — см.
-    expert_streaming.py docstring, раздел "известные огрубления"."""
+    expert_streaming.py docstring, раздел "известные огрубления".
+
+    has_tools — one of the two signals (with `format`) deciding whether
+    _MODEL_SAMPLING_OVERRIDES applies at all for this call — see
+    apply_repeat_override's own comment below for the mechanism and the
+    two live bugs that shaped it (naming kept as "has_tools" even though
+    the gate is really has_tools OR format=="json", to avoid renaming
+    every call site's kwarg over what's just an internal detail)."""
+    # apply_repeat_override gates the WHOLE _MODEL_SAMPLING_OVERRIDES bundle
+    # (temperature/top_p/min_p/repeat_penalty together), not just
+    # repeat_penalty alone — live bug (2026-08-14, same incident as
+    # apply_repeat_override's own introduction above): a first version of
+    # this fix kept temperature/top_p/min_p unconditional and only gated
+    # repeat_penalty, on the assumption they're independent knobs. They
+    # aren't, for this override: the community-recommended values
+    # (_MODEL_SAMPLING_OVERRIDES's comment) were tested and "confirmed
+    # clean" as ONE bundle together with repeat_penalty=1.0 — restoring
+    # plain REPEAT_PENALTY=1.2 while still applying temperature=0.7/
+    # top_p=0.95/min_p=0.01 is a combination nobody ever validated. Live
+    # result: the casual/no-tools path (repeat penalty restored, GLM
+    # temp/top_p/min_p still applied) produced full incoherent breakdown —
+    # garbled mixed-language text, random code snippets, the model
+    # visibly noticing its own malfunction mid-answer ("Wait I'm
+    # generating junk again... bad model behavior loop?") — not just
+    # dull repetition. Treating the override as one all-or-nothing bundle
+    # means every code path uses either a real, live-tested profile (the
+    # full GLM bundle) or the other real, long-standing one (this app's
+    # plain Qwen-tuned defaults) — never an invented third combination.
+    apply_repeat_override = has_tools or format == "json"
     if settings.get("expert_streaming_enabled"):
         ok, msg = expert_streaming.ensure_running(
             model_tag, num_ctx=settings.get("num_ctx"), show_thinking=reasoning,
         )
         if ok:
-            sampling = _sampling_overrides_for(model_tag)
+            sampling = _sampling_overrides_for(model_tag) if apply_repeat_override else {}
             extra_body = {
                 "top_k": TOP_K,
                 "repeat_penalty": sampling.get("repeat_penalty", REPEAT_PENALTY),
@@ -211,7 +240,7 @@ def _build_chat_model(
     if not kv_ok and format != "json":
         console.print(f"[yellow]⚠ не удалось выставить OLLAMA_KV_CACHE_TYPE ({kv_msg})[/]")
 
-    sampling = _sampling_overrides_for(model_tag)
+    sampling = _sampling_overrides_for(model_tag) if apply_repeat_override else {}
     kwargs = dict(
         model=model_tag,
         base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
@@ -239,6 +268,7 @@ from mcp_agent.tool_wrappers import (
     _cache_line_content_tool,
     _cap_tool_output,
     _dedupe_read_tool,
+    _guard_unreadable_file,
     _normalize_edit_file_args,
     _require_expected_lines,
     _split_head_tail_tool,
@@ -331,6 +361,16 @@ async def _build_tools(repo_path: str | None = None):
     # for why: the inner layers above (cache/dedupe/invalidation) each see
     # two ordinary single-param calls instead of one with both set.
     tools = [_split_head_tail_tool(t) if t.name in ("read_file", "read_text_file") else t for t in tools]
+    # Even more outermost than that — rejects a binary/oversized file BEFORE
+    # any of the read wrappers above (cache/dedupe/head-tail-split) ever see
+    # its content, so a garbage/huge read never gets cached or split in the
+    # first place. read_multiple_files takes `paths` (a list), the other
+    # three take a single `path`.
+    tools = [
+        _guard_unreadable_file(t, is_multi_path=t.name == "read_multiple_files")
+        if t.name in ("read_file", "read_text_file", "read_file_range", "read_multiple_files") else t
+        for t in tools
+    ]
     tools = [_add_verify_reminder(t) if t.name in ("write_file", "edit_file", "replace_lines", "copy_lines", "insert_lines") else t for t in tools]
     # _require_expected_lines TEMPORARILY DISABLED (20260812): now that
     # replace_lines/insert_lines/copy_lines check expected_*_hash against
@@ -504,6 +544,125 @@ def _looks_like_file_mutation(command: str) -> bool:
     return any(p.search(command) for p in _FILE_MUTATION_PATTERNS)
 
 
+# Allowlist for Analyzer/Planner's bash_exec (roles.py:investigator_tools/
+# planner_tools — both keep bash_exec unconditionally, for legitimate
+# diagnostics per their own system prompt: "bash_exec for READ-ONLY
+# diagnostic commands"). _looks_like_file_mutation above is a DENYLIST,
+# right for Verifier (which legitimately needs to run arbitrary builds/
+# tests via bash_exec, just not self-fix) — but Analyzer/Planner have no
+# legitimate reason to run anything beyond inspection, so a default-DENY
+# allowlist fits their narrower job instead: reject shell metacharacters
+# outright (chaining/piping/substitution/redirection could launder a
+# mutating command past a leading read-only token, e.g. `cat foo; rm -rf
+# bar` or `cat foo | sh`), then only pass a curated set of read-only
+# commands.
+_READ_ONLY_BASH_METACHARS = re.compile(r"[;&$`<>(){}\n]|\|")
+
+_READ_ONLY_BASH_ALLOWLIST = {
+    "cat", "head", "tail", "less", "more", "wc", "ls", "grep", "rg", "awk",
+    "sed", "echo", "printf", "which", "whoami", "pwd", "env", "printenv",
+    "date", "df", "du", "free", "uptime", "uname", "file", "stat", "diff",
+    "sort", "uniq", "tr", "cut", "paste", "test", "true", "false", "type",
+    "readlink", "realpath", "basename", "dirname", "sha256sum", "md5sum",
+    "tree", "jq", "nproc", "lscpu", "id",
+}
+
+_READ_ONLY_GIT_SUBCOMMANDS = {
+    "status", "log", "diff", "show", "branch", "rev-parse", "ls-files",
+    "blame", "describe", "tag", "remote", "shortlog",
+}
+
+# ollama's OWN metadata (analyzer's system prompt explicitly recommends
+# `ollama show <model>` for quantization/params/context length) — but
+# `run`/`pull`/`rm`/`cp`/`create` all mutate local state, so only the
+# read-only subcommands are allowed.
+_READ_ONLY_OLLAMA_SUBCOMMANDS = {"show", "list", "ps"}
+
+# node/php/python/etc — allowed ONLY as a bare version query (analyzer's
+# own system prompt names exactly this: "a runtime's actual version/output
+# (node --version, php -v)") — never with a script/file argument, since
+# that executes arbitrary code rather than reporting metadata.
+_VERSION_QUERY_INTERPRETERS = {"node", "php", "python", "python3", "ruby", "go", "java", "perl"}
+_VERSION_QUERY_FLAGS = {"--version", "-v", "-V", "version"}
+
+
+def _is_read_only_bash_command(command: str) -> bool:
+    """Conservative allowlist heuristic — mirrors the real live incident
+    this backstops (2026-08-14, glm-4.7-flash, "сделай платформер" on an
+    empty repo): Analyzer correctly investigated (get_knowledge,
+    project_tree, ls -la), saw the repo was empty, and then used bash_exec
+    to `cat > platformer.c << EOF`, `cat > Makefile`, `make`, and
+    `apt-get install libncurses5-dev` directly — none of that is a
+    diagnostic, but nothing before this stopped it. Not a watertight
+    sandbox (a determined model could still find a way around this, e.g. a
+    quoted one-liner some allowed command happens to interpret) — a
+    backstop for the common, easy ways a shell command writes something,
+    matching this class of live incident."""
+    command = command.strip()
+    if not command:
+        return False
+    if _READ_ONLY_BASH_METACHARS.search(command):
+        return False
+
+    tokens = command.split()
+    first = tokens[0].rsplit("/", 1)[-1]
+    rest = tokens[1:]
+
+    if first == "git":
+        return bool(rest) and rest[0] in _READ_ONLY_GIT_SUBCOMMANDS
+    if first == "ollama":
+        return bool(rest) and rest[0] in _READ_ONLY_OLLAMA_SUBCOMMANDS
+    if first in _VERSION_QUERY_INTERPRETERS:
+        return bool(rest) and all(tok in _VERSION_QUERY_FLAGS for tok in rest)
+    if first == "find":
+        return not any(x in command for x in ("-exec", "-execdir", "-delete", "-ok", "-fprintf"))
+
+    if first not in _READ_ONLY_BASH_ALLOWLIST:
+        return False
+    # sed/awk's own in-place edit flags — the ONLY way these two allowlisted
+    # commands can still write to disk.
+    return " -i " not in f" {command} " and "--in-place" not in command
+
+
+class _InvestigationReadOnlyBashMiddleware(AgentMiddleware):
+    """Analyzer/Planner keep bash_exec unconditionally (roles.py:
+    investigator_tools/planner_tools) for legitimate read-only diagnostics
+    — their own system prompt already says so in plain English ("bash_exec
+    for READ-ONLY diagnostic commands... never write/delete/mutate
+    anything, that is entirely the Coder stage's job", prompts.py:
+    _analyzer_system_prompt) — but nothing enforced that boundary at the
+    tool level, only the prompt sentence. Live incident this backstops: see
+    _is_read_only_bash_command's docstring above. Mechanical backstop, only
+    attached to roles whose tool set includes bash_exec but no legitimate
+    reason to ever mutate anything (analyzer, planner — see
+    _build_role_agent; verifier gets _VerifierNoSelfFixMiddleware instead,
+    a denylist, since it legitimately needs to run arbitrary builds/tests):
+    reject any bash_exec/bash_exec_bg call whose command isn't on the
+    narrow read-only allowlist, same "final, don't retry" contract as a
+    real permission denial."""
+
+    async def awrap_tool_call(self, request, handler):
+        if request.tool_call["name"] not in ("bash_exec", "bash_exec_bg"):
+            return await handler(request)
+        command = str((request.tool_call.get("args") or {}).get("command", ""))
+        if _is_read_only_bash_command(command):
+            return await handler(request)
+        return ToolMessage(
+            content=(
+                f"Denied: {command!r} is not a recognized read-only "
+                "command — this stage only investigates and reports, it "
+                "never writes files, builds, or installs anything (that's "
+                "the Coder stage's job, after Planner turns your summary "
+                "into a plan). Finish your investigation and report your "
+                "findings as your final summary instead of retrying this "
+                "or a similar command."
+            ),
+            name=request.tool_call["name"],
+            tool_call_id=request.tool_call["id"],
+            status="error",
+        )
+
+
 class _VerifierNoSelfFixMiddleware(AgentMiddleware):
     """Verifier has no write tools on purpose (roles.py:verifier_tools —
     only read + shell) precisely so a failed check turns into a REPORTED
@@ -647,6 +806,13 @@ async def _build_agent(repo_path: str | None = None):
         num_predict=OLLAMA_NUM_PREDICT,
         reasoning=False if voice_mode else settings.get("show_thinking"),
         num_keep=num_keep,
+        # voice_mode gets agent_tools=[] below (see its comment) — no
+        # tool-call syntax will ever be generated on this model, so the
+        # repeat_penalty override some models carry FOR tool-call syntax
+        # (_MODEL_SAMPLING_OVERRIDES, see _build_chat_model's docstring)
+        # doesn't apply and would only remove a real defense against plain
+        # prose repeating itself.
+        has_tools=not voice_mode,
     )
 
     # _semantic_check — бинарный вердикт по готовым tool-результатам, а не
@@ -678,6 +844,11 @@ async def _build_agent(repo_path: str | None = None):
         reasoning=False,
         num_keep=num_keep,
         format="json",
+        # judge_model is never handed to create_agent/bound to a tools
+        # list — it only ever answers a raw .ainvoke() for a JSON verdict
+        # (_semantic_check/_extract_ask_user_shape) — see has_tools's
+        # docstring in _build_chat_model.
+        has_tools=False,
     )
 
     middleware = HumanInTheLoopMiddleware(
@@ -828,6 +999,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
         reasoning=False,
         num_keep=num_keep,
         format="json",
+        has_tools=False,  # see has_tools's docstring in _build_chat_model
     )
 
     # delegate (delegate_tool.py) сознательно НЕ даётся ни одной роли
@@ -871,6 +1043,12 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
         # единственная роль, где bash_exec реально способен подменить
         # собой запись файла (sed -i и т.п.), см. докстринг мидлвари.
         agent_middleware.append(_VerifierNoSelfFixMiddleware())
+    if role in ("analyzer", "planner"):
+        # Обе роли держат bash_exec безусловно (roles.py:investigator_tools/
+        # planner_tools) только для диагностики, никогда для мутации — см.
+        # докстринг мидлвари про живой инцидент (Analyzer, вместо сводки
+        # для Planner, сам написал файлы игры через `cat > file`).
+        agent_middleware.append(_InvestigationReadOnlyBashMiddleware())
     agent_middleware.append(_DropStaleReadsMiddleware())
     agent_middleware.append(compact_research)
 

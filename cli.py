@@ -228,6 +228,7 @@ def _show_help() -> None:
         "[bold cyan]/gen_texture[/] [dim]@модель @картинка[/] — перегенерировать текстуру готовой модели по референсу, порядок аргументов не важен\n"
         "[bold cyan]/talk[/] [dim]текст[/]              — озвучить текст напрямую, без модели\n"
         "[bold cyan]/usage[/]                   — статистика токенов\n"
+        "[bold cyan]/doctor[/]                  — проверка Ollama/модели/MCP-серверов/хранилища\n"
         "[bold cyan]/settings[/]                — настройки моделей и GPU\n"
         "[bold cyan]/memory[/]                  — что помнит нейронка, точечное/полное удаление\n"
         "[bold cyan]/dnd[/]                     — D&D-режим: список сохранений / новая игра\n"
@@ -555,6 +556,14 @@ async def main() -> None:
             def _run_usage():
                 usage_screen(_STATS, _usage.totals(), lambda: print_header(app))
             await run_in_terminal(_run_usage, render_cli_done=False)
+            return
+
+        if cmd == "/doctor":
+            from doctor import run_doctor
+            console.print("[dim]  🩺 проверяю Ollama/модели/MCP/хранилище…[/]\n")
+            report = await run_doctor()
+            console.print(Panel(report, title="[bright_black]doctor[/]", border_style="bright_black", padding=(0, 2)))
+            console.print()
             return
 
         if cmd == "/paste":
