@@ -363,9 +363,10 @@ def setup_expert_streaming() -> None:
     _clone_if_missing(LLAMA_CPP_URL, dest)
     # "flowai-expert-streaming" branch on the fork already IS PR #26824's
     # head (refs/pull/26824/head, fetched once and pushed there) plus this
-    # project's gpt-oss/Ollama GGUF compat fix, as real commits -- no more
-    # fetching a PR ref that could vanish from GitHub independently of
-    # anything this repo controls (see LLAMA_CPP_URL's comment above).
+    # project's gpt-oss/Ollama and GLM-4.7-Flash/Ollama GGUF compat fixes, as
+    # real commits -- no more fetching a PR ref that could vanish from GitHub
+    # independently of anything this repo controls (see LLAMA_CPP_URL's
+    # comment above).
     _checkout_branch(dest, "flowai-expert-streaming")
 
     # cmake/ninja via their own tiny venv, not `pip install --user` (Debian's

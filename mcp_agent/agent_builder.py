@@ -103,6 +103,33 @@ class _ChatOllamaWithNumKeep(ChatOllama):
 # expert-streaming только чтобы обойти эту переменную окружения.
 
 
+# Per-model sampling overrides for models whose recommended settings differ
+# from this app's Qwen-tuned defaults (MODEL_TEMPERATURE/TOP_P/TOP_K/
+# REPEAT_PENALTY above) -- keyed by model_tag prefix before the ':'. Applied
+# on top of those defaults in _build_chat_model, never touching them for any
+# other model.
+#
+# glm-4.7-flash: live test (2026-08-14, expert-streaming backend) reproduced
+# this app's default REPEAT_PENALTY=1.2/REPEAT_LAST_N=512 causing the
+# model's tool-call arguments to degenerate into incoherent word-soup on any
+# non-trivial prompt (a long real system prompt + several tools was enough --
+# a trivial one-line prompt didn't trigger it). Root cause: GLM's own
+# tool-call syntax (<tool_call>name<arg_key>...<arg_value>...</tool_call>)
+# repeats the same structural tokens on every argument, and a repeat
+# penalty this strong fights that, pushing the model into increasingly
+# desperate synonym-hunting instead of clean structural output. These are
+# the community-recommended values instead (HF discussion
+# unsloth/GLM-4.7-Flash-GGUF#23) -- confirmed clean on the same reproduction
+# (same prompt/tools, only sampling changed).
+_MODEL_SAMPLING_OVERRIDES: dict[str, dict] = {
+    "glm-4.7-flash": {"temperature": 0.7, "top_p": 0.95, "min_p": 0.01, "repeat_penalty": 1.0},
+}
+
+
+def _sampling_overrides_for(model_tag: str) -> dict:
+    return _MODEL_SAMPLING_OVERRIDES.get(model_tag.partition(":")[0], {})
+
+
 def _build_chat_model(
     *, model_tag: str, num_predict: int, reasoning: bool, num_keep: int, format: str | None = None,
 ):
@@ -132,7 +159,14 @@ def _build_chat_model(
             model_tag, num_ctx=settings.get("num_ctx"), show_thinking=reasoning,
         )
         if ok:
-            extra_body = {"top_k": TOP_K, "repeat_penalty": REPEAT_PENALTY, "repeat_last_n": REPEAT_LAST_N}
+            sampling = _sampling_overrides_for(model_tag)
+            extra_body = {
+                "top_k": TOP_K,
+                "repeat_penalty": sampling.get("repeat_penalty", REPEAT_PENALTY),
+                "repeat_last_n": REPEAT_LAST_N,
+            }
+            if "min_p" in sampling:
+                extra_body["min_p"] = sampling["min_p"]
             if format == "json":
                 extra_body["response_format"] = {"type": "json_object"}
             return ChatOpenAI(
@@ -140,8 +174,8 @@ def _build_chat_model(
                 base_url=f"http://{expert_streaming.DEFAULT_HOST}:{expert_streaming.DEFAULT_PORT}/v1",
                 api_key="not-needed",
                 max_tokens=num_predict,
-                temperature=MODEL_TEMPERATURE,
-                top_p=TOP_P,
+                temperature=sampling.get("temperature", MODEL_TEMPERATURE),
+                top_p=sampling.get("top_p", TOP_P),
                 extra_body=extra_body,
                 # Live bug (user report): "No streaming chunk received for
                 # 120.0s ... stream_chunk_timeout fired" — langchain_openai's
@@ -177,6 +211,7 @@ def _build_chat_model(
     if not kv_ok and format != "json":
         console.print(f"[yellow]⚠ не удалось выставить OLLAMA_KV_CACHE_TYPE ({kv_msg})[/]")
 
+    sampling = _sampling_overrides_for(model_tag)
     kwargs = dict(
         model=model_tag,
         base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
@@ -184,10 +219,10 @@ def _build_chat_model(
         num_ctx=settings.get("num_ctx"),
         num_predict=num_predict,
         reasoning=reasoning,
-        temperature=MODEL_TEMPERATURE,
-        top_p=TOP_P,
+        temperature=sampling.get("temperature", MODEL_TEMPERATURE),
+        top_p=sampling.get("top_p", TOP_P),
         top_k=TOP_K,
-        repeat_penalty=REPEAT_PENALTY,
+        repeat_penalty=sampling.get("repeat_penalty", REPEAT_PENALTY),
         repeat_last_n=REPEAT_LAST_N,
         num_keep=num_keep,
     )
@@ -206,6 +241,7 @@ from mcp_agent.tool_wrappers import (
     _dedupe_read_tool,
     _normalize_edit_file_args,
     _require_expected_lines,
+    _split_head_tail_tool,
     _wrap_read_invalidation,
 )
 
@@ -291,6 +327,10 @@ async def _build_tools(repo_path: str | None = None):
     ]
     tools = [_wrap_read_invalidation(t, read_history) for t in tools]
     tools = [_wrap_read_invalidation(t, line_content_cache) for t in tools]
+    # Outermost of the read wrappers (added last) — see its own docstring
+    # for why: the inner layers above (cache/dedupe/invalidation) each see
+    # two ordinary single-param calls instead of one with both set.
+    tools = [_split_head_tail_tool(t) if t.name in ("read_file", "read_text_file") else t for t in tools]
     tools = [_add_verify_reminder(t) if t.name in ("write_file", "edit_file", "replace_lines", "copy_lines", "insert_lines") else t for t in tools]
     # _require_expected_lines TEMPORARILY DISABLED (20260812): now that
     # replace_lines/insert_lines/copy_lines check expected_*_hash against

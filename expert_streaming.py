@@ -72,6 +72,28 @@ CUDA через отдельный venv-build-tools (cmake/ninja через pip 
 не пересобирается на каждый запуск — один раз собранный бинарник лежит в
 vendor/llama-expert-streaming/build/bin/llama-server и переиспользуется.
 
+## GLM-4.7-Flash
+
+Эта же ветка форка (`vendor/llama-expert-streaming`) несёт ещё два
+собственных коммита — не про expert-caching, про совместимость с моделью
+`glm-4.7-flash` (обычный `ollama pull glm-4.7-flash:q4_K_M`): её Ollama-GGUF
+несёт `general.architecture = "glm4moelite"`, архитектуру, которую апстрим
+llama.cpp до сих пор не поддерживает нативно (issue #18931) — форк алиасит
+её на `deepseek2` прямо в загрузчике GGUF (тензоры и MLA-хпараметры почти
+1:1 совпадают, кроме пары свопнутых ключей и принудительного
+`head_count_kv=1`), плюс фиксит реальный баг остановки генерации (модель
+зацикливалась / не умела кончить ход — GGUF нёс массив
+`tokenizer.ggml.eos_token_ids` из 3 кандидатов, а код читал только
+единственный, из-за чего 2 реальных стоп-токена GLM никогда не
+регистрировались). Подробности расследования — история коммитов на
+`flowai-expert-streaming` (git@github.com:IlyaFeoktistov/llama.cpp.git) и
+шапка `vendor/llama-expert-streaming/README.md`. У этой модели нет
+embedded chat-template в Ollama-GGUF вообще — `--chat-template-file`
+передаётся отсюда автоматически (см. `_chat_template_file_for`) на уже
+существующую тестовую фикстуру форка
+(`models/templates/GLM-4.7-Flash.jinja`, байт-в-байт совпадает с
+официальным zai-org/GLM-4.7-Flash).
+
 ## Точные флаги (проверено по исходникам ветки, common/arg.cpp)
 
   -ehs N / --expert-hot-s N   -1 = autofit слотов по свободной VRAM,
@@ -198,6 +220,59 @@ def resolve_model_blob_path(model_tag: str) -> Path | None:
 
 def is_built() -> bool:
     return SERVER_BINARY.is_file()
+
+
+# GLM-4.7-Flash's Ollama GGUF has no embedded chat template at all (Ollama
+# renders it separately, in its own Go code — see the fork's own commit
+# history on the flowai-expert-streaming branch, vendor/llama-expert-
+# streaming, for the full investigation) — --jinja alone has nothing to
+# render for this one model, unlike every other model this module runs,
+# whose GGUF already carries its own tokenizer.chat_template. The real
+# template (byte-identical to zai-org/GLM-4.7-Flash's official
+# chat_template.jinja) already ships in the fork itself as a test fixture —
+# reused directly rather than duplicating it into this repo.
+_GLM_4_7_FLASH_CHAT_TEMPLATE = VENDOR_DIR / "models" / "templates" / "GLM-4.7-Flash.jinja"
+
+
+def _chat_template_file_for(model_tag: str) -> Path | None:
+    if model_tag.partition(":")[0] == "glm-4.7-flash":
+        return _GLM_4_7_FLASH_CHAT_TEMPLATE
+    return None
+
+
+# Per-model llama-server launch overrides -- same idea as
+# _chat_template_file_for above, for flags instead of the template.
+#
+# glm-4.7-flash: live measurement (2026-08-14, this machine, a ~2.5k-token
+# prompt) -- "--no-mmap --direct-io" took prompt processing from 197.7 to
+# 288.9 tok/s (+46%), generation unchanged (~18-19 tok/s either way).
+# llama.cpp's own loader already warns about exactly this case for this
+# model ("tensor overrides to CPU are used with mmap enabled - consider
+# using --no-mmap for better performance" -- autofit here always partially
+# offloads GLM's MoE layers to CPU on a 6 GB card), just never wired up
+# before. Community-recommended for this model too (HF discussion
+# zai-org/GLM-4.7-Flash#66). q4_0 KV cache (vs this project's usual q8_0
+# elsewhere) is also from that same discussion -- not applied to any other
+# model here, since it's a precision/quality tradeoff never measured for
+# them specifically. -ehs -1 (dynamic expert hot-store) was re-measured
+# for this model too, same live test: WORSE across the board (prompt
+# 288.9 -> 65.8 tok/s, generation 18.2 -> 12.8 tok/s) -- same conclusion as
+# qwen3-coder:30b (see the -ehs 0 comment below), so it stays off here too,
+# nothing to override.
+_GLM_4_7_FLASH_EXTRA_FLAGS = ["--no-mmap", "--direct-io"]
+_GLM_4_7_FLASH_CACHE_TYPE = "q4_0"
+
+
+def _extra_server_flags_for(model_tag: str) -> list[str]:
+    if model_tag.partition(":")[0] == "glm-4.7-flash":
+        return _GLM_4_7_FLASH_EXTRA_FLAGS
+    return []
+
+
+def _cache_type_for(model_tag: str) -> str:
+    if model_tag.partition(":")[0] == "glm-4.7-flash":
+        return _GLM_4_7_FLASH_CACHE_TYPE
+    return "q8_0"
 
 
 _proc: subprocess.Popen | None = None
@@ -379,7 +454,7 @@ def ensure_running(
         # на этой карте (6 GB) и этой модели (30B MoE). Не включать -ehs -1
         # обратно без повторного замера на актуальном железе/модели/промпте.
         "-ehs", "0",
-        "-ctk", "q8_0", "-ctv", "q8_0",
+        "-ctk", _cache_type_for(model_tag), "-ctv", _cache_type_for(model_tag),
         "--host", DEFAULT_HOST,
         "--port", str(port),
         "--jinja",
@@ -387,6 +462,10 @@ def ensure_running(
         # печатает deprecation warning) — актуальный способ тот же переключатель.
         "--reasoning", "on" if show_thinking else "off",
     ]
+    cmd += _extra_server_flags_for(model_tag)
+    chat_template_file = _chat_template_file_for(model_tag)
+    if chat_template_file is not None:
+        cmd += ["--chat-template-file", str(chat_template_file)]
     log_file = open(_LOG_PATH, "wb")
     try:
         _proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)

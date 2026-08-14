@@ -153,6 +153,14 @@ _SUGGESTED: dict[str, list[tuple]] = {
         ("qwen3-coder:30b",      "agentic-кодинг · MoE, ~3.3B активных из 30B — "
                                   "тул-коллы заточены под агентный кодинг, работает и без "
                                   "expert-streaming (обычный Ollama-путь), берёт больше VRAM"),
+        ("glm-4.7-flash:q4_K_M", "требует expert_streaming_enabled=ВКЛ · MoE, ~3B активных "
+                                  "из ~47B, ~17.7 GB весов — обычный Ollama-путь не поддерживает "
+                                  "архитектуру 'glm4moelite' нативно в этом форке без патча, "
+                                  "И несёт известные, незакрытые баги tool-calling в самой "
+                                  "Ollama (issues ollama/ollama#13820 и др., см. "
+                                  "expert_streaming.py про 'GLM-4.7-Flash') — на expert-streaming "
+                                  "оба фикса (загрузка + остановка генерации) подтверждены живым "
+                                  "тестом, включая tool-calling"),
         (None,                   "── средние ─────────────────"),
         ("qwen3.5:9b",           "новее"),
         ("qwen3:8b",             "быстрый"),
@@ -197,6 +205,7 @@ _MODEL_SIZE_GB = {
     "qwq:32b": 20.0,
     "qwen3-coder:30b": 19.0,
     "gpt-oss:20b": 13.0,
+    "glm-4.7-flash:q4_K_M": 17.7,
     "qwen3.5:9b": 6.6,
     "qwen3:8b": 5.2,
     "qwen2.5:7b": 4.7,
@@ -234,7 +243,7 @@ _ITEMS = [
     ("спрашивать разрешения", "ask_permissions", "toggle"),
     ("автопроверка ответа (ретраи)", "self_heal_enabled", "toggle"),
     ("новый пайплайн (Router→Analyzer→Planner→Coder→Verifier)", "pipeline_mode", "toggle"),
-    ("оптимизированные тулы (урезанный список для простого пайплайна)", "optimized_tools", "toggle"),
+    ("оптимизированные тулы (урезанный список для всех агентов)", "optimized_tools", "toggle"),
     ("всегда делегировать поиск по коду сабагенту", "always_delegate_search", "toggle"),
     ("подсказка \"делегируй\" после долгой разведки", "delegate_nudge_enabled", "toggle"),
     ("экспериментальный expert-streaming backend", "expert_streaming_enabled", "toggle"),
@@ -285,7 +294,7 @@ _TOGGLE_HINTS = {
     "always_delegate_search": "(ВЫКЛ = делегирует поиск сабагенту только для больших/незнакомых деревьев; ВКЛ = делегирует ЛЮБОЙ поиск по коду, даже мелкий в этом проекте — медленнее на простых задачах)",
     "delegate_nudge_enabled": "(ВЫКЛ = не подсказывать delegate после долгой разведки — независимо от always_delegate_search выше)",
     "expert_streaming_enabled": "(экспериментальный, незамерженный форк llama.cpp с настоящим dynamic MoE expert-кэшем вместо статичного сплита Ollama — TG быстрее, PP заметно медленнее, нужен `setup.py --only expert-streaming`; действует независимо от pipeline_mode — см. expert_streaming.py)",
-    "optimized_tools":        "(работает только когда 'новый пайплайн' ВЫКЛ и не в голосовом режиме — по одному тулу на смысл: bash/read/grep/glob/write/edit, без git-тулов и вариантов read/write)",
+    "optimized_tools":        "(не в голосовом режиме — по одному тулу на смысл: bash/read/grep/glob/write, без git-тулов и вариантов read/write; действует и в легаси-агенте, и во всех ролях нового пайплайна — Analyzer/Planner/Coder/Verifier)",
     "show_thinking": "(цепочка мыслей)",
     "recap_enabled":          "(краткая память в шапке)",
     "compact_history_enabled": "(ВЫКЛ = никогда не пересказывать историю тул-вызовов внутри хода — риск переполнить num_ctx на очень долгих ходах, зато без потери деталей)",
