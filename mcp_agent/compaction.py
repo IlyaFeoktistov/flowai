@@ -112,6 +112,29 @@ Analyzer/Planner с их ~2.7k-токенным системным промпт�
 сменился с доли от num_ctx на num_ctx минус фиксированный резерв под
 генерацию (OLLAMA_NUM_PREDICT) и под неточность самой оценки — см. её
 собственный докстринг.
+
+Живой прогон #8 (glm-4.7-flash/expert-streaming, analyzer-роль, 20260814,
+сессия 20260814-133743-866a5186): та же ошибка ("request (31564 tokens)
+exceeds the available context size (30208 tokens)"), но на этот раз
+_needs_compaction's own оценка (chars//4 + запас в OLLAMA_NUM_PREDICT+3000
+из фикса #7) НИ РАЗУ не сработала за весь ~7-минутный ход — 61 вызов
+bash_exec, ни одной правки (расследование через journalctl/dmesg/docker
+logs). Разница между реальными 31564 токенами и порогом в 22904
+(num_ctx=30000 минус запас 7096) — минимум 8660 токенов, т.е. запас
+"+3000" перекрывал разрыв из прогона #7 (~20+ тулов, английская проза), но
+не этот: содержимое здесь — дампы journalctl/docker logs, плотные
+таймстемпы/hex ID контейнеров/экранированный вложенный JSON, которые
+токенизируются заметно хуже даже кода (близко к 1 токену на 2 символа, а
+не на 4) — ровно тот случай, о котором предупреждал докстринг
+_needs_compaction ("code/JSON-shaped content tokenizes less efficiently"),
+просто в ещё более выраженной форме. Запас поднят с 3000 до 9000 (см. его
+докстринг) — но это ПОДГОНКА КОНСТАНТЫ под конкретный измеренный разрыв,
+не гарантия на будущее для ещё более плотного контента, поэтому вторая,
+структурная часть фикса — is_context_overflow_error ниже (детектор) плюс
+hit_context_overflow в mcp_agent/agent.py:_stream_round/mcp_agent/
+stage_runner.py:run_stage (реактивный перехват РЕАЛЬНОГО 400 от бэкенда, а
+не ещё одна попытка угадать точный коэффициент эвристики) — см. их
+докстринги.
 """
 import hashlib
 import json
@@ -339,17 +362,42 @@ def _needs_compaction(messages: list, system_message=None, tools=None) -> bool:
         total += _estimate_message_tokens(system_message)
     if tools:
         total += sum(_estimate_tool_tokens(t) for t in tools)
-    # +3000 (not a smaller round number) on top of the generation reserve —
-    # live measurement (2026-08-14, same incident): investigator_tools()'s
-    # ~27 tools alone cost ~3085 estimated tokens from name+description
-    # text ALONE, before even adding each tool's own parameters JSON schema
-    # (which _estimate_tool_tokens above does count, so the real number is
-    # higher still) — chars//4 has real, demonstrated slack in exactly this
-    # direction (code/JSON-shaped content tokenizes less efficiently per
-    # character than the prose this heuristic was tuned against), not just
-    # theoretical rounding error.
-    reserve = OLLAMA_NUM_PREDICT + 3000
+    # +9000 (was +3000) on top of the generation reserve — live-run #8
+    # (module docstring, 2026-08-14, analyzer role digging through
+    # journalctl/dmesg/docker logs): the +3000 margin from live-run #7
+    # covered THAT incident's gap (~20+ tool schemas, English prose) but
+    # not this one — a real 400 fired ("31564 tokens" vs. a 30208-token
+    # window) while this gate's own estimate stayed under its
+    # then-threshold of 22904, a gap of at least 8660 tokens. Root cause:
+    # log-dump content (dense timestamps, hex container IDs, escaped
+    # nested JSON) tokenizes noticeably worse than even code — closer to
+    # 1 token per 2 characters than the 1-per-4 this heuristic assumes.
+    # This number is a fit to that ONE measured gap, not a proof it covers
+    # every future content shape — the reactive fallback below
+    # (is_context_overflow_error / hit_context_overflow, see
+    # agent.py:_stream_round and stage_runner.py:run_stage) exists
+    # precisely because no fixed multiplier on chars//4 can be trusted to
+    # never be wrong again.
+    reserve = OLLAMA_NUM_PREDICT + 9000
     return total > settings.get("num_ctx") - reserve
+
+
+def is_context_overflow_error(exc: Exception) -> bool:
+    """True if `exc` looks like the backend rejecting a request outright
+    because it doesn't fit num_ctx, e.g. (live-run #8, module docstring)
+    openai.BadRequestError's str() for expert-streaming's llama.cpp server:
+    "Error code: 400 - {'error': {'code': 400, 'message': 'request (31564
+    tokens) exceeds the available context size (30208 tokens), try
+    increasing it', 'type': 'exceed_context_size_error', ...}}". Matched on
+    the message TEXT, not a specific SDK exception class — MAIN_MODEL is
+    either ChatOllama or ChatOpenAI depending on
+    settings.expert_streaming_enabled (see agent_builder.py:
+    _build_chat_model), and each backend's client raises its own exception
+    type for the same underlying condition. Deliberately loose (two
+    keywords, not the exact llama.cpp `type` field) so it still catches
+    Ollama's own phrasing of the same error, not just this one backend's."""
+    text = str(exc).lower()
+    return "exceed_context_size_error" in text or ("context size" in text and "exceed" in text)
 
 
 def _group_turns(messages: list) -> list[list]:

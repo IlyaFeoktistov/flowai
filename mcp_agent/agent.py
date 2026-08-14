@@ -70,6 +70,7 @@ from ui.console import console  # noqa: E402
 from mcp_agent import prompts  # noqa: E402
 from mcp_agent.agent_builder import _get_agent  # noqa: E402
 from mcp_agent.ask_user_tool import _ask_decisions  # noqa: E402
+from mcp_agent.compaction import is_context_overflow_error  # noqa: E402
 from mcp_agent.debug_log import log_event  # noqa: E402
 from mcp_agent.delegate_tool import current_on_event as _delegate_on_event  # noqa: E402
 from mcp_agent.delegate_tool import _suppress_during_subagent_tools  # noqa: E402
@@ -107,7 +108,7 @@ _thread_counter = 0
 
 async def _stream_round(
     agent, current_input, config, on_event, emitted: int, mid_turn_queue=None,
-) -> tuple[dict, int, int, int, int, bool, int]:
+) -> tuple[dict, int, int, int, int, bool, bool, int]:
     """Крутит agent.astream() с ДВУМЯ stream_mode одновременно вместо одного
     ainvoke():
     - "values" — полное состояние графа после каждого шага (как и раньше):
@@ -130,10 +131,11 @@ async def _stream_round(
     финальным ответом.
 
     Возвращает (последний чанк состояния, новый emitted, tokens_in, tokens_out,
-    llm_calls, hit_recursion_limit, gen_ms) — emitted передаётся насквозь,
-    чтобы не переэмитить одни и те же сообщения повторно на следующей
-    попытке/резюме. llm_calls — сколько раз модель реально дёргалась (см.
-    _SYSTEM_PROMPT_TOKENS_ESTIMATE ниже, зачем это нужно).
+    llm_calls, hit_recursion_limit, hit_context_overflow, gen_ms) — emitted
+    передаётся насквозь, чтобы не переэмитить одни и те же сообщения
+    повторно на следующей попытке/резюме. llm_calls — сколько раз модель
+    реально дёргалась (см. _SYSTEM_PROMPT_TOKENS_ESTIMATE ниже, зачем это
+    нужно).
 
     gen_ms — суммарное МИЛЛИСЕКУНДНОЕ время реальной генерации токенов (окна
     между первым и последним "messages"-чанком одного AIMessage), БЕЗ
@@ -170,7 +172,21 @@ async def _stream_round(
     ПОЛНОЕ состояние (все messages/tool_calls) всех успешно завершённых
     шагов до этого момента, просто без итогового текстового ответа. Отдаём
     это наружу как обычный (усечённый) раунд — stream_chat решает, строить
-    ли из него digest и ретраить, или сдаваться, если попытки кончились."""
+    ли из него digest и ретраить, или сдаваться, если попытки кончились.
+
+    Тот же приём — теперь и для реального 400 "exceeds the available
+    context size" (см. compaction.py's is_context_overflow_error и его
+    докстринг, live-run #8): _CompactResearchMiddleware's собственный
+    проактивный гейт (compaction.py:_needs_compaction) — chars//4-эвристика,
+    которая может занизить реальную токенизацию (лог-дампы токенизируются
+    заметно хуже прозы/кода) и не сработать ДО того, как бэкенд реально
+    отклонит запрос. Раньше это исключение убивало ВЕСЬ ход необработанным
+    (всплывало до cli.py, который стирал даже сообщение пользователя) —
+    теперь ловится точно так же, как GraphRecursionError: `chunk` уже
+    содержит все успешно завершённые шаги до отказавшего вызова модели, так
+    что вызывающий код может построить из этого обычный digest и
+    ретраить с чистого, маленького payload вместо того, чтобы терять весь
+    прогресс."""
     tokens_in = tokens_out = llm_calls = 0
     gen_ms = 0.0
     gen_window_start: float | None = None  # см. gen_ms в докстринге выше
@@ -197,6 +213,7 @@ async def _stream_round(
         shown_anything = False
 
     hit_recursion_limit = False
+    hit_context_overflow = False
     injected_text: str | None = None  # см. mid_turn_queue в докстринге выше
     try:
         while True:
@@ -389,8 +406,16 @@ async def _stream_round(
         # остановки в нём нет. Отдаём как обычный (усечённый) раунд, а не
         # пустоту — stream_chat решает, ретраить с digest или сдаваться.
         hit_recursion_limit = True
+    except Exception as e:
+        # Не ловим ВСЁ подряд — только реально узнанный "контекст
+        # переполнен" (см. is_context_overflow_error), всё остальное
+        # (реальный сбой сети/модели и т.п.) должно всплывать как и раньше,
+        # а не тихо притворяться усечённым раундом.
+        if not is_context_overflow_error(e):
+            raise
+        hit_context_overflow = True
 
-    return chunk, emitted, tokens_in, tokens_out, llm_calls, hit_recursion_limit, int(gen_ms)
+    return chunk, emitted, tokens_in, tokens_out, llm_calls, hit_recursion_limit, hit_context_overflow, int(gen_ms)
 
 
 # Живой прогон (mail-server, 20260707-201534-f48ff36e, GraphRecursion
@@ -637,6 +662,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     result = None
     hit_recursion_limit = False
     hit_generation_error = False
+    hit_context_overflow = False
     final_verdict = None  # последний verdict — нужен, чтобы пометить ответ,
     # если попытки кончились, а verdict так и остался "не подходит"
 
@@ -669,7 +695,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
 
         attempt_start = emitted
         try:
-            result, emitted, tin, tout, calls, hit_limit_this_round, round_gen_ms = await _stream_round(
+            result, emitted, tin, tout, calls, hit_limit_this_round, hit_overflow_this_round, round_gen_ms = await _stream_round(
                 agent, payload, config, on_event, emitted, mid_turn_queue=mid_turn_queue,
             )
             tokens_in += tin
@@ -740,6 +766,39 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
                 "the same directories/files. If this needs many more files "
                 "across many layers, hand the rest off to delegate instead "
                 "of reading them all yourself.",
+                read_history,
+            )
+            attempt += 1
+            continue
+
+        if hit_overflow_this_round:
+            # Живой прогон #8 (compaction.py's module docstring, 20260814):
+            # тот же приём, что hit_limit_this_round выше — chunk уже
+            # содержит все успешно завершённые шаги до отказавшего вызова
+            # модели (_stream_round перехватил реальный 400 "exceeds the
+            # available context size" ровно как GraphRecursionError), так
+            # что есть из чего строить digest и ретраить с чистого,
+            # маленького payload вместо того, чтобы терять весь ход.
+            if attempt == max_attempts_effective - 1:
+                hit_context_overflow = True
+                break
+            final_verdict = {
+                "relevant": False,
+                "reason": "the request grew too large for the model's context window mid-investigation",
+            }
+            if DEBUG:
+                console.print(f"[dim][MCP-AGENT] Deterministic verdict: {final_verdict}[/]")
+            log_event("verdict", **final_verdict)
+            round_digests.append(_summarize_round(round_msgs, final_verdict))
+            payload, config, emitted = _start_next_attempt(
+                original_messages, round_digests,
+                "Your last request grew too large for the model's context window "
+                "and was rejected before it could even run. The summary above "
+                "lists WHERE you already looked — only re-call one of them if "
+                "you actually need to see its content again. Be more selective "
+                "this time: prefer narrower/scoped tool calls (grep a specific "
+                "pattern instead of dumping a whole log, read a line range "
+                "instead of a whole file) over broad dumps.",
                 read_history,
             )
             attempt += 1
@@ -1328,6 +1387,16 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
         yield (
             "⚠️ Модель несколько раз подряд сгенерировала некорректный вызов "
             "инструмента, который не удалось разобрать. Попробуй повторить запрос."
+        )
+        return
+
+    if hit_context_overflow:
+        yield (
+            f"⚠️ За {attempt + 1} попыт{'ку' if attempt == 0 else 'ки'} расследование "
+            "каждый раз разрасталось больше, чем помещается в контекст модели, и "
+            "запрос отклонялся ещё до генерации ответа. Попробуй сузить задачу "
+            "(например, сразу указать точный диапазон времени/файл вместо общего "
+            "\"разберись, что случилось\") или поднять num_ctx в /settings."
         )
         return
 

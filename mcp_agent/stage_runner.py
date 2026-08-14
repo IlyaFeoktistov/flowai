@@ -68,6 +68,7 @@ class StageResult:
     verdict: dict | None = None  # None = ни разу не проверялось (нечего проверять), иначе последний verdict
     hit_recursion_limit: bool = False
     hit_generation_error: bool = False
+    hit_context_overflow: bool = False
 
 
 async def run_stage(
@@ -113,7 +114,7 @@ async def run_stage(
         log_event("stage_attempt", stage=stage_name, n=attempt + 1, max=max_attempts)
         attempt_start = emitted
         try:
-            result, emitted, tin, tout, calls, hit_limit_this_round, _gen_ms = await _stream_round(
+            result, emitted, tin, tout, calls, hit_limit_this_round, hit_overflow_this_round, _gen_ms = await _stream_round(
                 agent, payload, config, on_event, emitted
             )
             tokens_in += tin
@@ -182,6 +183,39 @@ async def run_stage(
                 "re-fetching it. Spend this attempt on genuinely NEW files/ranges, "
                 "or — if you already saw enough to answer — stop investigating "
                 "entirely and produce your final answer now.",
+                read_history, recursion_limit,
+            )
+            attempt += 1
+            continue
+
+        if hit_overflow_this_round:
+            # Живой прогон #8 (compaction.py's module docstring, 20260814,
+            # analyzer role): тот же приём, что hit_limit_this_round выше —
+            # _stream_round перехватил реальный 400 "exceeds the available
+            # context size" (compaction.py's проактивный гейт — chars//4
+            # эвристика — не сработал заранее для лог-дампов) ровно как
+            # GraphRecursionError, так что round_msgs всё ещё содержит все
+            # успешно завершённые шаги до отказавшего вызова модели.
+            # Дайджестим и ретраим с чистого, маленького payload вместо
+            # того, чтобы терять весь ход целиком.
+            if attempt == max_attempts - 1:
+                return StageResult(
+                    final_text=round_final_text, round_msgs=round_msgs, all_round_msgs=all_round_msgs,
+                    tokens_in=tokens_in, tokens_out=tokens_out, llm_calls=llm_calls,
+                    hit_context_overflow=True,
+                )
+            verdict = {"relevant": False, "reason": "the request grew too large for the model's context window mid-investigation"}
+            log_event("stage_verdict", stage=stage_name, **verdict)
+            round_digests.append(_stage_digest(round_msgs, verdict))
+            payload, config, emitted = _seed_retry(
+                original_messages, round_digests,
+                "Your last request grew too large for the model's context window "
+                "and was rejected before it could even run. The digest above "
+                "lists WHERE you already looked — only re-call one of them if "
+                "you actually need to see its content again. Be more selective "
+                "this time: prefer narrower/scoped tool calls (grep a specific "
+                "pattern instead of dumping a whole log, read a line range "
+                "instead of a whole file) over broad dumps.",
                 read_history, recursion_limit,
             )
             attempt += 1

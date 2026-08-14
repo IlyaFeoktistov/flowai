@@ -360,6 +360,20 @@ async def stream_chat(messages: list[dict], on_event=None):
                 "задача требует более узкой формулировки."
             )
             return
+        if analyzer_result.hit_context_overflow:
+            # Живой прогон #8 (compaction.py's module docstring, 20260814):
+            # запрос разросся больше, чем помещается в контекст модели, и
+            # был отклонён бэкендом ещё до генерации — run_stage уже дал
+            # Analyzer'у шанс переретраить с дайджестом (stage_runner.py),
+            # это финальный, ПОСЛЕДНИЙ провал.
+            await _capture_if_useful(analyzer_text or "(no summary — request kept overflowing the context window)")
+            yield await _finish(
+                "⚠️ Расследование каждый раз разрасталось больше, чем помещается в "
+                "контекст модели, и запрос отклонялся ещё до ответа. Попробуй сузить "
+                "задачу (точный файл/диапазон времени вместо общего описания) или "
+                "поднять num_ctx в /settings."
+            )
+            return
         if not analyzer_text:
             yield await _finish("⚠️ Не удалось получить саммари исследования — попробуй переформулировать задачу.")
             return
@@ -398,6 +412,14 @@ async def stream_chat(messages: list[dict], on_event=None):
             yield await _finish(
                 f"⚠️ Planner не уложился в {ROLE_RECURSION_LIMIT['planner']} шагов — "
                 "задача требует более узкой формулировки.\n\nСаммари Analyzer'а:\n\n" + analyzer_text
+            )
+            return
+        if planner_result.hit_context_overflow:
+            await _capture_if_useful(analyzer_text)
+            yield await _finish(
+                "⚠️ Планирование каждый раз разрасталось больше, чем помещается в "
+                "контекст модели, и запрос отклонялся ещё до ответа.\n\nСаммари "
+                "Analyzer'а:\n\n" + analyzer_text
             )
             return
         if not planner_text:
@@ -461,12 +483,13 @@ async def stream_chat(messages: list[dict], on_event=None):
             saved_knowledge_this_turn = saved_knowledge_this_turn or c_saved
             coder_text = coder_result.final_text.strip()
 
-            if coder_result.hit_recursion_limit or not coder_text:
+            if coder_result.hit_recursion_limit or coder_result.hit_context_overflow or not coder_text:
                 reverted = _revert_turn_paths(touched_paths, turn_start_wall) if touched_paths else []
                 stage_label = "QuickFix" if coder_role == "quick_fix" else "Coder"
                 msg = (
                     f"⚠️ {stage_label} не справился с задачей"
                     + (f" (исчерпан бюджет {ROLE_RECURSION_LIMIT[coder_role]} шагов)" if coder_result.hit_recursion_limit else "")
+                    + (" (запрос разросся больше контекста модели)" if coder_result.hit_context_overflow else "")
                     + "."
                 )
                 if reverted:
@@ -505,11 +528,17 @@ async def stream_chat(messages: list[dict], on_event=None):
             saved_knowledge_this_turn = saved_knowledge_this_turn or v_saved
             verifier_text = verifier_result.final_text.strip()
 
-            if verifier_result.hit_recursion_limit or not verifier_text:
+            if verifier_result.hit_recursion_limit or verifier_result.hit_context_overflow or not verifier_text:
                 await _capture_if_useful(plan_context_text + "\n\n" + coder_text)
+                reason = (
+                    f"исчерпан бюджет {ROLE_RECURSION_LIMIT['verifier']} шагов"
+                    if verifier_result.hit_recursion_limit
+                    else "запрос разросся больше контекста модели"
+                    if verifier_result.hit_context_overflow
+                    else "пустой ответ"
+                )
                 yield await _finish(
-                    f"⚠️ Verifier не смог завершить проверку (исчерпан бюджет "
-                    f"{ROLE_RECURSION_LIMIT['verifier']} шагов).\n\nОтчёт: " + coder_text
+                    f"⚠️ Verifier не смог завершить проверку ({reason}).\n\nОтчёт: " + coder_text
                 )
                 return
 
