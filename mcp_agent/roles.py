@@ -16,6 +16,7 @@ verifier_tools), собирающие конкретный набор из needs
 как явный tool_names — роль больше не диктует ЕДИНСТВЕННЫЙ возможный набор
 тулов, только промпт/бюджет попыток (ROLE_RECURSION_LIMIT/ROLE_MAX_ATTEMPTS
 ниже, они не зависят от флагов, только от роли)."""
+import settings
 from mcp_agent.config import TOOLS_REQUIRING_APPROVAL
 from mcp_agent.model_config import (
     ANALYZER_MAX_ATTEMPTS,
@@ -29,6 +30,7 @@ from mcp_agent.model_config import (
     VERIFIER_MAX_ATTEMPTS,
     VERIFIER_RECURSION_LIMIT,
 )
+from mcp_agent.optimized_tools import OPTIMIZED_TOOL_NAMES
 
 # Явный allowlist по ИМЕНИ тула, а не "всё, что не в TOOLS_REQUIRING_APPROVAL"
 # — так подмножество не меняется молча, если кто-то добавит новый
@@ -50,6 +52,9 @@ _PROJECT_READ_TOOLS = {
     "lsp",
     # rag_server.py — семантический поиск, не reindex/remember_url (запись)
     "search_code_semantic", "search_dialog_history", "search_external_sources",
+    # rag_server.py — структурный (не семантический) обзор своей же истории:
+    # список сессий и полный транскрипт одной из них
+    "list_episodic_sessions", "read_episodic_session",
     # knowledge/memory — только чтение
     "get_knowledge", "list_memory",
 }
@@ -110,36 +115,64 @@ def _project_read_tools(has_shell: bool) -> set[str]:
     return _PROJECT_READ_TOOLS - _THIN_WRAPPER_TOOLS if has_shell else set(_PROJECT_READ_TOOLS)
 
 
-def investigator_tools(needs_project: bool) -> set[str]:
+def _apply_optimized_filter(names: set[str]) -> set[str]:
+    """settings.optimized_tools (see optimized_tools.py's own docstring)
+    used to be scoped to ONLY the legacy monolithic agent — "работает
+    только когда 'новый пайплайн' ВЫКЛ" (see ui/tui/settings.py's toggle
+    hint, updated alongside this). Direct instruction (2026-08-14): same
+    toggle should narrow every new-pipeline role's tool set too, not just
+    legacy's — a role doesn't need read_file AND read_text_file AND
+    read_multiple_files AND search_files AND directory_tree AND
+    project_tree AND search_symbols AND every git_* read tool all bound
+    simultaneously when bash_exec (unconditional for every role that has
+    it at all, see investigator_tools/verifier_tools) already covers
+    cat/grep/find/git diff just as reliably — more near-duplicate tools in
+    the schema is more chances for a weaker/quantized model to reach for
+    the wrong one, not more real capability (same reasoning
+    optimized_tools.py's own docstring already gives for the legacy path).
+
+    Intersects rather than replaces the capability-group union each
+    composer function below builds — applied to that raw union BEFORE any
+    role adds its own always-needed extra (planner's ask_user, coder's
+    mark_plan_step_current), so those never get filtered out even though
+    mark_plan_step_current isn't itself in OPTIMIZED_TOOL_NAMES (ask_user
+    is, redundantly, but the union order makes it moot either way)."""
+    return names & OPTIMIZED_TOOL_NAMES if settings.get("optimized_tools") else names
+
+
+def investigator_tools() -> set[str]:
     """Read/observe-only набор — используется и когда инвестигатор питает
     Planner дальше (needs_change+ambiguous), и когда его саммари сразу
     становится финальным ответом (не needs_change, старое kind="explain") —
     в обоих случаях НИКТО не идёт проверять его работу отдельным взглядом
     после, так что самому иметь bash_exec тут безопасно и нужно.
 
-    _SHELL_TOOLS (bash_exec) — БЕЗУСЛОВНЫ, больше не зависят от needs_shell.
-    Живой инцидент: needs_shell — это классификация ДО единого вызова тула,
-    та же квантованная модель, что и основной чат, ошибается — investigator
-    с needs_shell=false, но реально нуждавшийся в команде, застревал в
-    ретраях без единого способа восстановиться В ЭТОМ ЖЕ раунде (эскалация
-    "дай мне другой набор тулов и попробуй снова" — отдельная, куда более
-    инвазивная фича, трогающая retry-цикл stage_runner.py). approval-диалог
-    на каждый реальный вызов bash_exec (TOOLS_REQUIRING_APPROVAL) уже
-    защищает не хуже, чем отсутствие тула в схеме — так что цена ошибки
-    needs_shell в любую сторону теперь минимальна, а не фатальна.
-    needs_shell остаётся флагом РОУТЕРА (решает, входить ли в investigator
-    вообще вместо остаться в casual — см. pipeline.py), просто больше не
-    параметр этой функции."""
-    names = set(_WEB_TOOLS) | set(_SHELL_TOOLS)
-    if needs_project:
-        names |= _project_read_tools(has_shell=True)
-    return names
+    _SHELL_TOOLS (bash_exec) и _PROJECT_READ_TOOLS — ОБА БЕЗУСЛОВНЫ, не
+    зависят от needs_shell/needs_project. Живой инцидент (сначала для
+    needs_shell, потом для needs_project — тот же класс бага дважды):
+    needs_shell/needs_project — это классификация РОУТЕРОМ ДО единого
+    вызова тула, та же квантованная модель, что и основной чат, ошибается
+    — investigator с needs_project=false, но реально нуждавшийся в
+    project-тулах, не просто "не мог восстановиться в ретраях" — получал
+    ЯВНУЮ инструкцию в промпте (см. pipeline.py:_investigator_scope_note,
+    до этого фикса) "у тебя нет этих тулов, даже не пытайся" и послушно
+    отвечал отказом на вопрос вроде "какие параметры стоят у модели этого
+    проекта" вместо того, чтобы прочитать конфиг. approval-диалог на
+    bash_exec (TOOLS_REQUIRING_APPROVAL) и то, что остальные project-read
+    тулы вообще read-only без approval, защищают не хуже, чем отсутствие
+    тула в схеме — так что цена ошибки needs_shell/needs_project в любую
+    сторону теперь минимальна, а не фатальна. Оба флага остаются флагами
+    РОУТЕРА (needs_shell решает, входить ли в investigator вообще вместо
+    остаться в casual; needs_project влияет на _investigator_scope_note и
+    is_final_answer — см. pipeline.py), просто больше не параметры этой
+    функции."""
+    return _apply_optimized_filter(set(_WEB_TOOLS) | set(_SHELL_TOOLS) | _project_read_tools(has_shell=True))
 
 
-def planner_tools(needs_project: bool) -> set[str]:
+def planner_tools() -> set[str]:
     # ask_user — единственный "пишущий" тул Planner'а, обязателен для
     # согласования плана перед тем, как отдать его Coder'у.
-    return investigator_tools(needs_project) | {"ask_user"}
+    return investigator_tools() | {"ask_user"}
 
 
 def executor_tools(needs_project: bool) -> set[str]:
@@ -163,7 +196,7 @@ def executor_tools(needs_project: bool) -> set[str]:
     names = set(_WEB_TOOLS) | _WRITE_TOOLS
     if needs_project:
         names |= _project_read_tools(has_shell=False)
-    return names
+    return _apply_optimized_filter(names)
 
 
 def coder_tools() -> set[str]:
@@ -176,7 +209,8 @@ def coder_tools() -> set[str]:
     вообще есть пронумерованный plan_steps-чек-лист над футером (см.
     pipeline.py/ui/app.py) — Planner/Analyzer/Verifier/quick_fix его не
     рисуют, им нечего отмечать текущим."""
-    return _project_read_tools(has_shell=False) | _WEB_TOOLS | _WRITE_TOOLS | {"mark_plan_step_current"}
+    raw = _project_read_tools(has_shell=False) | _WEB_TOOLS | _WRITE_TOOLS
+    return _apply_optimized_filter(raw) | {"mark_plan_step_current"}
 
 
 def verifier_tools() -> set[str]:
@@ -185,7 +219,7 @@ def verifier_tools() -> set[str]:
     реально что-то запустить (тесты/линтер), независимо от того, что было
     needs_shell у САМОГО запроса. _THIN_WRAPPER_TOOLS вычитается — bash_exec
     здесь безусловно есть, так что реальной потери возможностей нет."""
-    return _project_read_tools(has_shell=True) | _WEB_TOOLS | _SHELL_TOOLS
+    return _apply_optimized_filter(_project_read_tools(has_shell=True) | _WEB_TOOLS | _SHELL_TOOLS)
 
 
 def filter_tools(names: set[str], tools: list) -> list:

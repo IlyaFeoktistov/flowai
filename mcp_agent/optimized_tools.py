@@ -1,28 +1,38 @@
 """
-"Оптимизированный" набор тулов для СТАРОГО (legacy mcp_agent/agent.py)
-агента — settings.optimized_tools (см. settings.py/ui/tui/settings.py).
-Только урезание списка, БЕЗ переименования: тулы остаются под своими
-родными MCP-именами (write_file/edit_file/bash_exec/read_file_range/...) —
-self_heal.py, config.py:TOOLS_REQUIRING_APPROVAL, ask_user_tool.py,
-compaction.py и весь остальной код, matching по имени тула, продолжают
-работать без единой правки. Переименование в духе Claude Code (Bash/Read/
-Write/...) обсуждалось и было отклонено — цепочка мест, matching'ящих по
-буквальному имени тула (approval-гейт HumanInTheLoopMiddleware в первую
-очередь — тихая потеря approval на Bash/Write было бы security-регрессией,
-не просто багом), сделала бы риск несоразмерным цели "покороче список".
+"Оптимизированный" набор тулов — settings.optimized_tools (см.
+settings.py/ui/tui/settings.py). Только урезание списка, БЕЗ
+переименования: тулы остаются под своими родными MCP-именами
+(write_file/edit_file/bash_exec/read_file_range/...) — self_heal.py,
+config.py:TOOLS_REQUIRING_APPROVAL, ask_user_tool.py, compaction.py и весь
+остальной код, matching по имени тула, продолжают работать без единой
+правки. Переименование в духе Claude Code (Bash/Read/Write/...)
+обсуждалось и было отклонено — цепочка мест, matching'ящих по буквальному
+имени тула (approval-гейт HumanInTheLoopMiddleware в первую очередь —
+тихая потеря approval на Bash/Write было бы security-регрессией, не просто
+багом), сделала бы риск несоразмерным цели "покороче список".
 
-Смысл в другом: и Analyzer, и Coder, и voice_mode-агент (когда он всё же
-получает тулы) в легаси-пути видят ВСЕ ~60 тулов сразу, независимо от
-задачи (см. router.py/roles.py — ровно то, чего у легаси-агента НЕТ и что
-уже чинит новый пайплайн). Этот флаг — узкая, отдельная от пайплайна мера:
-статичный (не per-запрос, без classify_intent) урезанный список в духе
-Claude Code — по одному тулу на "смысл" (bash/read/grep/glob/write), но
-write здесь НЕ один: write_file (целиком) + replace_lines/insert_lines/
-copy_lines (точечно, по номерам строк) — БЕЗ edit_file, см.
-_CORE_TOOL_NAMES про то, почему именно edit_file исключён, а точечные
-line-based тулы оставлены. НЕ трогает новый пайплайн
-(mcp_agent/pipeline.py/roles.py) — там своя, per-request композиция уже
-решает эту же задачу иначе.
+Смысл: и Analyzer, и Coder, и voice_mode-агент (когда он всё же получает
+тулы) в легаси-пути видят ВСЕ ~60 тулов сразу, независимо от задачи (см.
+router.py/roles.py — ровно то, чего у легаси-агента НЕТ и что уже чинит
+новый пайплайн через per-request классификацию needs_project/needs_shell).
+Этот флаг — статичный (не per-запрос) урезанный список в духе Claude Code
+— по одному тулу на "смысл" (bash/read/grep/glob/write), но write здесь НЕ
+один: write_file (целиком) + replace_lines/insert_lines/copy_lines
+(точечно, по номерам строк) — БЕЗ edit_file, см. _CORE_TOOL_NAMES про то,
+почему именно edit_file исключён, а точечные line-based тулы оставлены.
+
+Действует и в новом пайплайне (mcp_agent/roles.py:_apply_optimized_filter,
+2026-08-14) — раньше было "НЕ трогает новый пайплайн, там своя композиция
+решает эту же задачу иначе", но per-request needs_project/needs_shell
+решают ДРУГУЮ задачу (какие КАТЕГОРИИ тулов роли вообще нужны — читает ли
+она проект, гоняет ли shell), а не эту (сколько ПОЧТИ-ДУБЛЕЙ внутри
+category-группы видит модель одновременно): investigator_tools() и
+остальные компоновщики роли всё равно собирают read_file И read_text_file
+И read_multiple_files И search_files И directory_tree И project_tree И
+search_symbols разом, даже когда needs_project=true и roles.py уже решил
+"этой роли ЧТО-ТО читающее нужно" — тот же класс шума, что и в легаси-пути,
+просто на другом уровне. Один и тот же тумблер сужает оба пути до одного и
+того же набора OPTIMIZED_TOOL_NAMES.
 
 git-тулы (git_status/git_diff/git_commit/...) исключены целиком — Claude
 Code не имеет отдельных git-тулов вообще, всё идёт через Bash; здесь то же

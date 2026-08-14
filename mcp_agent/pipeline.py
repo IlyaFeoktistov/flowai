@@ -179,29 +179,35 @@ def _inject_note_before_last(messages: list, note: str) -> list:
     return [*messages[:-1], HumanMessage(content=note), messages[-1]]
 
 
-def _investigator_scope_note(needs_project: bool, is_final_answer: bool, is_followup: bool = False) -> str | None:
+def _investigator_scope_note(is_final_answer: bool, is_followup: bool = False) -> str | None:
     """Extra per-call guidance for the investigator ("analyzer") stage,
     covering things its STATIC system prompt (prompts.py:
-    _analyzer_system_prompt) can't know ahead of time — whether THIS
-    particular round actually has project-file tools (composed from
-    router.py's needs_project flag, see roles.py:investigator_tools — shell
-    is unconditional now, see that function's docstring, so no note needed
-    for it anymore), whether its summary is the final user-facing answer or
-    feed for a Planner, and whether this is a follow-up in an ongoing
-    conversation that already did related investigation. Injected as a
-    per-call message instead of baked into the cached system prompt — same
-    pattern _seed_stage_payload already uses for cross-stage digests — so
-    tool_names/is_final_answer/is_followup don't need to become extra
-    dimensions of the agent cache key (agent_builder.py:_get_role_agent).
+    _analyzer_system_prompt) can't know ahead of time — whether its summary
+    is the final user-facing answer or feed for a Planner, and whether this
+    is a follow-up in an ongoing conversation that already did related
+    investigation. Injected as a per-call message instead of baked into the
+    cached system prompt — same pattern _seed_stage_payload already uses
+    for cross-stage digests — so is_final_answer/is_followup don't need to
+    become extra dimensions of the agent cache key (agent_builder.py:
+    _get_role_agent).
 
-    Live incidents this fixes: (1) "what quantization is my local model" —
-    needs_project=false — got stuck retrying because nothing told it "you
-    don't have those tools, stop trying" (this was BEFORE bash_exec became
-    unconditional; kept for the needs_project=false case, where project
-    tools genuinely are still absent); (2) final answers to pure questions
+    Used to also carry a needs_project=false branch ("this round you do NOT
+    have project tools, don't bother trying") — removed once project-read
+    tools became unconditional in roles.py:investigator_tools, same class
+    of fix as _SHELL_TOOLS earlier: Router's needs_project classification
+    (the same quantized chat model, fallible) was plainly wrong on "what
+    parameters does this project's model have" (a project-scoped question
+    if there ever was one), and this note then actively told the model to
+    refuse instead of trying — a live incident (2026-08-14, glm-4.7-flash)
+    reproduced exactly that: the model obediently answered "I can't access
+    project files" to a question that needed nothing more than
+    `cat mcp_agent/model_config.py` (bash_exec, which it always had
+    regardless of needs_project).
+
+    Live incidents this still fixes: (1) final answers to pure questions
     came back with Planner-style "inventory" framing and unwanted
     meta-commentary ("mission accomplished") because the prompt always
-    assumes a Planner reads this next; (3) "проведи анализ на дыры в
+    assumes a Planner reads this next; (2) "проведи анализ на дыры в
     безопасности" followed a turn later by "попробуй исправить самое
     простое" — the user's own earlier message list already contained this
     stage's OWN full report (files, line numbers, code) from the first
@@ -209,13 +215,6 @@ def _investigator_scope_note(needs_project: bool, is_final_answer: bool, is_foll
     burning ~2.5 minutes before Planner even started on what should have
     been a two-line fix."""
     parts = []
-    if not needs_project:
-        parts.append(
-            "This round you do NOT have project file/git/code-search tools "
-            "at all — only bash_exec/web tools. If the question genuinely "
-            "needs project file content, say so plainly instead of trying "
-            "to call a tool you don't have."
-        )
     if is_final_answer:
         parts.append(
             "No Planner/Coder stage runs after you this time — your final "
@@ -330,12 +329,12 @@ async def stream_chat(messages: list[dict], on_event=None):
             await on_event({"type": "stage_changed", "stage": "analyzer"})
 
         is_final_answer = not needs_change
-        investigator_tool_names = frozenset(investigator_tools(needs_project))
+        investigator_tool_names = frozenset(investigator_tools())
         agent, model, judge_model, tools_by_name, read_history, compact_research, _tok_est = (
             await _get_role_agent("analyzer", investigator_tool_names, repo_path)
         )
 
-        scope_note = _investigator_scope_note(needs_project, is_final_answer, is_followup=len(messages) > 1)
+        scope_note = _investigator_scope_note(is_final_answer, is_followup=len(messages) > 1)
         analyzer_messages = (
             _inject_note_before_last(original_messages, scope_note)
             if scope_note else original_messages
@@ -379,7 +378,7 @@ async def stream_chat(messages: list[dict], on_event=None):
             await on_event({"type": "stage_changed", "stage": "planner"})
 
         planner_payload = _seed_stage_payload(original_messages, [("Analyzer", analyzer_text)])
-        planner_tool_names = frozenset(planner_tools(needs_project))
+        planner_tool_names = frozenset(planner_tools())
         planner_agent, _model, planner_judge, planner_tools_by_name, planner_read_history, _cr, _tok = (
             await _get_role_agent("planner", planner_tool_names, repo_path)
         )
