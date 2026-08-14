@@ -54,22 +54,14 @@ classify_intent просит fail-open в сторону needs_change=true пр�
 неуверенности — ошибочное false тише проглатывает реально нужную правку
 (Coder до неё вообще не доходит), чем ошибочное true на чистом вопросе
 просто тратит немного лишнего времени на Planner."""
-import os
-
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
 
 import settings
-from mcp_agent.agent_builder import _ChatOllamaWithNumKeep
+from mcp_agent.agent_builder import _build_chat_model
 from mcp_agent.debug_log import log_event
 from mcp_agent.message_utils import _to_lc_messages
-from mcp_agent.model_config import (
-    JUDGE_NUM_PREDICT,
-    MODEL_TEMPERATURE,
-    OLLAMA_KEEP_ALIVE,
-    OLLAMA_NUM_CTX,
-    OLLAMA_NUM_PREDICT,
-)
+from mcp_agent.model_config import JUDGE_NUM_PREDICT, OLLAMA_NUM_PREDICT
 from mcp_agent.stage_runner import run_stage
 from utils.parsing import parse_json_loose
 
@@ -170,19 +162,26 @@ _casual_agent_cache_key: str | None = None
 def _get_classify_model():
     """format="json" здесь безопасен по той же причине, что у judge_model в
     agent_builder.py:_build_agent — этот объект используется ИСКЛЮЧИТЕЛЬНО
-    для classify_intent, ответ всегда обязан быть чистым JSON."""
+    для classify_intent, ответ всегда обязан быть чистым JSON.
+
+    Через _build_chat_model (не голый _ChatOllamaWithNumKeep с зашитым
+    base_url на дефолтный Ollama-хост) — живой баг (2026-08-13): пока
+    основная чат-модель шла через expert-streaming backend (порт 8090,
+    settings.expert_streaming_enabled), classify_intent на каждый ход всё
+    равно стучался в обычный Ollama API, который тихо поднимал СВОЙ,
+    отдельный полный процесс модели (~20 ГБ весов) с другим num_ctx —
+    VRAM ушла с ~4 ГБ занятых до 29 МиБ свободных, два резидентных
+    инстанса одной и той же модели одновременно. _build_chat_model — единая
+    точка сборки, которая уже умеет выбирать backend правильно."""
     global _classify_model_cache, _classify_model_cache_key
     current_model = settings.get("chat_model")
     if _classify_model_cache is not None and _classify_model_cache_key == current_model:
         return _classify_model_cache
-    _classify_model_cache = _ChatOllamaWithNumKeep(
-        model=current_model,
-        base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        keep_alive=OLLAMA_KEEP_ALIVE,
-        num_ctx=OLLAMA_NUM_CTX,
+    _classify_model_cache = _build_chat_model(
+        model_tag=current_model,
         num_predict=JUDGE_NUM_PREDICT,
         reasoning=False,
-        temperature=MODEL_TEMPERATURE,
+        num_keep=4,
         format="json",
     )
     _classify_model_cache_key = current_model
@@ -238,19 +237,20 @@ async def _get_casual_agent():
     _get_tools() вообще, в отличие от ролей пайплайна (mcp_agent/roles.py):
     самый дешёвый путь ответа для casual/snippet, тот же рецепт, что
     agent_builder.py:_build_agent уже применяет для voice_mode
-    (agent_tools=[] означает отсутствие 60-тульного оверхеда в промпте)."""
+    (agent_tools=[] означает отсутствие 60-тульного оверхеда в промпте).
+
+    Через _build_chat_model — см. docstring _get_classify_model выше про
+    живой баг с двумя одновременными полными процессами модели, если
+    строить ChatOllama здесь напрямую вместо единой точки сборки."""
     global _casual_agent_cache, _casual_agent_cache_key
     current_model = settings.get("chat_model")
     if _casual_agent_cache is not None and _casual_agent_cache_key == current_model:
         return _casual_agent_cache
-    model = _ChatOllamaWithNumKeep(
-        model=current_model,
-        base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        keep_alive=OLLAMA_KEEP_ALIVE,
-        num_ctx=OLLAMA_NUM_CTX,
+    model = _build_chat_model(
+        model_tag=current_model,
         num_predict=OLLAMA_NUM_PREDICT,
         reasoning=settings.get("show_thinking"),
-        temperature=MODEL_TEMPERATURE,
+        num_keep=4,
     )
     agent = create_agent(
         model, [], system_prompt=_CASUAL_CHAT_SYSTEM_PROMPT,

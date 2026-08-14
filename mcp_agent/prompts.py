@@ -17,6 +17,7 @@ agent.py обязан импортировать МОДУЛЬ (`from mcp_agent i
 import os
 import platform
 import shutil
+import subprocess
 
 import distro
 import psutil
@@ -163,6 +164,52 @@ def _detect_environment_info(repo_path: str) -> str | None:
     )
 
 
+# Порог обрезки списка изменённых файлов — сам блок всё равно проходит через
+# общий _cap_tool_output (tool_wrappers.py) вместе с остальным системным
+# промптом, но обрезать здесь, до форматирования, дешевле и не тратит
+# бюджет символов на файлы, которые всё равно были бы обрезаны позже.
+_GIT_STATUS_MAX_FILES = 40
+
+
+def _detect_git_status(repo_path: str) -> str | None:
+    """Once-per-session `git status --short --branch`, folded into the
+    system prompt — the same fact a human collaborator sees immediately by
+    glancing at their own terminal before touching anything. Without this,
+    the model had to spend its own first turn calling git_status just to
+    learn whether the repo is even dirty. A one-time snapshot only: unlike
+    the live git_status tool, this text does NOT update as the session
+    goes on, so it's explicitly labeled as such below rather than left to
+    look like a live fact. Returns None (contributes nothing) for anything
+    that isn't a clean git checkout — not a git repo, git missing, no repo
+    written yet — same silent-skip shape as _detect_environment_info above."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path, "status", "--short", "--branch"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines()
+    if not lines:
+        return None
+    branch_line = lines[0].removeprefix("## ")
+    changes = lines[1:]
+    if not changes:
+        return f"Git status at session start — branch {branch_line}, working tree clean."
+    shown = changes[:_GIT_STATUS_MAX_FILES]
+    body = "\n".join(shown)
+    if len(changes) > _GIT_STATUS_MAX_FILES:
+        body += f"\n... and {len(changes) - _GIT_STATUS_MAX_FILES} more changed file(s)"
+    return (
+        f"Git status at session start (branch {branch_line}) — a one-time "
+        "snapshot taken before this turn, not re-checked automatically as "
+        "the session goes on; call git_status yourself if the working tree "
+        "may have changed since (e.g. after your own edits):\n" + body
+    )
+
+
 def _build_system_prompt(repo_path: str) -> str:
     """repo_path зашивается прямо в промпт вместо того, чтобы модель угадывала
     его для repo_path/path-параметров git- и filesystem-тулов. Без этого
@@ -183,6 +230,9 @@ def _build_system_prompt(repo_path: str) -> str:
     env_info = _detect_environment_info(repo_path)
     if env_info:
         env_block += "\n\n" + env_info
+    git_status_info = _detect_git_status(repo_path)
+    if git_status_info:
+        env_block += "\n\n" + git_status_info
     # settings.get(), не отдельный параметр функции — _build_agent уже кеширует
     # его результат (agent_builder.py:_agent_cache_key) на этот же флаг, так что
     # переключение в /settings подхватывается со следующего хода без лишнего
@@ -458,6 +508,14 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "changes — it does not auto-update.\n"
     "  * search_dialog_history — 'what did we discuss about X earlier', "
     "across PAST sessions, not just what's in the current context.\n"
+    "  * list_episodic_sessions / read_episodic_session — browse your own "
+    "session history STRUCTURALLY instead of by meaning: list_episodic_"
+    "sessions for 'how many sessions have we had'/'when did we last talk'/"
+    "what sessions here have generally been about, then "
+    "read_episodic_session(session_id) for one session's full transcript. "
+    "Use these (not search_dialog_history) when you don't already have a "
+    "specific topic to search for, or when asked to reflect on what a "
+    "'session' even is.\n"
     "  * remember_url / search_external_sources — explicitly SAVED pages, "
     "for later recall. Different from fetch/web_search, which are one-off "
     "and never retained — only call remember_url when the user actually "
@@ -1195,6 +1253,9 @@ def _build_optimized_system_prompt(repo_path: str) -> str:
     env_info = _detect_environment_info(repo_path)
     if env_info:
         env_block += "\n\n" + env_info
+    git_status_info = _detect_git_status(repo_path)
+    if git_status_info:
+        env_block += "\n\n" + git_status_info
     prompt = _OPTIMIZED_SYSTEM_PROMPT_TEMPLATE.format(repo_path=repo_path, env_block=env_block)
     flowai_md = _read_flowai_md(repo_path)
     if flowai_md:
@@ -1307,7 +1368,10 @@ def _analyzer_system_prompt(env_block: str) -> str:
         "message alone.\n"
         "- rag — search_code_semantic (conceptual queries whose wording "
         "won't literally appear in code), search_dialog_history (what was "
-        "discussed before, across past sessions), search_external_sources "
+        "discussed before, across past sessions), list_episodic_sessions/"
+        "read_episodic_session (browse/read past sessions structurally — "
+        "by list and full transcript, not by meaning — use when you don't "
+        "have a specific topic to search for), search_external_sources "
         "(previously saved pages).\n"
         "- get_knowledge — structured, PERSISTENT understanding of this "
         "project saved by past sessions. Call it FIRST, before listing "
@@ -1876,6 +1940,9 @@ def _build_role_system_prompt(role: str, repo_path: str) -> tuple[str, int]:
     env_info = _detect_environment_info(repo_path)
     if env_info:
         env_block += "\n\n" + env_info
+    git_status_info = _detect_git_status(repo_path)
+    if git_status_info:
+        env_block += "\n\n" + git_status_info
     prompt = _ROLE_PROMPT_BUILDERS[role](env_block)
     flowai_md = _read_flowai_md(repo_path)
     if flowai_md:

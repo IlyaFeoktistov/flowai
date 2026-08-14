@@ -19,7 +19,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from rag import EMBED_MODEL, VectorStore, embed_texts  # noqa: E402
 from rag.index_code import reindex_code  # noqa: E402
 from rag.index_external import remember_url as _remember_url  # noqa: E402
-from storage import project_dir  # noqa: E402
+from storage import connect, project_dir  # noqa: E402
 
 mcp = FastMCP("rag")
 
@@ -103,6 +103,88 @@ async def search_dialog_history(query: str, top_k: int = 5) -> str:
         return "Dialog history index is empty — nothing indexed yet"
     query_embedding = (await embed_texts([query]))[0]
     return _format_results(store.search(query_embedding, top_k=top_k))
+
+
+def _preview(text: str, max_chars: int = 100) -> str:
+    text = text.strip().replace("\n", " ")
+    return text if len(text) <= max_chars else text[:max_chars] + "..."
+
+
+def _episodic_connect():
+    """rag_server.py runs as its own subprocess with its own sqlite3
+    connection to the same flowai.db — episodic/writer.py's own
+    CREATE TABLE IF NOT EXISTS runs in the main cli.py process and isn't
+    guaranteed to have executed yet by the time this server handles its
+    first tool call, so the table is (re-)declared here too rather than
+    assuming that ordering."""
+    conn = connect()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS episodic_messages ("
+        "session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts TEXT NOT NULL, "
+        "role TEXT NOT NULL, content TEXT NOT NULL, user_id TEXT NOT NULL, "
+        "PRIMARY KEY (session_id, seq))"
+    )
+    return conn
+
+
+@mcp.tool()
+async def list_episodic_sessions(limit: int = 20) -> str:
+    """List past chat sessions (this project's full conversation history,
+    every session ever run here) chronologically, most recent first — each
+    entry has a session_id, start/end time, message count, and a preview of
+    the first user message. Use this to browse/reflect on your own history
+    structurally ('how many sessions have we had', 'when did we last talk',
+    'what have sessions here generally been about') — unlike
+    search_dialog_history (meaning-based lookup for a specific topic), this
+    doesn't need you to already know what you're looking for. Pass a
+    session_id from the result to read_episodic_session for the full
+    transcript of one session."""
+    conn = _episodic_connect()
+    try:
+        total = conn.execute(
+            "SELECT COUNT(DISTINCT session_id) FROM episodic_messages"
+        ).fetchone()[0]
+        if total == 0:
+            return "No past sessions recorded yet."
+        rows = conn.execute(
+            "SELECT session_id, MIN(ts) AS started, MAX(ts) AS ended, COUNT(*) AS n "
+            "FROM episodic_messages GROUP BY session_id ORDER BY started DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        lines = [f"{total} session(s) total, showing {len(rows)} most recent:"]
+        for session_id, started, ended, n in rows:
+            first_user = conn.execute(
+                "SELECT content FROM episodic_messages WHERE session_id = ? "
+                "AND role = 'user' ORDER BY seq ASC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            preview = _preview(first_user[0]) if first_user else "(no user message)"
+            lines.append(f"- {session_id} | {started} .. {ended} | {n} messages | {preview}")
+        return "\n".join(lines)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+async def read_episodic_session(session_id: str) -> str:
+    """Read the full transcript of ONE past session (get session_id from
+    list_episodic_sessions) — every user/assistant turn in original order,
+    not fragmented chunks like search_dialog_history returns. Use this once
+    you've identified WHICH session is relevant and want the whole
+    conversation, e.g. to reflect on how a specific past task actually
+    unfolded."""
+    conn = _episodic_connect()
+    try:
+        rows = conn.execute(
+            "SELECT ts, role, content FROM episodic_messages WHERE session_id = ? "
+            "ORDER BY seq ASC",
+            (session_id,),
+        ).fetchall()
+        if not rows:
+            return f"No session found with id {session_id!r} — check list_episodic_sessions for valid ids."
+        return "\n\n".join(f"[{ts}] {role}: {content}" for ts, role, content in rows)
+    finally:
+        conn.close()
 
 
 @mcp.tool()
