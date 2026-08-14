@@ -42,7 +42,14 @@ _conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value 
 _conn.commit()
 
 _state: dict = {
-    "chat_model":        os.getenv("OLLAMA_MODEL",        "qwen3-coder:30b"),
+    # glm-4.7-flash:q4_K_M (не qwen3-coder:30b) — признанный дефолт с
+    # 2026-08-14: живыми прогонами (см. expert_streaming.py, раздел
+    # «GLM-4.7-Flash») подтверждены и загрузка, и корректная остановка
+    # генерации на expert-streaming backend'е, при близком к qwen3-coder:30b
+    # весе (17.7 GB против 18 GB) и заметно лучшей скорости на этом железе.
+    # Требует expert_streaming_enabled=ВКЛ (см. ниже) — обычный Ollama-путь
+    # не поддерживает архитектуру glm4moelite без патча этого форка.
+    "chat_model":        os.getenv("OLLAMA_MODEL",        "glm-4.7-flash:q4_K_M"),
     "show_thinking":    os.getenv("SHOW_THINKING",    "0") == "1",
     # Глобальный выключатель permission-диалогов (bash_exec, write_file,
     # git-мутации, ...) — см. tools/confirm.py:ask_permission, единая точка
@@ -100,23 +107,27 @@ _state: dict = {
     # expert_streaming.py's docstring — какой именно незамерженный PR, зачем
     # он тут, и trade-off, который он приносит) вместо Ollama для основной
     # кодовой модели — настоящее dynamic per-token expert offloading (-ehs)
-    # для MoE-моделей типа qwen3-coder:30b, а не статичный CPU/GPU сплит,
-    # который использует Ollama всегда. Дефолт ВЫКЛ:
-    #   1. это чужой недособранный community-PR, а не официальный релиз —
-    #      никаких гарантий стабильности/совместимости с будущими версиями
-    #      llama.cpp;
-    #   2. живой отзыв автора PR (см. docstring) — prompt-processing падает
-    #      в разы, генерация ускоряется в среднем на треть — то есть это
-    #      компромисс, не безусловное ускорение, и на других моделях/железе
-    #      соотношение может быть другим или даже обратным;
-    #   3. действует независимо от pipeline_mode — легаси-агент и роли
-    #      нового пайплайна строят модель через один и тот же
-    #      agent_builder._build_chat_model (см. expert_streaming.py).
-    # Требует `python3 setup.py --only expert-streaming` — без собранного
-    # бинарника agent_builder тихо откатывается на обычный Ollama-путь (см.
+    # для MoE-моделей, а не статичный CPU/GPU сплит, который использует
+    # Ollama всегда. Дефолт ВКЛ с 2026-08-14 (был ВЫКЛ) — признанный дефолт
+    # chat_model выше, glm-4.7-flash:q4_K_M, физически НЕ работает на обычном
+    # Ollama-пути (архитектура glm4moelite не поддерживается апстримом без
+    # патча этого форка, см. expert_streaming.py), так что для дефолтной
+    # модели этот тумблер обязан быть включён, иначе чат из коробки не
+    # заработает. Остаётся безопасным дефолтом даже без сборки: `python3
+    # setup.py` (без --only) собирает expert-streaming автоматически (см.
+    # setup.py:SETUP_FUNCS), а если бинарник всё же не собран —
+    # agent_builder тихо откатывается на обычный Ollama-путь (см.
     # expert_streaming.ensure_running, которая возвращает (False, reason)
-    # вместо исключения).
-    "expert_streaming_enabled": os.getenv("EXPERT_STREAMING_ENABLED", "0") == "1",
+    # вместо исключения) — просто с другой моделью, а не падением.
+    # Остальные аргументы за прежний дефолт ВЫКЛ остаются в силе для ЛЮБОЙ
+    # другой модели (не glm-4.7-flash): это чужой недособранный community-PR,
+    # без гарантий совместимости с будущими версиями llama.cpp, и живой
+    # отзыв автора PR (см. docstring expert_streaming.py) — prompt-processing
+    # падает в разы, генерация ускоряется в среднем на треть, то есть
+    # компромисс, не безусловное ускорение. Действует независимо от
+    # pipeline_mode — легаси-агент и роли пайплайна строят модель через один
+    # и тот же agent_builder._build_chat_model.
+    "expert_streaming_enabled": os.getenv("EXPERT_STREAMING_ENABLED", "1") == "1",
     # Живой прогон живьём показал, зачем это нужно как отдельный, редактируемый
     # тумблер, а не только mcp_agent/model_config.py:OLLAMA_NUM_CTX (тот
     # читается ОДИН раз при импорте и раздаётся через `from ... import

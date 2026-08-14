@@ -75,18 +75,20 @@ python3 setup.py --only tts   # main | image-gen | whisper | tts | hunyuan3d-2gp
 | `whisper` | `faster-whisper` в основной `.venv` (CPU) | Голосовой ввод (`Alt+R`) — модель (по умолчанию `medium`, ~1.5 GB) качается сама, размер настраивается в `/settings` |
 | `tts` | Отдельный `venv-tts` (Python 3.11) — Chatterbox + расстановка ударений для русского | Голосовой ответ — модель (~2 GB, лицензия Coqui CPML, некоммерческая) качается сама. Все выходные аудиофайлы несут неслышимый цифровой водяной знак (`perth`, офлайн, но не отключается через публичный API) |
 | `hunyuan3d-2gp` / `unirig` / `animato` / `supermat` | Каждый — свой `vendor/*/venv` | `/gen_model`, `/anim`, `/gen_texture` (нужна GPU) — веса (Hunyuan3D ~несколько GB, UniRig ~несколько сотен MB, оба на HuggingFace) качаются сами при первом вызове |
-| `expert-streaming` | Свой форк `llama.cpp` (см. «Модели» ниже), собственный `venv-build-tools` для cmake/ninja, компилируется из исходников (CUDA) | Экспериментальный dynamic MoE expert-caching backend для `gpt-oss:20b`/`qwen3-coder:30b` (тумблер в `/settings`) — см. `expert_streaming.py` |
+| `expert-streaming` | Свой форк `llama.cpp` (см. «Модели» ниже), собственный `venv-build-tools` для cmake/ninja, компилируется из исходников (CUDA) — ставится автоматически и при обычном `python3 setup.py` (без `--only`) | Backend для дефолтной chat-модели `glm-4.7-flash:q4_K_M` (обязателен для неё) — dynamic MoE expert-caching, также экспериментально доступен для `gpt-oss:20b`/`qwen3-coder:30b` (тумблер в `/settings`) — см. `expert_streaming.py` |
 
 Генерация музыки (`generate_music`, `facebook/musicgen-small`, ~2 GB) отдельного шага не требует — использует `transformers`, уже поставленный вместе с `image-gen`. Модель качается сама при первом вызове.
 
 ### Скачать модели через Ollama
 
 ```bash
-ollama pull qwen3-coder:30b   # основной чат (или полегче, см. таблицу моделей ниже)
-ollama pull qwen2.5vl:7b      # vision — анализ изображений
+ollama pull glm-4.7-flash:q4_K_M   # основной чат — дефолт из коробки (или другая, см. таблицу моделей ниже)
+ollama pull qwen2.5vl:7b           # vision — анализ изображений
 ```
 
-Модели задаются через `.env` (`OLLAMA_MODEL`, `VISION_MODEL`, ...) или на лету через `/settings` внутри чата — второе удобнее, там сразу видно, что уже скачано и сколько это весит.
+Дефолтная модель чата требует `expert_streaming_enabled=ВКЛ` (тоже дефолт) — обычный `python3 setup.py` (без `--only`) уже собирает нужный форк `llama.cpp` сам (см. «Модели» ниже), веса же качаются отдельно, тем же `ollama pull` выше — сборка бинарника их не скачивает.
+
+Модель переключается на лету через `/settings` внутри чата — там сразу видно, что уже скачано и сколько это весит. Правка `chat_model`/`expert_streaming_enabled` в `settings.py` меняет дефолт только для НОВОЙ установки (без своей `flowai.db`) — на уже существующей БД `/settings` единственный способ сменить модель, `.env`/`OLLAMA_MODEL` больше не используется (см. `CLAUDE.md` → «Models»).
 
 ### WSL2: аудио-мост
 
@@ -98,12 +100,27 @@ STT/TTS на WSL2 идут через `powershell.exe` (запись — MCI, в
 
 ### Текстовые (chat + tool use)
 
-Два разумных варианта на обычном Ollama-пути (без доп. настройки, кроме
-разового sudoers-шага выше для автопереключения KV cache):
+**`glm-4.7-flash:q4_K_M`** (дефолт из коробки, `settings.py`) — требует
+`expert_streaming_enabled=ВКЛ` (тоже дефолт): собственный `llama-server`-форк
+с настоящим dynamic MoE expert-кэшем вместо статичного CPU/GPU сплита
+Ollama, см. `expert_streaming.py` — обычный Ollama-путь для ЭТОЙ модели не
+годится вообще, архитектура `glm4moelite` в нём не поддерживается без
+патча этого форка. Полный `python3 setup.py` (без `--only`) собирает нужный
+бинарник автоматически, сама модель качается отдельно, обычным
+`ollama pull glm-4.7-flash:q4_K_M` (см. «Установка» выше) — если бинарник
+почему-то не собран, flowAI тихо откатывается на обычный Ollama-путь под
+ДРУГУЮ модель, а не падает. На expert-streaming загрузка и корректная
+остановка генерации для этой модели подтверждены живым тестом — см.
+`expert_streaming.py`, раздел «GLM-4.7-Flash».
 
-- **`qwen3-coder:30b`** (дефолт из коробки) — лучшее качество из всего, что
-  реально тянется локально, agentic-кодинг и тул-коллы нативно заточены
-  под агента, но ощутимо дольше отрабатывает ответ на CPU-инференсе.
+Два разумных варианта на обычном Ollama-пути (без сборки форка — только
+разовый sudoers-шаг выше для автопереключения KV cache), если
+`expert_streaming_enabled` выключен:
+
+- **`qwen3-coder:30b`** — лучшее качество из всего, что реально тянется
+  локально на обычном Ollama-пути, agentic-кодинг и тул-коллы нативно
+  заточены под агента, но ощутимо дольше отрабатывает ответ на
+  CPU-инференсе.
 - **`gpt-oss:20b`** — заметно быстрее (13 GB суммарного веса против 18-19 GB
   у `qwen3-coder:30b`). Раньше падал на обычном Ollama-пути
   (`OLLAMA_KV_CACHE_TYPE=q8_0`, GGML_ASSERT, известный баг Ollama
@@ -115,13 +132,10 @@ STT/TTS на WSL2 идут через `powershell.exe` (запись — MCI, в
   сборкой (`mcp_agent/ollama_kv_cache.py`) — при настроенном sudoers-правиле
   из «Установка» выше это больше не требует ручных действий.
 
-Отдельно есть **экспериментальный** `expert_streaming_enabled` (тумблер в
-`/settings`, собственный llama-server-форк с настоящим dynamic MoE
-expert-кэшем вместо статичного сплита Ollama, см. `expert_streaming.py`,
-требуется `python3 setup.py --only expert-streaming`) — потенциально ещё
-быстрее для gpt-oss:20b, но НЕ рекомендуется для реальной работы: живыми
-прогонами подтверждены две проблемы парсинга harmony-формата в этом форке:
-(1) канал-разметка (`<|channel|>...<|message|>`) иногда ломается, и
+`expert_streaming_enabled` потенциально ещё быстрее и для `gpt-oss:20b`, но
+для НЕЁ (не для glm-4.7-flash) это НЕ рекомендуется для реальной работы:
+живыми прогонами подтверждены две проблемы парсинга harmony-формата в этом
+форке: (1) канал-разметка (`<|channel|>...<|message|>`) иногда ломается, и
 рассуждения модели вместе со служебными токенами утекают в видимый ответ
 вместо чистого текста; (2) тул-коллы иногда не долетают до настоящего
 вызова инструмента вообще — модель пишет вызов прямо в тексте (в чужом, не
@@ -129,13 +143,6 @@ expert-кэшем вместо статичного сплита Ollama, см. `
 `commentary to=functions.*`. Обычный Ollama-путь для gpt-oss:20b (см. выше)
 не имеет этих проблем — родной harmony/тул-коллинг у самого Ollama гораздо
 зрелее, чем у этого экспериментального форка.
-
-`glm-4.7-flash:q4_K_M` — обратный случай: этому форку требуется
-`expert_streaming_enabled=ВКЛ`, обычный Ollama-путь не годится (архитектура
-`glm4moelite` в нём не поддерживается без патча, плюс известные баги
-tool-calling в самой Ollama). На expert-streaming загрузка и tool-calling
-для этой модели подтверждены живым тестом — см. `expert_streaming.py`,
-раздел «GLM-4.7-Flash».
 
 Ориентир по железу, на котором эти модели настраивались и тестировались:
 ноутбук с **NVIDIA RTX 4050 Laptop (6 GB VRAM)**, 16-ядерный CPU, 32 GB RAM
@@ -152,17 +159,17 @@ tool-calling в самой Ollama). На expert-streaming загрузка и to
 `qwen2.5:14b`, ~9 GB) не помещаются в 6 GB VRAM целиком точно так же, как и
 20-30B, но при этом не настолько компактны, чтобы выиграть в скорости — практика
 показала, что осмысленных вариантов ровно два, без середины:
-- **`gpt-oss:20b`/`qwen3-coder:30b`**, если важнее качество агентных ответов
-  и не жалко ждать (генерация на CPU-инференсе может занимать несколько
-  минут на объёмный ответ/файл);
+- **`glm-4.7-flash:q4_K_M`/`gpt-oss:20b`/`qwen3-coder:30b`**, если важнее
+  качество агентных ответов и не жалко ждать (генерация на CPU-инференсе
+  может занимать несколько минут на объёмный ответ/файл);
 - **модель 7-8B** (`qwen3:8b` / `qwen3.5:9b`), если важнее скорость и полное
   размещение на GPU, ценой заметно более слабого агентного поведения.
 
 | Модель | Размер | Когда использовать |
 |---|---|---|
+| `glm-4.7-flash:q4_K_M` | 17.7 GB (MoE, ~3B активных) | **Дефолт из коробки.** Требует `expert_streaming_enabled=ВКЛ` (тоже дефолт) — обычный Ollama-путь не поддерживает архитектуру `glm4moelite` в этом форке без патча; на expert-streaming загрузка и корректная остановка генерации подтверждены живым тестом, см. `expert_streaming.py` |
 | `gpt-oss:20b` | 13 GB (MoE, ~3.6B активных) | Быстрее qwen3-coder:30b — работает и на обычном Ollama-пути (KV cache переключается автоматически, см. выше) |
-| `qwen3-coder:30b` | 18 GB (MoE, ~3.3B активных) | Дефолт из коробки — agentic-кодинг, тул-коллы заточены под агента, лучшее качество |
-| `glm-4.7-flash:q4_K_M` | 17.7 GB (MoE, ~3B активных) | **Только с `expert_streaming_enabled=ВКЛ`** — обычный Ollama-путь не поддерживает архитектуру `glm4moelite` в этом форке без патча и несёт известные, незакрытые баги tool-calling в самой Ollama; на expert-streaming оба фикса (загрузка + остановка генерации) подтверждены живым тестом, см. `expert_streaming.py` |
+| `qwen3-coder:30b` | 18 GB (MoE, ~3.3B активных) | Лучший вариант на обычном Ollama-пути (`expert_streaming_enabled` выкл) — agentic-кодинг, тул-коллы заточены под агента |
 | `qwen3:14b` | 9.3 GB | Глубокий reasoning — на 6 GB VRAM хуже обоих соседних вариантов, см. выше |
 | `qwen2.5:14b` | 9 GB | Стабильный универсал — та же оговорка про 6 GB VRAM |
 | `qwen3.5:9b` / `qwen3:8b` | 5-6 GB | Быстрее, для менее тяжёлых задач — второй разумный вариант на ограниченном железе |
@@ -179,7 +186,7 @@ tool-calling в самой Ollama). На expert-streaming загрузка и to
 | `qwen2.5vl:32b` | ~18 GB | Мощнее, если хватает VRAM |
 | `llava:13b` | 8 GB | Проверенный, дефолт по коду |
 
-Работает через отдельную модель, а не основную chat-модель — они не должны совпадать, `qwen3-coder:30b` картинки не понимает вообще.
+Работает через отдельную модель, а не основную chat-модель — они не должны совпадать, ни `glm-4.7-flash:q4_K_M` (дефолт), ни `qwen3-coder:30b` картинки не понимают вообще.
 
 ### Генерация/редактирование изображений (`generate_image`/`edit_image`, нужна GPU)
 
@@ -247,7 +254,7 @@ tool-calling в самой Ollama). На expert-streaming загрузка и to
 
 Когда включён:
 - каждый финальный ответ агента озвучивается вслух (Chatterbox);
-- `chat_model` автоматически переключается на **более быструю** модель (`/settings` → «модель голос. режима», дефолт `qwen3:8b`) — `qwen3-coder:30b` слишком тяжёлая и заточена под кодинг, а не разговор;
+- `chat_model` автоматически переключается на **более быструю** модель (`/settings` → «модель голос. режима», дефолт `qwen3:8b`) — основная chat-модель (`glm-4.7-flash:q4_K_M` по умолчанию, или `qwen3-coder:30b`) слишком тяжёлая и заточена под кодинг, а не разговор;
 - при выключении голосового режима возвращается та модель, что была выбрана до включения.
 
 Список моделей для голосового режима в `/settings` намеренно ограничен быстрыми универсальными моделями (не coder/reasoning-теги) — здесь важна скорость ответа, а не глубина.
@@ -475,11 +482,20 @@ You: сгенерируй 3D-модель дракона с ригом и зас
 cli.py / main.py (HTTP)
         │
         ▼
-mcp_agent/agent.py — stream_chat(): self-heal цикл, семантическая
-        │             проверка ответа, ретраи
-        ▼
-mcp_agent/agent_builder.py — собирает LangGraph-агента: модель (Ollama)
-        │                     + ~30 тулов из MCP-серверов
+pipeline_mode=ВКЛ (дефолт)             pipeline_mode=ВЫКЛ (легаси)
+        │                                       │
+        ▼                                       ▼
+mcp_agent/pipeline.py — Router →       mcp_agent/agent.py — stream_chat():
+Analyzer → Planner → Coder →           монолитный self-heal цикл,
+Verifier (mcp_agent/router.py,         семантическая проверка, ретраи
+roles.py, stage_runner.py — своя               │
+retry-механика на каждую стадию)               │
+        │                                       │
+        └───────────────────┬───────────────────┘
+                             ▼
+mcp_agent/agent_builder.py — собирает LangGraph-агента/роль: модель
+        │                     (Ollama или expert-streaming, см. «Модели»)
+        │                     + тулы из MCP-серверов
         ▼
 mcp_agent/servers/*.py — каждый тул-домен свой MCP-сервер (подпроцесс):
                           bash_exec, git_extra, fs_extra, code_search,
@@ -551,43 +567,69 @@ if __name__ == "__main__":
 
 ```
 flowAI/
-├── flowai                — лончер (bash), сам находит .venv
-├── cli.py                — консольный TUI-чат
-├── main.py               — FastAPI HTTP-сервер, POST /chat (SSE)
-├── settings.py            — все настройки (SQLite), читается /settings
-├── compress.py            — сжатие истории при приближении к лимиту контекста
-├── usage.py               — статистика токенов/сессий
+├── flowai                  — лончер (bash), сам находит .venv
+├── cli.py                  — консольный TUI-чат
+├── main.py                 — FastAPI HTTP-сервер, POST /chat (SSE)
+├── settings.py             — все настройки (SQLite), читается /settings
+├── expert_streaming.py     — свой llama-server-форк (см. «Модели») вместо Ollama
+├── compress.py             — сжатие истории при приближении к лимиту контекста
+├── usage.py                — статистика токенов/сессий
 ├── storage.py              — общая точка SQLite-хранилища (память, знания, usage)
+├── model_lifecycle.py      — выгрузка/подгрузка Ollama-моделей (evict, ожидание готовности)
+├── memory_admin.py         — CLI-обслуживание памяти (просмотр/чистка фактов)
+├── version.py              — версия приложения
 ├── setup.py                — ставит всё приложение: main .venv, image-gen, whisper,
-│                             tts, vendor/* (клонирует, ставит venv'ы, патчит)
+│                             tts, vendor/* (клонирует, ставит venv'ы, патчит),
+│                             expert-streaming (собственный форк llama.cpp)
+├── pyproject.toml          — `pip install -e .` → команда `flowai` в PATH (см. «Запуск»)
 ├── mcp_agent/
-│   ├── agent.py           — self-heal цикл, стриминг, семантическая проверка
-│   ├── agent_builder.py   — сборка LangGraph-агента, кеш тулов/модели
-│   ├── prompts.py         — системный промпт + инъекция FLOWAI.md
-│   ├── config.py          — реестр MCP-серверов, permission-политика
-│   └── servers/           — тул-серверы: bash_exec, git_extra, fs_extra,
+│   ├── agent.py            — легаси: монолитный self-heal цикл, стриминг (_stream_round)
+│   ├── agent_builder.py    — сборка LangGraph-агента/роли, кеш тулов/модели, миддлвари
+│   ├── pipeline.py         — дефолтный путь (`pipeline_mode`, см. settings.py):
+│   │                         Router → Analyzer → Planner → Coder → Verifier
+│   ├── router.py           — классифицирует ход (нужен ли проект/shell/правка)
+│   ├── roles.py            — тулы/промпты/лимиты для каждой роли пайплайна
+│   ├── stage_runner.py     — retry-механика ОДНОЙ стадии пайплайна (общая для всех ролей)
+│   ├── compaction.py       — сжатие истории/исследования при приближении к num_ctx
+│   ├── self_heal.py        — детерминированные verdict-проверки, судья, разбор leaked tool-calls
+│   ├── delegate_tool.py    — сабагент delegate для больших/незнакомых деревьев кода
+│   ├── model_config.py     — константы (лимиты Ollama, MAX_ATTEMPTS, сэмплинг)
+│   ├── prompts.py          — системный промпт + инъекция FLOWAI.md
+│   ├── config.py           — реестр MCP-серверов, permission-политика
+│   ├── message_utils.py    — дедуп ToolMessage, конвертация сообщений
+│   ├── snapshots.py        — снимки файлов, auto-revert при провале проверки
+│   ├── tool_wrappers.py    — обёртки над MCP-тулами (обрезка вывода, дедуп чтений)
+│   ├── ollama_kv_cache.py  — автопереключение OLLAMA_KV_CACHE_TYPE под модель
+│   ├── optimized_tools.py  — урезанный набор тулов для легаси-агента (без pipeline_mode)
+│   ├── ask_user_tool.py    — тул ask_user, HITL-мидлвари
+│   ├── debug_log.py        — сквозной JSONL-лог одного прогона (диагностика)
+│   ├── dnd_*.py            — режим /dnd (текстовая настольная игра)
+│   └── servers/            — тул-серверы: bash_exec, git_extra, fs_extra,
 │                             code_search, web_search, memory, knowledge,
-│                             rag, image_gen, vision, music, gen_model
+│                             rag, image_gen, vision, music, gen_model, lsp
 ├── gen3d/                  — /gen_model, /anim, /gen_texture: генерация/риг/
 │   │                         анимация/перетекстуровка 3D
 │   ├── pipeline.py         — subprocess-оркестрация всего пайплайна
-│   ├── hunyuan_wrapper.py — параметризованный запуск Hunyuan3D-2GP (mesh+текстура)
-│   ├── texture_wrapper.py — то же, но только текстура на готовый mesh (/gen_texture)
+│   ├── hunyuan_wrapper.py  — параметризованный запуск Hunyuan3D-2GP (mesh+текстура)
+│   ├── texture_wrapper.py  — то же, но только текстура на готовый mesh (/gen_texture)
 │   ├── material_wrapper.py — AI-оценка roughness/metallic (SuperMat, gen_model AI PBR)
-│   ├── animato_client.py — Animato-сервер + локальная Ollama вместо Gemini
-│   └── blender_scripts/   — retopo, rebake_texture (albedo+normal+AO+плоские
+│   ├── animato_client.py   — Animato-сервер + локальная Ollama вместо Gemini
+│   ├── img_refs.py / model_refs.py — резолвинг `@имя` из img-refs/ и generated/models/
+│   └── blender_scripts/    — retopo, rebake_texture (albedo+normal+AO+плоские
 │                             roughness/metallic), render_multiview + project_material_to_uv
 │                             (AI PBR: рендер ракурсов + обратная проекция на UV),
 │                             auto_weight, convert, strip_glb_extras (headless, `blender --python`)
-├── vendor/                 — gitignored, создаётся setup.py:
-│                             hunyuan3d-2gp/, unirig/, animato/, supermat/ (свои venv)
+├── vendor/                 — gitignored, создаётся setup.py: hunyuan3d-2gp/, unirig/,
+│                             animato/, supermat/ (свои venv), llama-expert-streaming/
+│                             (собственный форк llama.cpp, собирается из исходников)
 ├── ui/
-│   ├── app.py             — prompt_toolkit TUI, кейбинды (Alt+V, Alt+R, ...)
-│   ├── audio.py           — голосовой ввод/вывод, мост на powershell.exe
+│   ├── app.py              — prompt_toolkit TUI, кейбинды (Alt+V, Alt+R, ...)
+│   ├── audio.py            — голосовой ввод/вывод, мост на powershell.exe
 │   ├── tts_worker.py       — синтез речи, запускается ИЗ venv-tts
-│   ├── images.py          — вставка/хранение картинок ([Image-N])
+│   ├── images.py           — вставка/хранение картинок ([Image-N])
 │   ├── stream.py           — отображение потокового ответа
-│   └── tui/settings.py    — curses-меню /settings
+│   ├── console.py / header.py / suggestions.py — Rich-консоль, шапка, автокомплит
+│   └── tui/settings.py     — curses-меню /settings
 ├── episodic/               — история диалога (SQLite)
 ├── memory/                 — факты о пользователе между сессиями
 ├── rag/                    — семантический поиск по коду/диалогам/страницам
@@ -598,9 +640,15 @@ flowAI/
 │                             независимо от настройки self_heal_enabled (ретраи
 │                             можно выключить, сама проверка/self_heal_reject всё
 │                             равно считается, см. finetune/README.md)
-├── tools/                  — confirm.py (approval-диалоги), image_gen.py (для /gen),
-│                             gen_model.py (для /gen_model, /anim, /gen_texture)
+├── tools/                  — base.py (общий каркас тула), confirm.py (approval-диалоги),
+│                             image_gen.py (для /gen), gen_model.py (для /gen_model,
+│                             /anim, /gen_texture)
+├── utils/                  — parsing.py (parse_json_loose), proc.py (subprocess-хелперы)
+├── scripts/                — ollama_kv_cache_switch.sh (см. «Установка», sudoers-шаг)
+├── windows/                — setup.bat + README.md: установка на Windows одним скриптом
 ├── venv-tts/               — ОТДЕЛЬНЫЙ venv (Python 3.11) для Chatterbox TTS
+├── venv-build-tools/       — ОТДЕЛЬНЫЙ venv для cmake/ninja (сборка expert-streaming)
+├── img-refs/                — исходные картинки для `@имя` в /gen_model, /anim, /gen_texture
 ├── generated/               — сгенерированные картинки/музыка/3D-модели
 │   └── models/              — вывод /gen_model, /anim (.glb)
 ├── searxng/settings.yml    — конфиг SearXNG

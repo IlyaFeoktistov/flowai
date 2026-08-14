@@ -25,10 +25,24 @@ Python CLI AI chat application powered by Ollama.
 
 ## Models
 
-RTX 4050 Laptop (5.9 GB VRAM). Current default (`.env.example`/`settings.py`)
-is `qwen3-coder:30b` — MoE, ~3.3B active params, mostly runs on CPU (see
+RTX 4050 Laptop (5.9 GB VRAM). Current default (`settings.py`'s `chat_model`
+fallback) is `glm-4.7-flash:q4_K_M` — MoE, ~3B active params, requires
+`expert_streaming_enabled=ВКЛ` (also defaulted on, `settings.py`) since the
+plain Ollama path doesn't support its `glm4moelite` architecture without the
+patched `vendor/llama-expert-streaming` fork — see `expert_streaming.py`'s
+"GLM-4.7-Flash" section. `qwen3-coder:30b` — MoE, ~3.3B active params,
+mostly runs on CPU — is still fully supported on the plain Ollama path (no
+extra build) if `expert_streaming_enabled` is off (see
 `mcp_agent/model_config.py:OLLAMA_NUM_CTX` comments for the live-measured
-CPU/GPU split).
+CPU/GPU split on that model).
+
+Note `.env`/`.env.example` no longer carry `OLLAMA_MODEL` — it only ever
+seeded `settings.py`'s `_state` dict on a fresh install with no
+`~/.local/share/flowai/flowai.db` row yet; once persisted there (which
+happens as soon as `/settings` is touched, or immediately for anyone with an
+existing DB), the env var is silently ignored. Change the model via
+`/settings` at runtime, or edit the fallback in `settings.py` directly for a
+new install's default.
 
 Whether a model "fits fully on GPU" is NOT just weights-size vs. VRAM — the
 agent always loads models with `OLLAMA_NUM_CTX=65536`, and the KV-cache at
