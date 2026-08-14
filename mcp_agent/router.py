@@ -61,11 +61,19 @@ import settings
 from mcp_agent.agent_builder import _build_chat_model
 from mcp_agent.debug_log import log_event
 from mcp_agent.message_utils import _to_lc_messages
-from mcp_agent.model_config import JUDGE_NUM_PREDICT, OLLAMA_NUM_PREDICT
+from mcp_agent.model_config import CASUAL_NUM_PREDICT, JUDGE_NUM_PREDICT
 from mcp_agent.stage_runner import run_stage
 from utils.parsing import parse_json_loose
 
 _FLAG_KEYS = ("needs_project", "needs_shell", "needs_change", "change_is_ambiguous")
+
+# See answer_casual's own docstring for the live run this bounds — casual
+# has no compaction middleware at all (unlike every pipeline role), so an
+# unbounded history here is pure, ever-growing raw context with nothing
+# trimming it. A bit larger than classify_intent's own messages[-2:] (that
+# one only needs enough to not misread a short follow-up in isolation) —
+# casual answers can reasonably reference a couple of recent exchanges.
+_CASUAL_HISTORY_WINDOW = 8
 
 # Fail-open — та же asymmetry, что была у старого kind="project_task"
 # дефолта: при парсинге/классификации, упавшей начисто, безопасный дефолт —
@@ -107,12 +115,16 @@ _ROUTER_CLASSIFY_PROMPT = (
     "lookup (web search or an API call), so this must be true, never "
     "casual, for ANY question whose correct answer can change day to "
     "day. false only if reading local files/git history is enough.\n"
-    "- \"needs_change\": true if the user wants a file/config actually "
-    "modified, not just information/explanation returned. false for a "
-    "pure question, status check, explanation, or review request where "
-    "nothing should be written. If there's ANY realistic chance a fix/"
-    "change is wanted once you look — not just a description — answer "
-    "true: false here skips planning/coding entirely, so a wrong guess "
+    "- \"needs_change\": true if the user wants this project's CODE/CONFIG "
+    "FILE CONTENT actually modified (writing/editing source, config, "
+    "docs), not just information/explanation returned. false for a pure "
+    "question, status check, explanation, or review request where "
+    "nothing should be written, AND false for a pure shell/VCS/admin "
+    "action with no file content to write (git init, committing existing "
+    "files, installing a dependency, running a build) — needs_shell=true "
+    "already covers those. If there's ANY realistic chance a fix/change "
+    "is wanted once you look — not just a description — answer true: "
+    "false here skips planning/coding entirely, so a wrong guess "
     "silently drops a real fix request.\n"
     "- \"change_is_ambiguous\": only meaningful when needs_change is true "
     "(answer false otherwise). true UNLESS the user already names or "
@@ -183,6 +195,7 @@ def _get_classify_model():
         reasoning=False,
         num_keep=4,
         format="json",
+        has_tools=False,  # raw JSON verdict, never bound to a tools list — see has_tools's docstring in agent_builder.py
     )
     _classify_model_cache_key = current_model
     return _classify_model_cache
@@ -226,7 +239,14 @@ async def classify_intent(messages: list[dict]) -> dict:
         if flags is not None:
             log_event("router_classified", **flags)
             return flags
-        log_event("router_classify_invalid", raw=str(data))
+        # str(data) here is near-useless once data has already fallen back
+        # to {} (parse_json_loose returned None or an empty/malformed
+        # dict) — every invalid case then logs the same "{}" regardless of
+        # what the model actually said, hiding the real diagnostic signal.
+        # resp.content is the model's actual raw text (live-run 2026-08-14:
+        # needed this to even notice the regression the has_tools change
+        # caused — see agent_builder.py:_build_chat_model's docstring).
+        log_event("router_classify_invalid", raw=str(resp.content))
     except Exception as e:
         log_event("router_classify_failed", error=str(e))
     return dict(_FAIL_OPEN_FLAGS)
@@ -248,9 +268,21 @@ async def _get_casual_agent():
         return _casual_agent_cache
     model = _build_chat_model(
         model_tag=current_model,
-        num_predict=OLLAMA_NUM_PREDICT,
+        # CASUAL_NUM_PREDICT (not the general OLLAMA_NUM_PREDICT=4096, tuned
+        # for tool-using roles that write whole files/diffs) — see its own
+        # docstring in model_config.py for the live run this bounds: given
+        # enough tokens, this model can spiral into incoherent rambling
+        # with no natural stop; a shorter cap doesn't fix the tendency, it
+        # just bounds how much garbage one bad turn can produce.
+        num_predict=CASUAL_NUM_PREDICT,
         reasoning=settings.get("show_thinking"),
         num_keep=4,
+        # create_agent below binds tools=[] — this is exactly the path that
+        # broke on "Война и мир" (see has_tools's docstring in
+        # agent_builder.py): a model whose tool-call-syntax repeat_penalty
+        # override was applied even here, on plain prose with zero tools,
+        # removing its only defense against repeating itself.
+        has_tools=False,
     )
     agent = create_agent(
         model, [], system_prompt=_CASUAL_CHAT_SYSTEM_PROMPT,
@@ -274,11 +306,34 @@ async def answer_casual(messages: list[dict], on_event=None) -> str:
     classify_intent вернула все 4 флага false (см. docstring модуля). Идёт через
     run_stage (не голый model.ainvoke), чтобы сохранить обычный потоковый
     UI (answer_start/answer_chunk/answer_end) — иначе пользователь увидел
-    бы финальный текст одним куском вместо привычного стриминга."""
+    бы финальный текст одним куском вместо привычного стриминга.
+
+    messages режется до последних _CASUAL_HISTORY_WINDOW — раньше сюда шла
+    ВСЯ история хода целиком (_get_casual_agent строит агента с
+    middleware=[], в отличие от ролей пайплайна — никакого
+    _CompactResearchMiddleware, никакого сжатия вообще). Живой прогон
+    (2026-08-14, GLM-4.7-Flash/expert-streaming, сессия из ~2 часов вперемешку
+    debugging Go-проекта/git/восстановления файлов): простой вопрос "напиши
+    первые строки Анны Карениной" в конце этой длинной разнородной истории
+    получил ПОЛНЫЙ распад связности — модель вперемешку с ответом стала вслух
+    рассуждать про собственный системный промпт ("Does this count as writing
+    CODE according to rule?"), путать его с промптами других ролей, которые
+    видела раньше в этом же ходе, и генерировать случайный код/мешанину
+    языков. Два прямых теста тем же прыжком в backend (curl, в обход
+    приложения) — тот же вопрос без истории и тот же вопрос с системным
+    промптом casual, но без остальной истории — оба дали чистый корректный
+    ответ: не бэкенд и не промпт сами по себе, а именно объём/разнородность
+    истории, которую casual (в отличие от РОЛЕЙ ПАЙПЛАЙНА, все с компакцией)
+    получал целиком, без единой попытки сжатия. classify_intent (выше в этом
+    же файле) уже режет историю до последних 2 сообщений для классификации
+    по той же причине (короткий ответ не должен теряться без контекста, но и
+    не должен тащить всё); ответ casual — то же самое, только с чуть большим
+    окном, чтобы не терять недавний контекст короткого диалога."""
     if on_event:
         await on_event({"type": "stage_changed", "stage": "casual"})
     agent, model = await _get_casual_agent()
-    payload = {"messages": _to_lc_messages(messages)}
+    recent = messages[-_CASUAL_HISTORY_WINDOW:] if len(messages) > _CASUAL_HISTORY_WINDOW else messages
+    payload = {"messages": _to_lc_messages(recent)}
     result = await run_stage(
         agent, payload, on_event,
         judge_model=model, tools_by_name={}, read_history={},
