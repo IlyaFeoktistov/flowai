@@ -28,7 +28,14 @@ mcp = FastMCP("code_search")
 _HAS_RG = shutil.which("rg") is not None
 MAX_RESULTS = 60
 MAX_LINE_LEN = 300
-SKIP_DIRS = ["node_modules", ".git", "vendor", "__pycache__", ".cache", "dist", "build", ".venv", "venv", ".tox"]
+# "venv*" (glob, not the literal name "venv") — this project's OWN venvs
+# beyond the standard .venv (venv-tts, venv-build-tools, venv-uv, see
+# setup.py) don't match a bare "venv" --exclude-dir (grep/rg both do exact
+# name matching unless a glob is used) -- live bug: search_code timed out
+# on a repo-wide query, and it turned out venv-tts alone (7.9 GB, Python
+# packages/model weights) was getting fully scanned, unlike the correctly-
+# excluded vendor/ or .venv.
+SKIP_DIRS = ["node_modules", ".git", "vendor", "__pycache__", ".cache", "dist", "build", ".venv", "venv*", ".tox"]
 DEFAULT_TIMEOUT = 15
 # Потолок для the timeout= argument exposed on search_code/find_files_by_name/
 # search_symbols below — same idea as bash_exec_server.py's MAX_TIMEOUT: a
@@ -163,6 +170,18 @@ async def search_code(
             flags += ["--glob", file_pattern]
         if context_lines:
             flags += ["--context", str(context_lines)]
+        # Live bug (2026-08-14): unlike the grep fallback below, this branch
+        # never excluded SKIP_DIRS at all — rg's own .gitignore-respecting
+        # default was the only thing standing between a broad query and a
+        # full scan of vendor/ (42 GB, 322k files across several nested
+        # git repos, see find_files_by_name's docstring) or .venv/venv-tts,
+        # and that's not reliable enough to depend on silently (a nested
+        # repo, a missing/incomplete .gitignore entry, or rg run from a
+        # subdirectory can each defeat it). Live incident: search_code
+        # timed out entirely on a repo-wide query. Explicit --glob
+        # excludes, same SKIP_DIRS as everywhere else in this file, not a
+        # new model-facing parameter to remember to set.
+        flags += [f"--glob={_sh('!' + d + '/**')}" for d in SKIP_DIRS]
         cmd = " ".join(flags) + f" -- {_sh(query)} {_sh(path)}"
     else:
         flags = "grep -rn --color=never"

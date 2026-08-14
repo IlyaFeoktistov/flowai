@@ -41,6 +41,11 @@
   copy_lines сама считает expected_*_hash от этого кэша — вместо того
   чтобы полагаться на то, что модель донесёт его без искажений. Промах
   кэша падает обратно на _require_expected_lines.
+- _split_head_tail_tool — read_file/read_text_file (filesystem MCP server)
+  отклоняют вызов с ОБОИМИ head и tail сразу ("Cannot specify both head
+  and tail parameters simultaneously") — модель на живых прогонах регулярно
+  так и пытается (типичный "покажи начало и конец файла"). Разбивает такой
+  вызов на два обычных (head-only, tail-only) и склеивает результаты.
 - _bind_constant_args — прячет от модели аргументы, значение которых и так
   константно на всю сессию (repo_path у git-тулов).
 """
@@ -49,7 +54,7 @@ import re
 
 from langchain_core.tools import BaseTool, StructuredTool
 
-from mcp_agent.message_utils import _content_text
+from mcp_agent.message_utils import _content_text, _tool_text
 from utils.parsing import line_hash
 
 # Голова получает больше бюджета, чем хвост (60/40) — там обычно заголовок/
@@ -673,6 +678,68 @@ def _cache_line_content_tool(tool: BaseTool, cache: dict) -> BaseTool:
     return StructuredTool(
         name=tool.name,
         description=tool.description,
+        args_schema=tool.args_schema,
+        coroutine=_call,
+        response_format=tool.response_format,
+        metadata=tool.metadata,
+        handle_tool_error=tool.handle_tool_error,
+    )
+
+
+_HEAD_TAIL_NOTE = (
+    " NOTE: you CAN pass both head and tail together (e.g. to preview a "
+    "file's start and end in one call) — this wrapper runs them as two "
+    "separate reads and concatenates the results with an omitted-middle "
+    "marker in between."
+)
+
+
+def _split_head_tail_tool(tool: BaseTool) -> BaseTool:
+    """read_file/read_text_file (filesystem MCP server) reject a call that
+    sets BOTH head and tail at once ("Cannot specify both head and tail
+    parameters simultaneously") — live runs show the model reaching for
+    exactly that combination constantly (a plain "show me the start and end
+    of this file" read). The upstream package isn't vendored in this repo
+    (fetched fresh via `npx` each time, see mcp_agent/config.py), so there's
+    no persistent place to patch its validation directly — do it here
+    instead: when both are set, issue two ordinary single-param calls
+    (head-only, then tail-only) through the SAME original coroutine and
+    stitch the two results together, instead of ever hitting that error.
+
+    Deliberately applied as the OUTERMOST read wrapper (see agent_builder.py
+    — after _cache_line_content_tool/_dedupe_read_tool/_wrap_read_invalidation)
+    rather than the innermost: this way those inner layers each see two
+    ordinary, single-purpose calls (exactly the shape they already handle),
+    not one combined call with both params set — no special-casing needed
+    in the line cache or the read-dedup logic for a case they were never
+    designed for."""
+    original_coroutine = tool.coroutine
+    if original_coroutine is None:
+        return tool
+
+    async def _call(**kwargs):
+        if kwargs.get("head") and kwargs.get("tail"):
+            head_n, tail_n = kwargs["head"], kwargs["tail"]
+            # Drop the other key entirely rather than setting it to None —
+            # the upstream zod schema (z.number().optional(), no
+            # .nullable()) may reject an explicit null the same way it
+            # rejects both-set, so "absent" is the only safe way to signal
+            # "not this one" for a single-param call.
+            head_kwargs = {k: v for k, v in kwargs.items() if k != "tail"}
+            tail_kwargs = {k: v for k, v in kwargs.items() if k != "head"}
+            head_content, _ = await original_coroutine(**head_kwargs)
+            tail_content, _ = await original_coroutine(**tail_kwargs)
+            merged = (
+                f"{_tool_text(head_content)}\n"
+                f"... ({head_n} lines above, {tail_n} lines below — middle of file omitted) ...\n"
+                f"{_tool_text(tail_content)}"
+            )
+            return merged, None
+        return await original_coroutine(**kwargs)
+
+    return StructuredTool(
+        name=tool.name,
+        description=tool.description + _HEAD_TAIL_NOTE,
         args_schema=tool.args_schema,
         coroutine=_call,
         response_format=tool.response_format,
