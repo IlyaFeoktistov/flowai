@@ -94,6 +94,24 @@ judge-модели (agent_builder.py:_build_chat_model). num_ctx на этом �
 compaction и num_ctx в options _summarize_research теперь читают
 settings.get("num_ctx") — тот же параметр, что реально уходит в Ollama для
 этого вызова, а не отдельную, независимо выставленную константу.
+
+Живой прогон #7 (glm-4.7-flash/expert-streaming, 20260814): реальный 400 —
+"request (30739 tokens) exceeds the available context size (30208
+tokens)" — при том что _needs_compaction's собственная оценка утверждала,
+что история далеко не дотягивает до порога. Причина: `messages`, которые
+эта функция получала (request.messages) — это LangChain ModelRequest,
+который явно ИСКЛЮЧАЕТ системное сообщение ("# excluding system message"),
+а схемы тулов (request.tools) вообще никогда не входили в оценку.
+Analyzer/Planner с их ~2.7k-токенным системным промптом (prompts.py) и
+~20+ забинженными тулами (у каждого реальные description+parameters)
+реально стоили несколько тысяч токенов, которые эта проверка попросту
+никогда не видела — доля от num_ctx (0.5) держалась только потому, что
+щедрый запас случайно перекрывал эту неучтённую дыру, пока список тулов не
+разросся достаточно, чтобы перекрыть и его. _needs_compaction теперь
+принимает system_message/tools и учитывает их тем же chars//4; порог
+сменился с доли от num_ctx на num_ctx минус фиксированный резерв под
+генерацию (OLLAMA_NUM_PREDICT) и под неточность самой оценки — см. её
+собственный докстринг.
 """
 import hashlib
 import json
@@ -101,10 +119,11 @@ import json
 import settings
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_ollama import ChatOllama
 
 from mcp_agent.debug_log import log_event
 from mcp_agent.message_utils import _tool_text
-from mcp_agent.model_config import COMPACT_HISTORY_CTX_RATIO, DEBUG
+from mcp_agent.model_config import DEBUG, OLLAMA_NUM_PREDICT
 from mcp_agent.self_heal import _failed_write_messages
 from ui.console import console
 from utils.parsing import parse_json_loose
@@ -234,8 +253,7 @@ def _estimate_message_tokens(m) -> int:
     num_ctx" gate — see _needs_compaction below — not for an exact budget.
     Counts tool_calls' args too (AIMessage.content is often empty/short for
     a message that's mostly a big write_file call — undercounting THAT is
-    exactly the case this gate exists to catch, see live-run note on
-    COMPACT_HISTORY_CTX_RATIO in model_config.py)."""
+    exactly the case this gate exists to catch)."""
     n = len(str(getattr(m, "content", "") or ""))
     if isinstance(m, AIMessage):
         for tc in (m.tool_calls or []):
@@ -246,13 +264,36 @@ def _estimate_message_tokens(m) -> int:
     return n // 4
 
 
-def _needs_compaction(messages: list) -> bool:
-    """Real-context-size gate — see COMPACT_HISTORY_CTX_RATIO's docstring
-    in model_config.py for why this replaced the old unconditional
-    "there's a successful write in history" trigger (live-run 20260810: a
-    3-message, ~1-2k-token prefix got compacted into a 108-char digest for
-    zero real benefit, purely because a write had happened, not because
-    context was anywhere near full).
+def _estimate_tool_tokens(tool) -> int:
+    """Same chars//4 heuristic as _estimate_message_tokens, for one bound
+    tool's OWN schema (name + description + parameters) — this is real
+    prompt content too (every bound tool's definition gets serialized into
+    the request the model actually sees), just never arriving as a
+    `messages` entry. `tool` here is whatever LangChain's ModelRequest.tools
+    holds — usually BaseTool instances, but accept a plain dict too (an
+    already-converted OpenAI-style tool spec) since middleware ordering
+    isn't guaranteed to leave that conversion for later."""
+    if isinstance(tool, dict):
+        try:
+            return len(json.dumps(tool, ensure_ascii=False)) // 4
+        except TypeError:
+            return 50
+    n = len(getattr(tool, "name", "") or "") + len(getattr(tool, "description", "") or "")
+    schema = getattr(tool, "args_schema", None)
+    if schema is not None:
+        try:
+            n += len(json.dumps(schema.model_json_schema(), ensure_ascii=False))
+        except Exception:
+            pass
+    return n // 4
+
+
+def _needs_compaction(messages: list, system_message=None, tools=None) -> bool:
+    """Real-context-size gate — replaced the old unconditional "there's a
+    successful write in history" trigger (live-run 20260810: a 3-message,
+    ~1-2k-token prefix got compacted into a 108-char digest for zero real
+    benefit, purely because a write had happened, not because context was
+    anywhere near full).
 
     Threshold is settings.get("num_ctx") — the value actually handed to
     ChatOllama for this session's chat/judge model (agent_builder.py:
@@ -267,9 +308,48 @@ def _needs_compaction(messages: list) -> bool:
     file (hallucinated a expected_first_hash that appears nowhere in its
     own read history). Compaction's whole job is protecting THIS call's
     real context, so it must measure against the same number that call
-    actually uses."""
+    actually uses.
+
+    system_message/tools — added 2026-08-14 after a live 400 (glm-4.7-
+    flash/expert-streaming): "request (30739 tokens) exceeds the available
+    context size (30208 tokens)" fired even though this gate's OWN estimate
+    said the history was nowhere near its threshold. Root cause:
+    LangChain's ModelRequest.messages explicitly EXCLUDES the system
+    message ("messages: list[AnyMessage]  # excluding system message", see
+    langchain.agents.middleware.types.ModelRequest) and never included tool
+    schemas either — a role with ~2.7k system-prompt tokens (Analyzer, see
+    prompts.py) and ~20+ bound tools (each with a real description +
+    parameter schema) was contributing several thousand real prompt tokens
+    this gate had literally never counted, regardless of how far below
+    threshold the conversation history itself looked.
+
+    Threshold changed from a ratio of num_ctx (COMPACT_HISTORY_CTX_RATIO,
+    0.5) to num_ctx minus a fixed reserve for what THIS call's own
+    generation still needs to fit in the same window (OLLAMA_NUM_PREDICT,
+    4096 — the largest num_predict any role here actually requests, see
+    agent_builder.py) plus a flat safety margin for this whole estimate
+    being chars//4, not a real tokenizer count. A ratio made sense when the
+    gate only ever saw a fraction of the real prompt anyway (extra headroom
+    was accidentally absorbing that unmeasured gap); now that system+tools
+    are counted for real, the actual constraint is simpler and more literal:
+    leave enough room for this call's own answer, not "leave half the
+    window free" regardless of how large or small num_ctx is."""
     total = sum(_estimate_message_tokens(m) for m in messages)
-    return total > settings.get("num_ctx") * COMPACT_HISTORY_CTX_RATIO
+    if system_message is not None:
+        total += _estimate_message_tokens(system_message)
+    if tools:
+        total += sum(_estimate_tool_tokens(t) for t in tools)
+    # +3000 (not a smaller round number) on top of the generation reserve —
+    # live measurement (2026-08-14, same incident): investigator_tools()'s
+    # ~27 tools alone cost ~3085 estimated tokens from name+description
+    # text ALONE, before even adding each tool's own parameters JSON schema
+    # (which _estimate_tool_tokens above does count, so the real number is
+    # higher still) — chars//4 has real, demonstrated slack in exactly this
+    # direction (code/JSON-shaped content tokenizes less efficiently per
+    # character than the prose this heuristic was tuned against), not just
+    # theoretical rounding error.
+    reserve = OLLAMA_NUM_PREDICT + 3000
+    return total > settings.get("num_ctx") - reserve
 
 
 def _group_turns(messages: list) -> list[list]:
@@ -368,12 +448,32 @@ async def _summarize_research(judge_model, prefix: list) -> str:
         # model_config.OLLAMA_NUM_CTX constant here would silently ask
         # Ollama to re-negotiate a different context size than the one the
         # rest of this session's judge-model calls use, for this one call.
+        #
+        # options={} is Ollama-specific (ChatOllama._chat_params merges it
+        # into params["options"]) — judge_model is the same _build_chat_model
+        # fork as the main model (agent_builder.py), so with settings.
+        # expert_streaming_enabled it's a ChatOpenAI, not a ChatOllama. Live
+        # bug (2026-08-14, glm-4.7-flash/expert-streaming): options={...} on
+        # ChatOpenAI.ainvoke fell straight through to AsyncCompletions.
+        # create(), which doesn't know that param — "unexpected keyword
+        # argument 'options'" (TypeError, caught below, so compaction just
+        # silently never worked rather than crashing the turn) — same class
+        # of bug already fixed in self_heal.py's _extract_ask_user_shape,
+        # same fix here. ChatOpenAI uses max_tokens directly (not via
+        # options{}) and has no per-call num_ctx equivalent — expert-
+        # streaming's context is fixed at process start (-c, see
+        # expert_streaming.py), so max_tokens alone is enough there.
+        extra_kwargs = (
+            {"options": {"num_ctx": settings.get("num_ctx"), "num_predict": 600}}
+            if isinstance(judge_model, ChatOllama)
+            else {"max_tokens": 600}
+        )
         resp = await judge_model.ainvoke(
             [
                 {"role": "system", "content": _COMPACT_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            options={"num_ctx": settings.get("num_ctx"), "num_predict": 600},
+            **extra_kwargs,
         )
         data = parse_json_loose(resp.content) or {}
         findings = str(data.get("findings") or "").strip()
@@ -479,7 +579,7 @@ class _CompactResearchMiddleware(AgentMiddleware):
         if not settings.get("compact_history_enabled"):
             return await handler(request)
         messages = request.messages
-        if not _needs_compaction(messages):
+        if not _needs_compaction(messages, request.system_message, request.tools):
             # Below threshold — nothing to gain from summarizing yet, and
             # every digest is a chance to lose something the model still
             # needs verbatim (see module docstring, live runs #1/#3). Skip
