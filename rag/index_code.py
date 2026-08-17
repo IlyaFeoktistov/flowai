@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from mcp_agent.servers.code_search_server import SKIP_DIRS
+from mcp_agent.servers.file_ops_server import SKIP_DIRS
 
 from .chunking import chunk_text
 from .embeddings import EMBED_MODEL, embed_texts

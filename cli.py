@@ -59,6 +59,7 @@ from mcp_agent.pipeline import stream_chat as _pipeline_stream_chat
 from mcp_agent.snapshots import clear_session_file_snapshots
 import expert_streaming
 import model_lifecycle
+import update
 from compress import compress_history
 from episodic import EpisodicWriter
 from memory import get_store, DEFAULT_USER
@@ -107,12 +108,12 @@ _SHELL_COMMAND_MAX_OUTPUT = 5000
 
 async def _run_shell_command(command: str) -> tuple[str, str, int | None]:
     """"!command" input (see _handle_input) — runs it directly (not through
-    the model's own bash_exec MCP tool, no permission prompt: the user typed
+    the model's own bash MCP tool, no permission prompt: the user typed
     it themselves). Returns (stdout, stderr, returncode); returncode is None
     if the command was killed after _SHELL_COMMAND_TIMEOUT.
 
     stdin is left alone (inherited from this process' real terminal, NOT
-    DEVNULL like bash_exec_server.py's own bash_exec) — this is a command
+    DEVNULL like bash_server.py's own bash) — this is a command
     the USER typed themselves specifically to run it directly, so a program
     that reads stdin should be able to. What it can't do is show a live
     prompt: stdout/stderr are captured wholesale and only printed after the
@@ -200,7 +201,7 @@ async def _run_shell_command(command: str) -> tuple[str, str, int | None]:
 def _format_bash_transcript(command: str, stdout: str, stderr: str, returncode: int | None) -> str:
     """English tags (see flowAI/CLAUDE.md: everything the model reads must
     be English) wrapping raw command output, which passes through verbatim
-    whatever language/content it happens to have — same split as bash_exec's
+    whatever language/content it happens to have — same split as bash's
     own MCP tool result, just for a human-typed "!command" instead of a
     model-issued tool call."""
     combined = "\n".join(x for x in (stdout.strip(), stderr.strip()) if x) or "(no output)"
@@ -229,6 +230,7 @@ def _show_help() -> None:
         "[bold cyan]/talk[/] [dim]текст[/]              — озвучить текст напрямую, без модели\n"
         "[bold cyan]/usage[/]                   — статистика токенов\n"
         "[bold cyan]/doctor[/]                  — проверка Ollama/модели/MCP-серверов/хранилища\n"
+        "[bold cyan]/update[/]                  — проверить и подтянуть обновления flowAI из git\n"
         "[bold cyan]/settings[/]                — настройки моделей и GPU\n"
         "[bold cyan]/memory[/]                  — что помнит нейронка, точечное/полное удаление\n"
         "[bold cyan]/dnd[/]                     — D&D-режим: список сохранений / новая игра\n"
@@ -305,6 +307,19 @@ async def main() -> None:
     # open, so nothing here needs its own try/except.
     asyncio.create_task(asyncio.to_thread(model_lifecycle.unload_idle_models))
 
+    async def _check_update_bg() -> None:
+        # update.refresh_cache — только git fetch + сравнение (не чаще раза
+        # в 6 часов, см. update.py), никогда не пуллит сама: /update — единс-
+        # твенное место, которое реально меняет файлы. Перерисовываем шапку
+        # только если бейдж реально должен поменяться (см. её возврат).
+        try:
+            if await asyncio.to_thread(update.refresh_cache):
+                print_header(app)
+        except Exception:
+            pass
+
+    asyncio.create_task(_check_update_bg())
+
     messages: list[dict] = []
     episodic = EpisodicWriter()
     episodic.new_session()
@@ -369,7 +384,7 @@ async def main() -> None:
     _active_handle_task: asyncio.Task | None = None
     _current_text: str = ""         # raw text being processed in current turn
     _suppress_echo = False          # True when combined message already echoed via amendment hint
-    # Мид-терн стир (как в Claude Code): сообщение, пришедшее ПОКА текущий
+    # Мид-терн стир: сообщение, пришедшее ПОКА текущий
     # ход уже не в фазе "жду первого токена" (тот случай уже покрыт amend-
     # combine чуть ниже), кладётся сюда вместо _pending — mcp_agent/agent.py:
     # _stream_round подхватывает его между шагами графа (после того, как
@@ -564,6 +579,14 @@ async def main() -> None:
             report = await run_doctor()
             console.print(Panel(report, title="[bright_black]doctor[/]", border_style="bright_black", padding=(0, 2)))
             console.print()
+            return
+
+        if cmd == "/update":
+            console.print("[dim]  ⬆ проверяю обновления (git fetch)…[/]\n")
+            report = await update.run_update()
+            console.print(Panel(report, title="[bright_black]update[/]", border_style="bright_black", padding=(0, 2)))
+            console.print()
+            print_header(app)
             return
 
         if cmd == "/paste":
@@ -1229,7 +1252,7 @@ async def main() -> None:
             await _pending.put(combined)
             console.print(f"[dim]  +++ You › {escape(text)}[/]")
         elif _active_handle_task is not None and _mid_turn_queue is not None:
-            # Живой фиче-запрос (Claude Code-style "steer mid-turn"): ход уже
+            # Живой фиче-запрос ("подправить ход на лету"): ход уже
             # прошёл фазу "жду первый токен" (амменд выше не подошёл бы) —
             # текущий тул/генерация НЕ прерывается, сообщение подхватится
             # между шагами графа (mcp_agent/agent.py:_stream_round), а не

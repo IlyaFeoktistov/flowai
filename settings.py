@@ -51,7 +51,7 @@ _state: dict = {
     # не поддерживает архитектуру glm4moelite без патча этого форка.
     "chat_model":        os.getenv("OLLAMA_MODEL",        "glm-4.7-flash:q4_K_M"),
     "show_thinking":    os.getenv("SHOW_THINKING",    "0") == "1",
-    # Глобальный выключатель permission-диалогов (bash_exec, write_file,
+    # Глобальный выключатель permission-диалогов (bash, write_file,
     # git-мутации, ...) — см. tools/confirm.py:ask_permission, единая точка
     # входа для обоих путей подтверждения. Дефолт ВКЛ (спрашивать) — тот же
     # безопасный дефолт, что был всегда; выключение — осознанный шаг
@@ -77,22 +77,37 @@ _state: dict = {
     # вместо того чтобы взять план и делать) — именно это новый пайплайн
     # решает архитектурно. Эскейп-люк на случай регрессии — /settings.
     "pipeline_mode":    os.getenv("PIPELINE_MODE",    "1") == "1",
+    # Гейтит ветку router.py:answer_casual в НОВОМ пайплайне (mcp_agent/
+    # pipeline.py:stream_chat) — прямой ответ без единого тула, без
+    # stage_runner'а вокруг (значит без verdict/guidance ретраев и без
+    # compaction истории, см. router.py:_CASUAL_HISTORY_WINDOW). Эскейп-люк
+    # на случай регрессии: если модель на этой ветке ведёт себя странно
+    # (уходит в бесконечный повтор/слоп без верификации ответа — живой
+    # инцидент, см. коммит "Fix casual-chat coherence collapse"), выключить
+    # тут — тогда те же сообщения (needs_change=false) идут в обычную
+    # analyzer-ветку, у которой есть verdict/guidance/recursion-machinery
+    # stage_runner'а, просто без Planner/Coder/Verifier после неё. Дефолт
+    # ВЫКЛ — analyzer у пользователя стабильно ведёт себя лучше на простых
+    # ответах, чем голый answer_casual. Не действует на легаси-агент (у
+    # того свой, отдельный casual-путь, не связанный с этим тумблером) и не
+    # действует, если pipeline_mode выключен.
+    "casual_answers_enabled": os.getenv("CASUAL_ANSWERS_ENABLED", "0") == "1",
     # Урезанный (без переименования) набор тулов для ПРОСТОГО пайплайна
     # (единый агент с планированием, без разделения на стадии) —
     # mcp_agent/optimized_tools.py: один тул на смысл (bash/read/
-    # grep/glob/write/edit), без 5-6 читающих и 5 пишущих вариантов сразу, в
-    # духе Claude Code. Работает ТОЛЬКО когда pipeline_mode выключен (новый
+    # grep/glob/write/edit), без генеративных/git-тулов, если они выключены
+    # отдельными тумблерами. Работает ТОЛЬКО когда pipeline_mode выключен (новый
     # пайплайн уже решает эту же задачу иначе, per-request композицией —
     # см. router.py/roles.py) и не участвует в voice_mode (там свой пустой
     # tools=[] путь). Дефолт ВЫКЛ — не меняет поведение легаси-агента, пока
     # пользователь не включит явно.
     "optimized_tools":  os.getenv("OPTIMIZED_TOOLS",  "0") == "1",
     # ВКЛ заставляет простой пайплайн ВСЕГДА делегировать любой поиск по коду
-    # (search_code/find_files_by_name/search_symbols/project_tree) сабагенту
-    # через delegate, а не только для больших/незнакомых деревьев — см.
-    # prompts.py:_SYSTEM_PROMPT_TEMPLATE, ветка про delegate. Дефолт ВКЛ по
-    # прямому запросу пользователя (2026-08-11, после живого таймаута
-    # search_code на большом внешнем репозитории) — эскейп-люк на случай
+    # (grep_search/glob_search) сабагенту через delegate, а не только для
+    # больших/незнакомых деревьев — см. prompts.py:_SYSTEM_PROMPT_TEMPLATE,
+    # ветка про delegate. Дефолт ВКЛ по прямому запросу пользователя
+    # (2026-08-11, после живого таймаута на большом внешнем репозитории) —
+    # эскейп-люк на случай
     # регрессии (лишний полный раунд сабагента там, где хватило бы 1 прямого
     # вызова) — тумблер в /settings.
     "always_delegate_search": os.getenv("ALWAYS_DELEGATE_SEARCH", "1") == "1",
@@ -272,17 +287,27 @@ _state: dict = {
     # задачи (см. compaction.py live-run #3) и пользователь предпочитает
     # риск переполнения риску пересказа.
     "compact_history_enabled": os.getenv("COMPACT_HISTORY_ENABLED", "1") == "1",
+    # update.py — кэш фоновой проверки git-обновлений (см. её докстринг).
+    # last_update_check: ISO-таймстамп последнего реального `git fetch`
+    # (None = ещё ни разу); update_commits_behind: сколько коммитов
+    # origin/<ветка> впереди HEAD на момент последней проверки — 0, пока не
+    # доказано обратное. Оба обновляются ТОЛЬКО из update.py — /update
+    # (реальный pull) и фоновая проверка при старте cli.py (только
+    # fetch+сравнение, без pull) читают/пишут эти же два ключа.
+    "last_update_check": None,
+    "update_commits_behind": 0,
     "debug":            False,
 }
 
 # Ключи, которые сохраняются (без device — определяется автоматически)
 _PERSIST_KEYS = {
-    "chat_model", "show_thinking", "ask_permissions", "self_heal_enabled", "pipeline_mode", "optimized_tools", "always_delegate_search", "delegate_nudge_enabled", "expert_streaming_enabled", "num_ctx",
+    "chat_model", "show_thinking", "ask_permissions", "self_heal_enabled", "pipeline_mode", "casual_answers_enabled", "optimized_tools", "always_delegate_search", "delegate_nudge_enabled", "expert_streaming_enabled", "num_ctx",
     "vision_model", "stt_model", "voice_mode", "voice_chat_model", "tts_voice_clone_path", "image_gen_model", "image_gen_device", "music_gen_device", "imggen_safety",
     "imggen_steps", "imggen_guidance", "imggen_strength", "imggen_width", "imggen_height",
     "imggen_prompt_prefix", "imggen_negative_prompt", "imggen_enhance_prompt", "recap_enabled",
     "gen3d_enabled", "gen3d_target_faces", "gen3d_hunyuan_profile", "gen3d_skin_source",
     "gen_agent_tools", "compact_history_enabled",
+    "last_update_check", "update_commits_behind",
     "debug",
 }
 

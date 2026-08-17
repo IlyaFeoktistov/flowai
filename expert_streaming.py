@@ -150,6 +150,19 @@ import storage
 # is a debug aid, not a durable log a user would want to keep across runs.
 _LOG_PATH = storage.data_dir() / "expert_streaming_server.log"
 
+# Written by whichever flowai process actually starts the server, read by any
+# OTHER flowai process that later finds the port already healthy (see
+# ensure_running's "занят каким-то другим процессом" branch below) — a
+# second terminal running flowai concurrently used to always hit that branch
+# and fall back to the plain Ollama path, which glm-4.7-flash can't actually
+# run on (see CLAUDE.md). One shared file, same durability tier as
+# _LOG_PATH — a live server's identity, not data worth keeping across
+# reboots. _proc.pid recorded here is the SERVER's own pid (this module's
+# Popen child IS the server), not the flowai process's — deliberately, so a
+# server that outlives a crashed/restarted flowai (see ensure_running's own
+# comment on that) is still correctly recognized as alive by its own pid.
+_STATE_PATH = storage.data_dir() / "expert_streaming_server.json"
+
 FLOWAI_ROOT = Path(__file__).resolve().parent
 VENDOR_DIR = FLOWAI_ROOT / "vendor" / "llama-expert-streaming"
 SERVER_BINARY = VENDOR_DIR / "build" / "bin" / "llama-server"
@@ -307,6 +320,56 @@ def is_running() -> bool:
     return _proc is not None and _proc.poll() is None
 
 
+def _write_state(pid: int, port: int, model_tag: str, num_ctx: int, show_thinking: bool) -> None:
+    try:
+        _STATE_PATH.write_text(json.dumps({
+            "pid": pid, "port": port, "model_tag": model_tag,
+            "num_ctx": num_ctx, "show_thinking": show_thinking,
+        }))
+    except OSError:
+        pass  # best-effort — worst case, the NEXT process to find this port occupied fails loud instead of adopting it
+
+
+def _clear_state() -> None:
+    try:
+        _STATE_PATH.unlink()
+    except OSError:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False  # os.kill(0, ...)/negative pid target a process GROUP, not a single pid
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _adoptable_state(port: int, model_tag: str, num_ctx: int, show_thinking: bool) -> dict | None:
+    """None unless _STATE_PATH names a server that's (a) still alive by its
+    own recorded pid and (b) configured EXACTLY like what THIS call is
+    asking for — same guard the module already applies to its OWN _proc via
+    _proc_config, just readable across process boundaries. A mismatch on
+    any field (including a state file from a different port/model
+    altogether) means "not proven safe to adopt", same treatment as no
+    state file at all — the caller falls through to the existing
+    port-occupied failure, never guesses."""
+    try:
+        state = json.loads(_STATE_PATH.read_text())
+    except (OSError, ValueError):
+        return None
+    if (state.get("port"), state.get("model_tag"), state.get("num_ctx"), state.get("show_thinking")) != (
+        port, model_tag, num_ctx, show_thinking
+    ):
+        return None
+    pid = state.get("pid")
+    if not isinstance(pid, int) or not _pid_alive(pid):
+        return None
+    return state
+
+
 def _find_port_holder_pids(port: int) -> list[str]:
     """Best-effort PID lookup for whatever's LISTENING on `port` — never
     kills anything (a process on this port could be unrelated to flowai
@@ -336,6 +399,7 @@ def stop_server() -> None:
             _proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             _proc.kill()
+        _clear_state()  # only OUR OWN tracked process's death invalidates the state file — an adopted server we never owned is left running, its own state untouched
     _proc = None
     _proc_config = None
 
@@ -355,6 +419,13 @@ def ensure_running(
     (ok, message) вместо исключения — вызывающий код (agent_builder) должен
     суметь откатиться на обычный Ollama-путь, если что-то пошло не так,
     а не уронить весь ход.
+
+    "Переиспользует живой" относится и к серверу, поднятому ДРУГИМ flowai-
+    процессом, не только этим самым (см. _STATE_PATH/_adoptable_state) — до
+    этого второй параллельный `flowai` с той же дефолтной моделью (требующей
+    expert_streaming_enabled=ВКЛ, см. CLAUDE.md) всегда попадал в ветку
+    "порт занят" ниже и откатывался на обычный Ollama-путь, на котором эта
+    архитектура физически не работает.
 
     Живой прогон (2026-08-11, эта же машина, 6 GB VRAM): Ollama сама
     держит qwen3-coder:30b резидентной и перезагружает её по своему
@@ -401,7 +472,20 @@ def ensure_running(
     # because an orphaned process from a previous run was still serving the
     # old context size the whole time. Fail loudly and specifically instead
     # of guessing — never kill it ourselves, it might not even be ours.
+    #
+    # EXCEPT when _STATE_PATH proves it's safe: a server that's (a) alive by
+    # its own recorded pid and (b) configured EXACTLY like what we're asking
+    # for right now (see _adoptable_state) — most likely another flowai
+    # process's server, started with the same settings.py config this one
+    # just loaded from the same shared SQLite file. That's "already running"
+    # in every way that matters, not a stale/foreign process to fail on.
     if _health_check(port):
+        adopted = _adoptable_state(port, model_tag, num_ctx, show_thinking)
+        if adopted is not None:
+            # _proc stays None on purpose — we didn't start this process, so
+            # stop_server() must never try to kill it.
+            _proc_config = (model_tag, num_ctx, show_thinking)
+            return True, f"already running (started by another flowai process, pid {adopted['pid']})"
         pids = _find_port_holder_pids(port)
         if pids:
             how_to_stop = f"останови вручную: `kill {' '.join(pids)}`"
@@ -481,6 +565,7 @@ def ensure_running(
             return _fail(f"процесс завершился сам (код {_proc.returncode}) — {_tail_log()}")
         if _health_check(port):
             _proc_config = (model_tag, num_ctx, show_thinking)
+            _write_state(_proc.pid, port, model_tag, num_ctx, show_thinking)
             return True, "started"
         time.sleep(0.5)
 

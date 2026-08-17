@@ -35,19 +35,21 @@ from mcp_agent.optimized_tools import OPTIMIZED_TOOL_NAMES
 # Явный allowlist по ИМЕНИ тула, а не "всё, что не в TOOLS_REQUIRING_APPROVAL"
 # — так подмножество не меняется молча, если кто-то добавит новый
 # read-only-с-виду тул, не подумав про инвестигатор/delegate (тот же
-# принцип, что раньше был только в delegate_tool.py).
+# принцип, что раньше был только в delegate_tool.py). read_file/grep_search/
+# glob_search/list_deleted_paths — file_ops_server.py, все помечены
+# "read_only" в его TOOL_PERMISSIONS (см. его модульный докстринг про
+# required_permission) — заменяют разом filesystem MCP-сервер + старые
+# code_search_server.py/fs_extra_server.py: никакого отдельного тула для
+# листинга директории — glob_search("**/*", path) достаточен для того, чтобы
+# увидеть структуру проекта, отдельный tree-тул не нужен.
+# Никакого отдельного git-тула вообще (mcp-server-git/git_extra_server.py —
+# УБРАНЫ, 2026-08-14: "зачем git-тулы, есть же bash") — git status/diff/log/
+# show идут через bash (Analyzer/Planner's read-only allowlist уже пускает
+# их, см. agent_builder.py:_is_read_only_bash_command), git-мутации
+# (commit/checkout/reset/...) — тоже через bash, под тем же approval, что и
+# любая другая команда (config.py:TOOLS_REQUIRING_APPROVAL).
 _PROJECT_READ_TOOLS = {
-    # filesystem (@modelcontextprotocol/server-filesystem)
-    "read_file", "read_text_file", "read_multiple_files",
-    "list_directory", "directory_tree", "search_files", "get_file_info",
-    # code_search_server.py — project_tree предпочтительнее directory_tree
-    # на реальном проекте (исключает vendor/node_modules/.venv и т.п.,
-    # см. её докстринг), но саму directory_tree не убираем — на маленьких
-    # подкаталогах без vendor-мусора разницы нет, а модель уже про неё
-    # знает из промпта.
-    "search_code", "read_file_range", "find_files_by_name", "search_symbols", "project_tree",
-    # git (mcp-server-git) — только чтение состояния
-    "git_status", "git_diff", "git_diff_staged", "git_diff_unstaged", "git_log", "git_show",
+    "read_file", "grep_search", "glob_search", "list_deleted_paths",
     # lsp_server.py
     "lsp",
     # rag_server.py — семантический поиск, не reindex/remember_url (запись)
@@ -59,32 +61,10 @@ _PROJECT_READ_TOOLS = {
     "get_knowledge", "list_memory",
 }
 
-# ОТКЛЮЧЕНЫ по умолчанию (не удалены — MCP-серверы их всё равно
-# регистрируют, _get_tools() их всё равно грузит, просто ни один компоновщик
-# ниже их больше не включает): тонкие обёртки над ОДНОЙ известной shell-
-# командой (`git status`, `git log`, `git show`, `ls`, `find -name`, `stat`)
-# без структурной пользы дедикейтед-тула — не правят файлы (нет риска
-# "путает строки", который оправдывает read_file_range/replace_lines), не
-# нуждаются в песочнице (это чтение состояния, не запись), не участвуют в
-# дедупе read_history построчно. bash_exec справляется с той же самой
-# командой ровно так же надёжно — лишний почти-дубль в списке тулов только
-# повышает шанс путаницы при выборе (см. живой баг search_files vs
-# find_files_by_name). Исключаются из состава там, где bash_exec
-# гарантированно доступен как замена (investigator/planner/executor — с тех
-# пор как _SHELL_TOOLS там безусловны, см. investigator_tools; Verifier — у
-# него _SHELL_TOOLS всегда были безусловны) — Coder их не теряет НИКОГДА, у
-# него bash_exec нет в принципе (verifier_tools про "верификация целиком у
-# Verifier"), и без него это была бы чистая потеря возможностей, не замена.
-# Если понадобится вернуть — просто убрать вычитание там, где оно применено.
-_THIN_WRAPPER_TOOLS = {
-    "git_status", "git_log", "git_show",
-    "list_directory", "find_files_by_name", "get_file_info",
-}
-
-# bash_exec/bash_exec_bg* всё равно в TOOLS_REQUIRING_APPROVAL (config.py) —
+# bash/bash_bg* всё равно в TOOLS_REQUIRING_APPROVAL (config.py) —
 # approval-диалог перед реальным запуском команды не меняется от того, кто
 # именно из ролей её просит и был ли этот тул у роли "предусмотрен" изначально.
-_SHELL_TOOLS = {"bash_exec", "bash_exec_bg", "bash_exec_bg_check", "bash_exec_bg_list"}
+_SHELL_TOOLS = {"bash", "bash_bg", "bash_bg_check", "bash_bg_list"}
 
 # Всегда доступны независимо от флагов — read-only, дешёвые, почти никогда
 # не вредны как контекст. analyze_image (vision_server.py) добавлен сюда,
@@ -95,24 +75,22 @@ _SHELL_TOOLS = {"bash_exec", "bash_exec_bg", "bash_exec_bg_check", "bash_exec_bg
 # здесь нет; было ранее вообще не подключено ни к одной роли — исправлено.
 _WEB_TOOLS = {"web_search", "fetch", "analyze_image"}
 
-# Пишущие/git-мутирующие тулы.
+# Пишущие тулы. write_file/edit_file/delete_path — file_ops_server.py,
+# "workspace_write" в его TOOL_PERMISSIONS. Никакого отдельного
+# move/create_directory: write_file создаёт недостающие родительские
+# директории сама (см. её докстринг), а move — это либо write_file(new_path,
+# <прочитанное>)+delete_path(old_path), либо bash. git_restore_file убран
+# вместе с остальными git-тулами — откат к состоянию git теперь идёт через
+# bash (роли, у которых оно есть) или restore_file_snapshot (свой пре-write
+# снапшот, не завязанный на git).
 _WRITE_TOOLS = {
-    "write_file", "edit_file", "create_directory", "move_file",
-    "replace_lines", "insert_lines", "copy_lines",
-    "delete_path", "restore_deleted_path", "list_deleted_paths",
-    "git_restore_file", "restore_file_snapshot", "list_file_snapshots",
-    "git_commit", "git_add", "git_reset", "git_create_branch", "git_checkout", "git_branch",
+    "write_file", "edit_file", "delete_path", "restore_deleted_path",
+    "restore_file_snapshot", "list_file_snapshots",
 }
 
 
 def _project_read_tools(has_shell: bool) -> set[str]:
-    """_THIN_WRAPPER_TOOLS вычитается ТОЛЬКО когда у той же роли ЕСТЬ
-    bash_exec (has_shell=true) — тогда замена (`bash_exec("git status")`)
-    гарантированно доступна, реальной потери возможностей нет. Роли БЕЗ
-    bash_exec (executor_tools, coder_tools) держат их полностью — там это
-    единственный способ получить git_status/list_directory/
-    find_files_by_name/get_file_info, не почти-дубль лишнего варианта."""
-    return _PROJECT_READ_TOOLS - _THIN_WRAPPER_TOOLS if has_shell else set(_PROJECT_READ_TOOLS)
+    return set(_PROJECT_READ_TOOLS)
 
 
 def _apply_optimized_filter(names: set[str]) -> set[str]:
@@ -121,15 +99,12 @@ def _apply_optimized_filter(names: set[str]) -> set[str]:
     только когда 'новый пайплайн' ВЫКЛ" (see ui/tui/settings.py's toggle
     hint, updated alongside this). Direct instruction (2026-08-14): same
     toggle should narrow every new-pipeline role's tool set too, not just
-    legacy's — a role doesn't need read_file AND read_text_file AND
-    read_multiple_files AND search_files AND directory_tree AND
-    project_tree AND search_symbols AND every git_* read tool all bound
-    simultaneously when bash_exec (unconditional for every role that has
-    it at all, see investigator_tools/verifier_tools) already covers
-    cat/grep/find/git diff just as reliably — more near-duplicate tools in
-    the schema is more chances for a weaker/quantized model to reach for
-    the wrong one, not more real capability (same reasoning
-    optimized_tools.py's own docstring already gives for the legacy path).
+    legacy's. The file_ops_server.py consolidation (read_file/write_file/
+    edit_file/grep_search/glob_search replacing a dozen near-duplicate
+    filesystem/code-search tools) already closes most of the original
+    complaint on its own — this filter still matters for the remaining
+    near-duplicates (every git_* read tool bound alongside bash, which
+    already covers `git diff`/`git log` just as reliably).
 
     Intersects rather than replaces the capability-group union each
     composer function below builds — applied to that raw union BEFORE any
@@ -145,9 +120,9 @@ def investigator_tools() -> set[str]:
     Planner дальше (needs_change+ambiguous), и когда его саммари сразу
     становится финальным ответом (не needs_change, старое kind="explain") —
     в обоих случаях НИКТО не идёт проверять его работу отдельным взглядом
-    после, так что самому иметь bash_exec тут безопасно и нужно.
+    после, так что самому иметь bash тут безопасно и нужно.
 
-    _SHELL_TOOLS (bash_exec) и _PROJECT_READ_TOOLS — ОБА БЕЗУСЛОВНЫ, не
+    _SHELL_TOOLS (bash) и _PROJECT_READ_TOOLS — ОБА БЕЗУСЛОВНЫ, не
     зависят от needs_shell/needs_project. Живой инцидент (сначала для
     needs_shell, потом для needs_project — тот же класс бага дважды):
     needs_shell/needs_project — это классификация РОУТЕРОМ ДО единого
@@ -158,7 +133,7 @@ def investigator_tools() -> set[str]:
     до этого фикса) "у тебя нет этих тулов, даже не пытайся" и послушно
     отвечал отказом на вопрос вроде "какие параметры стоят у модели этого
     проекта" вместо того, чтобы прочитать конфиг. approval-диалог на
-    bash_exec (TOOLS_REQUIRING_APPROVAL) и то, что остальные project-read
+    bash (TOOLS_REQUIRING_APPROVAL) и то, что остальные project-read
     тулы вообще read-only без approval, защищают не хуже, чем отсутствие
     тула в схеме — так что цена ошибки needs_shell/needs_project в любую
     сторону теперь минимальна, а не фатальна. Оба флага остаются флагами
@@ -183,11 +158,11 @@ def executor_tools(needs_project: bool) -> set[str]:
     проекта не бывает без его чтения), так что на практике этот набор
     всегда включает _PROJECT_READ_TOOLS.
 
-    БЕЗ bash_exec — в отличие от investigator_tools, не наследует
-    _SHELL_TOOLS. Живой баг: quick_fix унаследовал безусловный bash_exec от
+    БЕЗ bash — в отличие от investigator_tools, не наследует
+    _SHELL_TOOLS. Живой баг: quick_fix унаследовал безусловный bash от
     investigator_tools (эта функция раньше звалась изнутри неё), а
     собственный промпт (_quick_fix_system_prompt) всё ещё прямо говорил "you
-    do NOT have bash_exec" — тот же класс несоответствия схема/промпт, что
+    do NOT have bash" — тот же класс несоответствия схема/промпт, что
     уже чинили для Analyzer. Смысловая причина держать его БЕЗ shell та же,
     что у coder_tools(): после quick_fix ВСЕГДА идёт Verifier (pipeline.py
     запускает verifier после coder_role независимо от того, "coder" это или
@@ -201,7 +176,7 @@ def executor_tools(needs_project: bool) -> set[str]:
 
 def coder_tools() -> set[str]:
     """Двустадийный путь (после согласованного Planner'ом плана) — всегда
-    полный проектный read+write, но НИКОГДА bash_exec независимо от флагов:
+    полный проектный read+write, но НИКОГДА bash независимо от флагов:
     верификация целиком у Verifier (см. verifier_tools) — Coder не должен
     иметь возможность сам себя "проверить".
 
@@ -217,7 +192,7 @@ def verifier_tools() -> set[str]:
     """Безусловно, не зависит от флагов исходного запроса — проверка правки
     всегда нуждается и в актуальном состоянии проекта, и в способности
     реально что-то запустить (тесты/линтер), независимо от того, что было
-    needs_shell у САМОГО запроса. _THIN_WRAPPER_TOOLS вычитается — bash_exec
+    needs_shell у САМОГО запроса. _THIN_WRAPPER_TOOLS вычитается — bash
     здесь безусловно есть, так что реальной потери возможностей нет."""
     return _apply_optimized_filter(_project_read_tools(has_shell=True) | _WEB_TOOLS | _SHELL_TOOLS)
 
@@ -244,11 +219,11 @@ def approval_tools(names: set[str]) -> list[str]:
 # может композировать набор per-call — используем тот же (project read +
 # web, БЕЗ shell), что и раньше был в ANALYZER_TOOL_NAMES перед переходом
 # на композицию. Собран напрямую (не через investigator_tools — та с тех
-# пор как _SHELL_TOOLS у неё безусловны, всегда возвращает bash_exec, а
+# пор как _SHELL_TOOLS у неё безусловны, всегда возвращает bash, а
 # delegate's собственный системный промпт до сих пор явно говорит "no
 # shell") — этот набор держит то утверждение верным, никакого
 # поведенческого изменения тут нет, в отличие от investigator_tools выше.
-# _THIN_WRAPPER_TOOLS НЕ вычитаются — без bash_exec замены им тут нет.
+# _THIN_WRAPPER_TOOLS НЕ вычитаются — без bash замены им тут нет.
 LEGACY_INVESTIGATION_TOOL_NAMES = set(_WEB_TOOLS) | _PROJECT_READ_TOOLS
 
 ROLE_RECURSION_LIMIT: dict[str, int] = {

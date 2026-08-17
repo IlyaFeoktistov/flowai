@@ -17,7 +17,7 @@ delegate — последовательный сабагент для много
 после каждого круга), выполняется полностью, и только потом возвращает
 управление основному циклу.
 
-Тулы у сабагента — READ-ONLY подмножество (_ALLOWED_TOOLS): без bash_exec,
+Тулы у сабагента — READ-ONLY подмножество (_ALLOWED_TOOLS): без bash,
 без записи файлов, без git-мутаций. Это осознанное упрощение, а не
 временная заглушка — сабагент здесь только для разведки ("как оно
 устроено", "где реально определено", "что вызывает что"), не для внесения
@@ -103,11 +103,7 @@ _DELEGATE_SYSTEM_PROMPT = (
 # вызове). Это не запрет — модель всё ещё может проигнорировать и читать
 # дальше, но теперь это явное решение, а не то, что до неё вообще не
 # доходило само по себе среди остального текста системного промпта.
-_EXPLORATION_TOOL_NAMES = {
-    "read_file", "read_text_file", "read_multiple_files", "read_file_range",
-    "list_directory", "directory_tree", "search_files", "get_file_info",
-    "search_code", "search_symbols", "find_files_by_name", "search_code_semantic",
-}
+_EXPLORATION_TOOL_NAMES = {"read_file", "grep_search", "glob_search", "search_code_semantic"}
 _DELEGATE_NUDGE_THRESHOLD = 12
 _NUDGE_MARKER = "you've made a lot of read/search calls in this investigation"
 
@@ -207,7 +203,7 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
     """Замена sub_agent.ainvoke(...) с тем же возвращаемым значением (dict с
     ключом "messages"), но эмитящая tool_start/tool_end наружу через
     current_on_event ПО МЕРЕ того, как сабагент реально вызывает свои тулы —
-    "delegate → search_code" и т.п., а не молчание на весь срок ainvoke()
+    "delegate → grep_search" и т.п., а не молчание на весь срок ainvoke()
     (живая жалоба: раньше пользователь не видел вообще ничего, что
     происходит, пока delegate работает). stream_mode="values" — снимок
     полного состояния графа после каждого шага, а не токен-стрим модели

@@ -140,7 +140,7 @@ async def _stream_round(
     gen_ms — суммарное МИЛЛИСЕКУНДНОЕ время реальной генерации токенов (окна
     между первым и последним "messages"-чанком одного AIMessage), БЕЗ
     времени выполнения тулов между шагами графа (см. живой баг: duration_ms
-    в stream_chat считает весь ход целиком, включая ожидание bash_exec/
+    в stream_chat считает весь ход целиком, включая ожидание bash/
     tool-раундтрипов и judge-вызов self_heal — на медленном локальном
     железе это давало tok/s в разы ниже реальной скорости генерации
     модели). Недооценивает на шагах, где модель вызвала тул без единого
@@ -151,8 +151,11 @@ async def _stream_round(
     которую cli.py подкладывает сообщение, пришедшее от пользователя, ПОКА
     этот ход уже идёт (не во время "жду первого токена" — тот случай стрим_chat
     решает раньше, амендом текущего запроса). Живой фиче-запрос: очередь
-    должна попадать в контекст МЕЖДУ шагами графа, как в Claude Code, а не
-    ждать конца всего хода. Проверяется ТОЛЬКО сразу после шага, где последнее
+    должна попадать в контекст МЕЖДУ шагами графа, а не ждать конца всего
+    хода — иначе пользователь, поправивший себя посреди длинного
+    расследования/правки, увидел бы реакцию только после того, как модель
+    уже довела до конца весь первоначальный (возможно, уже неверный) план.
+    Проверяется ТОЛЬКО сразу после шага, где последнее
     добавленное сообщение — ToolMessage (см. ниже) — то есть после того, как
     ТЕКУЩИЙ вызов тула точно доведён до конца, и ПЕРЕД следующим вызовом
     модели, а не посреди генерации/выполнения тула. Инъекция технически —
@@ -380,7 +383,7 @@ async def _stream_round(
                 current_input = Command(resume=response)
                 continue
             if injected_text is not None:
-                # Живой фиче-запрос (Claude Code-style "steer mid-turn"):
+                # Живой фиче-запрос ("подправить ход, не начиная заново"):
                 # оборачиваем явной пометкой, что это НЕ новая, вытесняющая
                 # задача — модель сама решает, отреагировать сейчас или
                 # заметить и вернуться к этому после текущей работы.
@@ -426,12 +429,7 @@ async def _stream_round(
 # попытками), и в _investigation_signals (auto-capture knowledge ниже) —
 # один и тот же набор "это разведка", а не два независимых, которые могут
 # разъехаться при следующем добавленном тул-имени.
-_READ_TOOL_NAMES = (
-    "read_file", "read_text_file", "read_multiple_files", "read_file_range",
-    "list_directory", "directory_tree", "search_files", "get_file_info",
-    "search_code", "search_symbols", "find_files_by_name", "search_code_semantic",
-    "lsp", "delegate",
-)
+_READ_TOOL_NAMES = ("read_file", "grep_search", "glob_search", "search_code_semantic", "lsp", "delegate")
 
 
 def _round_call_info(round_msgs: list) -> dict[str, tuple[str, dict]]:
@@ -457,7 +455,7 @@ def _investigation_signals(round_msgs: list) -> tuple[set[str], bool]:
             continue
         name, args = call_info[m.tool_call_id]
         if name in _READ_TOOL_NAMES:
-            read_items.add(str(args.get("path") or args.get("query") or args.get("filePath") or args.get("task") or "?"))
+            read_items.add(str(args.get("path") or args.get("pattern") or args.get("query") or args.get("task") or "?"))
         elif name == "update_knowledge":
             saved_knowledge = True
     return read_items, saved_knowledge
@@ -468,36 +466,34 @@ def _summarize_round(round_msgs: list, verdict: dict) -> str:
     проверок здесь) выжимка одной retry-попытки для digest между попытками
     — см. _start_next_attempt, зачем это вообще нужно. Пути/команды вместо
     содержимого: содержимое всё равно физически лежит на диске и дёшево
-    перечитывается заново (read_file_range/sandwich-truncation/дедуп), а
+    перечитывается заново (read_file/sandwich-truncation/дедуп), а
     вот НАРРАТИВ "что делалось и почему не подошло" в истории не
     восстановить, кроме как заново его туда положив."""
     call_info = _round_call_info(round_msgs)
 
-    read_items, changed, ran, diffed = [], [], [], []
+    read_items, changed, ran = [], [], []
     for m in round_msgs:
         if not isinstance(m, ToolMessage) or m.tool_call_id not in call_info:
             continue
         name, args = call_info[m.tool_call_id]
         ok = getattr(m, "status", None) != "error"
         if name in _READ_TOOL_NAMES:
-            item = str(args.get("path") or args.get("query") or args.get("filePath") or args.get("task") or "?")
-            # read_file_range — сохраняем ТОЧНЫЙ диапазон, не только путь.
-            # Живой прогон (mail-server, Planner): без диапазона попытка 2
-            # перечитала ТЕ ЖЕ строки 170-190/60-70/10-20, что и попытка 1 —
-            # дайджест отмечал файл как "explored" целиком, хотя реально
-            # был виден только небольшой кусок, и ретрай не мог отличить
-            # "уже видел эти строки" от "весь файл прочитан".
-            start_line, end_line = args.get("start_line"), args.get("end_line")
-            if start_line is not None or end_line is not None:
-                item += f":{start_line}-{end_line}"
+            item = str(args.get("path") or args.get("pattern") or args.get("query") or args.get("task") or "?")
+            # read_file — сохраняем ТОЧНОЕ окно (offset/limit), не только
+            # путь. Живой прогон (mail-server, Planner): без диапазона
+            # попытка 2 перечитала ТЕ ЖЕ строки 170-190/60-70/10-20, что и
+            # попытка 1 — дайджест отмечал файл как "explored" целиком,
+            # хотя реально был виден только небольшой кусок, и ретрай не
+            # мог отличить "уже видел эти строки" от "весь файл прочитан".
+            offset, limit = args.get("offset"), args.get("limit")
+            if offset is not None or limit is not None:
+                item += f":offset={offset or 0}/limit={limit}"
             read_items.append(item)
-        elif name in ("write_file", "edit_file", "move_file"):
-            target = args.get("path") or args.get("source") or "?"
+        elif name in ("write_file", "edit_file"):
+            target = args.get("path") or "?"
             changed.append(f"{target} ({'ok' if ok else 'FAILED'})")
-        elif name == "bash_exec":
+        elif name == "bash":
             ran.append(f"`{str(args.get('command', ''))[:120]}` ({'ok' if ok else 'FAILED'})")
-        elif name.startswith("git_diff"):
-            diffed.append(name)
 
     lines = []
     if read_items:
@@ -506,8 +502,6 @@ def _summarize_round(round_msgs: list, verdict: dict) -> str:
         lines.append("- changed: " + ", ".join(changed))
     if ran:
         lines.append("- ran: " + "; ".join(ran))
-    if diffed:
-        lines.append("- diffed: " + ", ".join(dict.fromkeys(diffed)))
     if not lines:
         # Безтуловый раунд (текстовый ответ/вопрос) — единственное, что тут
         # есть для памяти, это сам текст.
@@ -980,8 +974,8 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
             log_event("verdict", **verdict)
         elif _wrote_code(new_tool_msgs) and _execution_evidence_shows_failure(round_msgs):
             # Живой прогон: _has_execution_evidence только проверяло, что
-            # bash_exec ВЫЗВАН, не что он прошёл — self-heal дважды подряд
-            # засчитывал раунд как проверенный, пока bash_exec отвечал
+            # bash ВЫЗВАН, не что он прошёл — self-heal дважды подряд
+            # засчитывал раунд как проверенный, пока bash отвечал
             # "Error (exit 1): ... IndentationError". "kind" здесь читает
             # блок после цикла (см. ниже) — если попытки кончатся именно на
             # этом вердикте, правки хода откатываются автоматически вместо
@@ -990,7 +984,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
                 "relevant": False,
                 "kind": "execution_failure",
                 "reason": (
-                    "the command run to verify the change (bash_exec) failed "
+                    "the command run to verify the change (bash) failed "
                     "with an error — the code doesn't actually work yet, "
                     "writing/editing the file is not enough"
                 ),
@@ -1003,7 +997,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
                 "relevant": False,
                 "reason": (
                     "a file was written/edited but no command was actually "
-                    "executed (no bash_exec call) — writing/editing a file "
+                    "executed (no bash call) — writing/editing a file "
                     "is not verification that it works"
                 ),
             }
@@ -1015,7 +1009,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
                 "relevant": False,
                 "kind": "syntax_only_verification",
                 "reason": (
-                    "the only bash_exec calls this round were bare syntax/"
+                    "the only bash calls this round were bare syntax/"
                     "lint checks (e.g. `php -l`, `py_compile`, `tsc "
                     "--noEmit`) — that confirms the file parses, not that "
                     "the change behaves correctly, and a real test file "
@@ -1051,7 +1045,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
                     "a git_diff/git_diff_staged/git_diff_unstaged result was "
                     "truncated — these tools can't be scoped to a single "
                     "file (only context_lines, which makes output bigger, "
-                    "not smaller); use bash_exec with `git diff -- <path>` "
+                    "not smaller); use bash with `git diff -- <path>` "
                     "per file instead of retrying the same call"
                 ),
             }
@@ -1175,7 +1169,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
         # ему знать, что предыдущий раунд не подошёл, и просим продолжить.
         # Собираем корректирующую подсказку из применимых частей вместо
         # одного жёстко зашитого текста — иначе сценарий "записан код"
-        # получал бы совет про bash_exec даже когда провал был из-за
+        # получал бы совет про bash даже когда провал был из-за
         # непрочитанного диффа, и наоборот. Условия здесь — те же
         # структурные проверки по tool_messages, что и в выборе verdict
         # выше, а не разбор текста задачи.
@@ -1224,12 +1218,12 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
             )
         if _wrote_code(new_tool_msgs) and not _has_execution_evidence(new_tool_msgs) and not failed_writes:
             guidance_parts.append(
-                "A file was written/edited — call bash_exec and actually run "
+                "A file was written/edited — call bash and actually run "
                 "it (or its tests), don't claim it works without running it."
             )
         elif verdict.get("kind") == "execution_failure":
             bash_errors = "\n".join(
-                f"- {_tool_text(m.content)[:500]}" for m in new_tool_msgs if m.name == "bash_exec"
+                f"- {_tool_text(m.content)[:500]}" for m in new_tool_msgs if m.name == "bash"
             )
             guidance_parts.append(
                 "The command you ran to verify the change FAILED — but the "
@@ -1279,7 +1273,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
                 "single file (their only parameter besides the repo is "
                 "context_lines, which makes output BIGGER, not smaller). "
                 "Retrying with a different context_lines won't help. Instead, "
-                "use bash_exec with a plain `git diff -- <path>` (or `git diff "
+                "use bash with a plain `git diff -- <path>` (or `git diff "
                 "--cached -- <path>`) for ONE file at a time, and repeat per "
                 "file if there are several."
             )
@@ -1410,7 +1404,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     # выдать это как обычный уверенный ответ.
     if final_verdict is not None and not final_verdict["relevant"]:
         if final_verdict.get("kind") == "execution_failure" and touched_paths:
-            # Живой прогон: bash_exec провалился дважды подряд (IndentationError
+            # Живой прогон: bash провалился дважды подряд (IndentationError
             # после плохо посчитанных replace_lines-границ), попытки кончились,
             # а сломанный agent.py остался лежать в проекте — пользователю
             # пришлось убивать процесс руками, чтобы модель не жгла третью
@@ -1421,7 +1415,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
             reverted = _revert_turn_paths(touched_paths, turn_start_wall)
             if reverted:
                 final_text = (
-                    "⚠️ Проверка (bash_exec) показала, что изменения не "
+                    "⚠️ Проверка (bash) показала, что изменения не "
                     f"работают ({final_verdict['reason']}) — правки этого "
                     "хода отменены автоматически:\n"
                     + "\n".join(f"- {r}" for r in reverted)
@@ -1429,7 +1423,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
                 )
             else:
                 final_text = (
-                    "⚠️ Проверка (bash_exec) показала, что изменения не "
+                    "⚠️ Проверка (bash) показала, что изменения не "
                     f"работают ({final_verdict['reason']}), а откатить их "
                     "автоматически не получилось — проверь состояние файлов "
                     f"вручную: {', '.join(sorted(touched_paths))}\n\n" + final_text

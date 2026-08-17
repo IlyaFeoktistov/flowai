@@ -25,33 +25,31 @@ from tools.confirm import ask_permission, ask_user_question
 # — тот же словарь _ACTION_LABELS и та же по-командная auto-approve
 # гранулярность для bash, что и в текущем приложении.
 _ACTION_MAP = {
-    "bash_exec": "bash",
     "write_file": "write_file",
     "edit_file": "patch_file",
-    "create_directory": "write_file",
-    "move_file": "write_file",
     "update_memory": "write_file",
 }
 
 
 def _action_and_detail(name: str, args: dict) -> tuple[str, str]:
-    if name in ("bash_exec", "bash_exec_bg"):
-        # Тот же action "bash", что и у синхронного bash_exec — одна и та же
+    if name in ("bash", "bash_bg"):
+        # Тот же action "bash", что и у синхронного bash — одна и та же
         # команда одинаково опасна независимо от того, ждём мы её результат
         # синхронно или запускаем в фоне; auto-approve по первому слову
         # команды должен работать одинаково для обеих форм.
+        #
+        # git больше не имеет отдельных тулов (см. config.py — mcp-server-git/
+        # git_extra_server.py убраны) — все git-операции идут через
+        # bash("git ..."), и tools/confirm.py:_bash_auto_approve_key
+        # запоминает разрешение по ПЕРВОМУ СЛОВУ простой (без цепочек/пайпов)
+        # команды. Для "git status"/"git diff"/... первое слово всегда "git"
+        # — значит "да, всегда" на любую простую git-команду auto-approve'ит
+        # ВСЕ последующие простые git-команды этой сессии, включая
+        # разрушительные ("git reset --hard", "git checkout -- ."), а не
+        # только ту же самую операцию. Это осознанный компромисс размена
+        # отдельных git-тулов на bash — раздельной approve-гранулярности по
+        # git-подкоманде больше нет.
         return "bash", str(args.get("command", ""))
-    if name.startswith("git_"):
-        # У каждой git-операции — свой action (== имя MCP-тула), а НЕ общий
-        # "bash" с git-командой в тексте. Раньше git_checkout/git_commit/
-        # git_add/git_reset/git_create_branch все шли через action="bash" с
-        # авто-approve по первому слову detail'а — а первое слово там всегда
-        # "git", так что "да, всегда" на git_add тихо разрешал бы и
-        # git_checkout, и git_reset — операции с совершенно разным уровнем
-        # риска (checkout меняет рабочее дерево реального репозитория
-        # пользователя, add почти безвреден). Раздельные action-ключи дают
-        # раздельный auto-approve на каждую конкретную операцию.
-        return name, str(args)
     action = _ACTION_MAP.get(name, name)
     return action, str(args)
 
@@ -197,7 +195,7 @@ class _AskUserFinalizeMiddleware(AgentMiddleware):
     to restate its final plan right after ask_user returns and stop — but
     both only take effect once the underlying agent graph run actually
     ends, and nothing stopped the model from calling MORE tools (another
-    ask_user, another read_file_range) inside that SAME still-running
+    ask_user, another read_file) inside that SAME still-running
     graph execution before it ever does.
 
     Mechanical backstop instead of relying on the prompt wording alone:
@@ -239,27 +237,23 @@ class _AskUserFinalizeMiddleware(AgentMiddleware):
         return await handler(request)
 
 
-# Аргумент(ы)-путь у каждого filesystem-ПИШУЩЕГО тула (читающие — search_files,
-# read_file и т.п. — сюда НЕ входят: filesystem-сервер теперь разрешён до "/",
-# см. config.py:build_mcp_connections, и по прямому решению пользователя чтение
-# ВЕЗДЕ идёт без единого approval-вопроса — риск там намного ниже, чем у записи).
-# move_file/copy_lines — по два пути каждый (откуда/куда).
+# Аргумент(ы)-путь у каждого ПИШУЩЕГО тула file_ops_server.py (читающие —
+# read_file/grep_search/glob_search — сюда НЕ входят: чтение теперь разрешено
+# ВЕЗДЕ без единого approval-вопроса, по прямому решению пользователя —
+# риск там намного ниже, чем у записи, см. config.py:build_mcp_connections).
 _WRITE_PATH_ARG_NAMES = {
-    "write_file": ["path"], "edit_file": ["path"], "create_directory": ["path"],
-    "move_file": ["source", "destination"],
-    "replace_lines": ["path"], "insert_lines": ["path"],
-    "copy_lines": ["source_path", "dest_path"],
-    "delete_path": ["path"],
+    "write_file": ["path"], "edit_file": ["path"], "delete_path": ["path"],
 }
 
 
 class _OutOfProjectWriteApprovalMiddleware(AgentMiddleware):
-    """filesystem MCP-сервер (config.py:build_mcp_connections) теперь
-    разрешён до "/" — весь диск для ЧТЕНИЯ, по прямому решению пользователя
-    ("пускай везде лазит... доступ до корня /"). Но запись вне repo_path —
+    """read_file/grep_search/glob_search (file_ops_server.py) не проверяют
+    путь против repo_path вообще — весь диск для ЧТЕНИЯ, по прямому решению
+    пользователя ("пускай везде лазит... доступ до корня /"). Но запись вне
+    repo_path —
     отдельный, гораздо более рискованный случай (реально меняет файлы за
     пределами проекта, который пайплайн вообще не собирался трогать) — она
-    остаётся под approval, тем же механизмом, что уже есть у bash_exec/
+    остаётся под approval, тем же механизмом, что уже есть у bash/
     write_file внутри проекта (tools/confirm.py:ask_permission), просто
     условие срабатывания — путь ВНЕ repo_path, а не имя тула статично.
 

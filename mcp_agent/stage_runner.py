@@ -177,7 +177,7 @@ async def run_stage(
                 f"You ran out of your {recursion_limit}-step budget before finishing. "
                 "The 'explored' line above lists the EXACT files AND line ranges "
                 "you already saw (e.g. 'file.php:170-190') — not just file names. "
-                "Do NOT call read_file_range/search_code again on a range you "
+                "Do NOT call read_file/grep_search again on a range you "
                 "already have; if you need to re-check something, use exactly what "
                 "you already learned about it from the digest instead of "
                 "re-fetching it. Spend this attempt on genuinely NEW files/ranges, "

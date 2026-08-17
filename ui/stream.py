@@ -116,33 +116,32 @@ _STAGE_LABELS = {
 # та же ситуация, что и mcp_agent/stage_runner.py:_stage_digest (см. его
 # комментарий): импортировать оттуда сюда means ui.stream -> mcp_agent.self_heal
 # -> ui.console, лишний риск порядка импорта ради одной короткой константы.
-_FILE_EDIT_TOOL_NAMES = ("write_file", "edit_file", "replace_lines", "move_file", "copy_lines")
+_FILE_EDIT_TOOL_NAMES = ("write_file", "edit_file")
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 def _format_file_edit_result(name: str, args: dict, result: str) -> tuple[str, list[str]] | None:
     """Compact "Update(path) · +N -M" summary + line-numbered diff body for
-    file-edit tool results — replace_lines/fs_extra_server.py's own diff
-    (see _unified_diff_at there) and the official filesystem MCP server's
-    edit_file both return a standard unified diff with real file line
-    numbers in the "@@ -a,b +c,d @@" header, which is exactly what this
-    parses. Returns None if `result` isn't diff-shaped (no "@@" hunk header
-    at all — e.g. write_file's plain "Successfully wrote to ..." with
-    nothing to diff, or a tool error) so the caller falls back to the
-    generic tool_end rendering instead of showing an empty/wrong body.
+    file-edit tool results — write_file/edit_file (file_ops_server.py, via
+    utils/parsing.py:unified_diff_at) return a standard unified diff with
+    real file line numbers in the "@@ -a,b +c,d @@" header, which is exactly
+    what this parses. Returns None if `result` isn't diff-shaped (no "@@"
+    hunk header at all — e.g. write_file creating a brand-new file, with
+    nothing to diff against, or a tool error) so the caller falls back to
+    the generic tool_end rendering instead of showing an empty/wrong body.
 
     Live bug motivation (user report): the generic rendering showed the raw
     diff text with only +/- text-color coding and no indication of which
     real file lines changed — reading it required counting from the "@@"
-    header by hand. This mirrors Claude Code's own compact tool-result view
-    (header + "Added/removed N lines" + numbered body) instead."""
+    header by hand. This renders a compact header ("Update(path) · +N -M")
+    plus a numbered body instead."""
     lines = result.splitlines()
     if not any(_HUNK_HEADER_RE.match(ln) for ln in lines):
         return None
 
-    path = args.get("path") or args.get("destination") or args.get("target") or "?"
-    verb = {"write_file": "Write", "move_file": "Move", "copy_lines": "Copy"}.get(name, "Update")
+    path = args.get("path") or "?"
+    verb = "Write" if name == "write_file" else "Update"
     added = sum(1 for ln in lines if ln.startswith("+") and not ln.startswith("+++"))
     removed = sum(1 for ln in lines if ln.startswith("-") and not ln.startswith("---"))
     parts = []
@@ -175,9 +174,9 @@ def _format_file_edit_result(name: str, args: dict, result: str) -> tuple[str, l
 
 
 def _diff_line_style(line: str) -> str | None:
-    """Style for one line of a unified diff (replace_lines/git_diff* already
+    """Style for one line of a unified diff (write_file/edit_file already
     return this format, with real file line numbers in the "@@" header —
-    see fs_extra_server.py:_unified_diff_at). Same red/green/cyan convention
+    see utils/parsing.py:unified_diff_at). Same red/green/cyan convention
     as `git diff`, so an edit reads the same way here as it would in a
     terminal git diff. None means "not a diff line, use the plain style"."""
     if line.startswith(("+++ ", "--- ")):
@@ -527,7 +526,7 @@ class StreamDisplay:
         # ── TOOL ARG CHUNK (real streaming, not shown — just counted) ─────
         # Live bug (user report): the live "~N tok" counter only ticked on
         # answer_chunk (the model's own text) — a tool call's own arguments
-        # (write_file's whole new file content, replace_lines' new_content,
+        # (write_file's whole new file content, edit_file's new_string,
         # ...) are real generation too, sometimes the bulk of a slow round,
         # but arrive as tool_call_chunks with .content usually empty (see
         # mcp_agent/agent.py:_stream_round's "messages" mode loop), so the
@@ -607,7 +606,7 @@ class StreamDisplay:
                 if len(lines) > 1:
                     # Live bug (user report): this branch is reached exactly
                     # when `diffish` above was None, i.e. the result is NOT
-                    # diff-shaped (no "@@" hunk header) — a plain bash_exec
+                    # diff-shaped (no "@@" hunk header) — a plain bash
                     # output like `ls -la` still has lines starting with "-"
                     # (a regular file's "-rw-r--r--" permission string), and
                     # _diff_line_style would color those red as if removed,

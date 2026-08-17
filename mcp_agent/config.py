@@ -2,10 +2,8 @@
 Конфигурация MCP-серверов и permission-маппинга для нового агента.
 
 Источники серверов:
-  filesystem  — @modelcontextprotocol/server-filesystem (официальный, npm)
-  git         — mcp-server-git (официальный, PyPI)
   fetch       — mcp-server-fetch (официальный, PyPI) — замена tools/read_page.py
-  bash_exec   — свой (готового с нужной permission-гранулярностью нет)
+  bash   — свой (готового с нужной permission-гранулярностью нет)
   web_search  — свой (готового под self-hosted SearXNG нет)
   memory      — свой (готовый community "Memory"-сервер — другая модель
                 данных, knowledge graph, не совместимая с нашим форматом)
@@ -14,18 +12,15 @@
   rag         — свой (семантический поиск по коду/докам, истории диалогов
                 и сохранённым внешним страницам — эмбеддинги + свой
                 stdlib-векторный индекс, готового под этот формат нет)
-  git_extra   — свой (git-операции, которых нет в mcp-server-git: тот
-                умеет откатывать только ВЕТКИ (git_checkout), а не отдельный
-                файл — см. git_extra_server.py про живой инцидент, который
-                это выявил)
-  fs_extra    — свой (filesystem-server не умеет удалять вообще ничего —
-                delete_path закрывает это "мягким" удалением через корзину,
-                а не permanent rm)
+  file_ops    — свой (read_file/write_file/edit_file/grep_search/glob_search
+                + delete_path/restore_deleted_path/list_deleted_paths —
+                заменяет filesystem/code_search/fs_extra серверы разом, см.
+                file_ops_server.py)
   lsp         — свой (семантическая навигация по коду через настоящий
                 Language Server Protocol — goToDefinition/findReferences/
-                hover/documentSymbol/etc. — вместо grep-угадайки
-                search_symbols; см. lsp_server.py про то, какие языковые
-                сервера установлены и почему)
+                hover/documentSymbol/etc. — вместо grep-угадайки; см.
+                lsp_server.py про то, какие языковые сервера установлены и
+                почему)
   vision      — свой (analyze_image через отдельную vision-модель Ollama,
                 settings.vision_model — chat_model эту роль не выполняет)
   music       — свой (generate_music через MusicGen/HF transformers,
@@ -39,13 +34,25 @@
                 vendor/animato) — их несовместимые torch/CUDA-сборки не
                 дают поставить это всё в один venv, см. setup.py)
 
+Никакого отдельного git-сервера (mcp-server-git/git_extra_server.py —
+УБРАНЫ, 2026-08-14, прямое решение пользователя: "зачем git-тулы, есть же
+bash") — git-операции (status/diff/log/show/commit/checkout/restore/...)
+идут через bash("git ..."). Analyzer/Planner's bash — read-only allowlist (см.
+agent_builder.py:_is_read_only_bash_command) уже пускает git status/log/
+diff/show/branch/... и блокирует мутирующие подкоманды; Verifier's bash —
+денилист (_looks_like_file_mutation) уже блокирует git apply/checkout/
+reset/restore/add/commit/stash. Восстановление файла до состояния git
+теперь либо через bash (для ролей, у которых оно есть), либо через
+restore_file_snapshot (flowAI's собственный пре-write снапшот, не
+завязанный на git вообще) — Coder (без bash) теряет прямой доступ именно к
+git-истории для отката, но сохраняет откат к снапшотам этой же сессии.
+
 Permission-политика (сознательное упрощение относительно текущего
 tools/confirm.py, где даже read_file/list_dir спрашивали подтверждение):
 только ПИШУЩИЕ/ИСПОЛНЯЮЩИЕ операции требуют approval. Чтение (read_file,
-list_directory, git_status, git_diff, git_log, web_search, fetch) идёт без
-диалога — так ведёт себя большинство современных coding-агентов, и это
-единственная причина реального риска (запись/удаление/выполнение
-команд/git-мутации), а не сам факт чтения.
+grep_search, glob_search, web_search, fetch) идёт без диалога — так ведёт
+себя большинство современных coding-агентов, и это единственная причина
+реального риска (запись/удаление/выполнение команд), а не сам факт чтения.
 """
 import os
 import shlex
@@ -82,29 +89,26 @@ def _via_shell(command: str, args: list[str], log_name: str) -> tuple[str, list[
     full_cmd = " ".join(shlex.quote(p) for p in [command, *args])
     return "bash", ["-c", f"exec {full_cmd} 2>{shlex.quote(log_path)}"]
 
-# Тулы, требующие подтверждения пользователя перед выполнением.
+# Тулы, требующие подтверждения пользователя перед выполнением. file_ops
+# (write_file/edit_file/delete_path/restore_deleted_path) — ровно те 4 имени,
+# чей TOOL_PERMISSIONS в file_ops_server.py помечен "workspace_write" (см.
+# его модульный докстринг про required_permission) — держим списком
+# напрямую здесь, не импортируя тот словарь: этот список решает "нужен ли
+# approval-диалог" (HumanInTheLoopMiddleware), TOOL_PERMISSIONS решает
+# "какая роль вообще получает этот тул" (roles.py) — разные вопросы, разные
+# файлы, совпадение состава тут не повод их связывать импортом.
 TOOLS_REQUIRING_APPROVAL = [
-    # filesystem — пишущие
-    "write_file", "edit_file", "create_directory", "move_file",
-    # git — мутирующие состояние репозитория
-    "git_commit", "git_add", "git_reset", "git_create_branch", "git_checkout",
+    "write_file", "edit_file", "delete_path", "restore_deleted_path",
     # свои — update_knowledge НЕ здесь: это текстовый факт о ПРОЕКТЕ,
     # который легко переписать, не деструктивная операция как остальные в
     # этом списке — approval на него был лишним барьером, из-за которого
     # модель (и без того ненадёжно вспоминающая об этом тулe вообще, см.
     # mcp_agent/knowledge.py) звала его за всю историю проекта 2 раза.
-    "bash_exec", "bash_exec_bg", "update_memory", "generate_image", "edit_image", "generate_music", "remember_url",
+    # git-мутации теперь идут только через bash("git commit"/"git checkout"/
+    # ...) — approval на bash уже покрывает их, отдельного тула нет.
+    "bash", "bash_bg", "update_memory", "generate_image", "edit_image", "generate_music", "remember_url",
     "generate_3d_model", "animate_3d_model", "generate_texture_for_model",
-    "git_restore_file", "restore_file_snapshot",
-    "delete_path", "restore_deleted_path", "replace_lines", "copy_lines",
-    # insert_lines was missing here — same write risk as replace_lines/
-    # copy_lines, but was slipping through with zero approval prompt while
-    # its siblings all asked. Live bug: a Coder round inserted 26 lines
-    # (including a duplicated import block, see the content-duplication
-    # guard in fs_extra_server.py) into the user's repo with no confirmation
-    # at all, then asked for approval on the very next replace_lines call —
-    # same file, same round, inconsistent gate.
-    "insert_lines",
+    "restore_file_snapshot",
 ]
 
 
@@ -116,14 +120,13 @@ def build_mcp_connections(repo_path: str | None = None) -> dict:
     py = sys.executable
     venv_bin = os.path.dirname(py)
 
-    # mcp-server-git/mcp-server-fetch — консольные скрипты, установленные pip
-    # в .venv/bin/ рядом с самим интерпретатором. Голое имя команды работает
-    # только если .venv/bin есть в PATH (например, после `source
-    # .venv/bin/activate`) — а лончер flowai запускает venv-python по
-    # абсолютному пути БЕЗ активации venv и без правки PATH, так что бинарник
-    # не находится (ENOENT). Резолвим абсолютный путь тем же способом, что
-    # уже используется для sys.executable ниже.
-    mcp_server_git = os.path.join(venv_bin, "mcp-server-git")
+    # mcp-server-fetch — консольный скрипт, установленный pip в .venv/bin/
+    # рядом с самим интерпретатором. Голое имя команды работает только если
+    # .venv/bin есть в PATH (например, после `source .venv/bin/activate`) —
+    # а лончер flowai запускает venv-python по абсолютному пути БЕЗ
+    # активации venv и без правки PATH, так что бинарник не находится
+    # (ENOENT). Резолвим абсолютный путь тем же способом, что уже
+    # используется для sys.executable ниже.
     mcp_server_fetch = os.path.join(venv_bin, "mcp-server-fetch")
 
     # `python -m mcp_agent.servers.X` резолвит пакет через sys.path, в который
@@ -139,35 +142,37 @@ def build_mcp_connections(repo_path: str | None = None) -> dict:
         return os.path.join(servers_dir, f"{name}_server.py")
 
     raw_servers = {
-        # Живой инцидент: пользователь попросил модель выйти за пределы
-        # repo_path в соседний проект — filesystem-сервер отказал жёстко
-        # ("Access denied"), ни единого шанса спросить разрешения, а модель
+        # Живой инцидент (изначально про внешний filesystem-сервер, теперь
+        # применимо к file_ops_server.py's read_file): пользователь попросил
+        # модель выйти за пределы repo_path в соседний проект и получил
+        # жёсткий отказ ни с единым шансом спросить разрешения — модель
         # вместо честного "не могу выйти за пределы проекта" 30 минут
-        # бесцельно копалась в НЕПРАВИЛЬНОМ (текущем) репозитории.
-        # Прямое решение пользователя: ЧТЕНИЕ разрешено везде, до корня "/",
-        # без единого approval-вопроса (риск читать — намного ниже риска
-        # писать); ЗАПИСЬ вне repo_path остаётся под approval — см.
+        # бесцельно копалась в НЕПРАВИЛЬНОМ (текущем) репозитории. Прямое
+        # решение пользователя: ЧТЕНИЕ разрешено везде без единого
+        # approval-вопроса (риск читать — намного ниже риска писать) —
+        # read_file/grep_search/glob_search не проверяют путь против
+        # repo_path вообще; ЗАПИСЬ вне repo_path остаётся под approval — см.
         # mcp_agent/ask_user_tool.py:_OutOfProjectWriteApprovalMiddleware,
-        # она перехватывает каждый пишущий вызов ДО того, как он дойдёт до
-        # этого сервера, и спрашивает через ask_permission, если целевой
-        # путь вне repo_path. "/" здесь покрывает и repo_path — второй
-        # аргумент избыточен, но оставлен явно как документация того, что
-        # исходная (узкая) граница раньше была именно им.
-        "filesystem": ("npx", ["-y", "@modelcontextprotocol/server-filesystem", repo_path, "/"]),
-        "git": (mcp_server_git, ["-r", repo_path]),
+        # перехватывает write_file/edit_file/delete_path/restore_deleted_path
+        # ДО того, как они дойдут до file_ops_server.py, и спрашивает через
+        # ask_permission, если целевой путь вне repo_path.
         "fetch": (mcp_server_fetch, []),
-        "bash_exec": (py, [_own_server("bash_exec")]),
+        "bash": (py, [_own_server("bash")]),
         "web_search": (py, [_own_server("web_search")]),
         "memory": (py, [_own_server("memory")]),
         "knowledge": (py, [_own_server("knowledge")]),
         "rag": (py, [_own_server("rag")]),
-        "code_search": (py, [_own_server("code_search")]),
+        # Replaces the external "filesystem" npm server (@modelcontextprotocol/
+        # server-filesystem) + the old "code_search"/"fs_extra" servers all at
+        # once — read_file/write_file/edit_file/grep_search/glob_search +
+        # delete_path/restore_deleted_path/list_deleted_paths (flowAI's own
+        # trash safety net, carried over unchanged). See file_ops_server.py's
+        # own module docstring.
+        "file_ops": (py, [_own_server("file_ops")]),
         "image_gen": (py, [_own_server("image_gen")]),
         "vision": (py, [_own_server("vision")]),
         "music": (py, [_own_server("music")]),
         "gen_model": (py, [_own_server("gen_model")]),
-        "git_extra": (py, [_own_server("git_extra")]),
-        "fs_extra": (py, [_own_server("fs_extra")]),
         "lsp": (py, [_own_server("lsp")]),
     }
 

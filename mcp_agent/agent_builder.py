@@ -260,18 +260,10 @@ def _build_chat_model(
     return _ChatOllamaWithNumKeep(**kwargs)
 from mcp_agent.snapshots import _snapshot_before_write, list_file_snapshots, restore_file_snapshot
 from mcp_agent.tool_wrappers import (
-    _add_glob_warning,
     _add_regex_warning,
     _add_verify_reminder,
-    _autofill_expected_lines,
-    _bind_constant_args,
-    _cache_line_content_tool,
     _cap_tool_output,
     _dedupe_read_tool,
-    _guard_unreadable_file,
-    _normalize_edit_file_args,
-    _require_expected_lines,
-    _split_head_tail_tool,
     _wrap_read_invalidation,
 )
 
@@ -293,26 +285,16 @@ _agent_cache_key: tuple | None = None  # (chat_model, voice_mode)
 _agent_cache_lock = asyncio.Lock()
 
 
-async def _load_tools_resilient(
-    client: MultiServerMCPClient, server_names: list[str], repo_path: str
-) -> list:
+async def _load_tools_resilient(client: MultiServerMCPClient, server_names: list[str]) -> list:
     """client.get_tools() без server_name гребёт ВСЕ сервера через один
     asyncio.gather() без return_exceptions — если хотя бы один не
-    поднимается (например mcp-server-git запущен не в git-репозитории,
-    или npx недоступен), падает вся пачка и агент остаётся без единого
-    тула. Грузим по серверам отдельно: один сбойный сервер лишает нас
-    только своих тулов, а не всех 35."""
+    поднимается (например npx недоступен), падает вся пачка и агент
+    остаётся без единого тула. Грузим по серверам отдельно: один сбойный
+    сервер лишает нас только своих тулов, а не всех остальных."""
     tools = []
     for name in server_names:
         try:
-            server_tools = await client.get_tools(server_name=name)
-            if name == "git":
-                # repo_path у git-тулов константен для всей сессии — модели
-                # его вообще не показываем, см. _bind_constant_args.
-                server_tools = [
-                    _bind_constant_args(t, {"repo_path": repo_path}) for t in server_tools
-                ]
-            tools.extend(server_tools)
+            tools.extend(await client.get_tools(server_name=name))
         except Exception as e:
             console.print(f"[yellow]⚠ MCP-сервер '{name}' не запустился — его инструменты недоступны: {e}[/]")
     return tools
@@ -322,85 +304,22 @@ async def _build_tools(repo_path: str | None = None):
     resolved_repo_path = repo_path or os.getcwd()
     connections = build_mcp_connections(resolved_repo_path)
     client = MultiServerMCPClient(connections)
-    tools = await _load_tools_resilient(client, list(connections.keys()), resolved_repo_path)
-    # search_files (filesystem MCP-сервер) временно убран: excludePatterns у
-    # него по умолчанию пустой (index.js:124 в самом пакете), так что без
-    # явной передачи он рекурсивно обходит ВСЁ дерево repo_path без единого
-    # исключения — на живом прогоне это означало обход vendor/+venv-tts
-    # (42 ГБ, 322k файлов в этом самом репозитории). find_files_by_name
-    # (code_search_server.py) закрывает тот же случай — умеет настоящий glob
-    # и уже пропускает vendor/node_modules/.venv/venv/.git и т.п.
-    tools = [t for t in tools if t.name != "search_files"]
+    tools = await _load_tools_resilient(client, list(connections.keys()))
     tools = [_cap_tool_output(t, TOOL_OUTPUT_CHAR_CAP) for t in tools]
-    tools = [_normalize_edit_file_args(t) if t.name == "edit_file" else t for t in tools]
-    # read_history — общий для read_file/read_text_file (ключ — путь) И для
-    # _require_expected_lines ниже (ключ — кортеж ("__line_edit_failures__",
-    # tool_name), namespace не пересекается с путями), очищается в начале
+    # read_history — {path: [key, ...]} для read_file, очищается в начале
     # каждого stream_chat (см. там же) и на каждом self-heal retry.
     read_history: dict = {}
-    # line_content_cache — реальные строки с диска по каждому успешному
-    # read_file/read_text_file/read_file_range/read_multiple_files (см.
-    # tool_wrappers.py:_cache_line_content_tool), тот же жизненный цикл,
-    # что у read_history (очистка/инвалидация — см. ниже). Даёт
-    # _autofill_expected_lines материал, чтобы не полагаться на то, что
-    # модель верно перепечатает expected_first_line/expected_last_line/
-    # expected_line сама.
-    line_content_cache: dict = {}
-    tools = [
-        _cache_line_content_tool(t, line_content_cache)
-        if t.name in ("read_file", "read_text_file", "read_file_range", "read_multiple_files") else t
-        for t in tools
-    ]
-    tools = [
-        _dedupe_read_tool(t, read_history) if t.name in ("read_file", "read_text_file", "read_file_range") else t
-        for t in tools
-    ]
+    tools = [_dedupe_read_tool(t, read_history) if t.name == "read_file" else t for t in tools]
     tools = [_wrap_read_invalidation(t, read_history) for t in tools]
-    tools = [_wrap_read_invalidation(t, line_content_cache) for t in tools]
-    # Outermost of the read wrappers (added last) — see its own docstring
-    # for why: the inner layers above (cache/dedupe/invalidation) each see
-    # two ordinary single-param calls instead of one with both set.
-    tools = [_split_head_tail_tool(t) if t.name in ("read_file", "read_text_file") else t for t in tools]
-    # Even more outermost than that — rejects a binary/oversized file BEFORE
-    # any of the read wrappers above (cache/dedupe/head-tail-split) ever see
-    # its content, so a garbage/huge read never gets cached or split in the
-    # first place. read_multiple_files takes `paths` (a list), the other
-    # three take a single `path`.
-    tools = [
-        _guard_unreadable_file(t, is_multi_path=t.name == "read_multiple_files")
-        if t.name in ("read_file", "read_text_file", "read_file_range", "read_multiple_files") else t
-        for t in tools
-    ]
-    tools = [_add_verify_reminder(t) if t.name in ("write_file", "edit_file", "replace_lines", "copy_lines", "insert_lines") else t for t in tools]
-    # _require_expected_lines TEMPORARILY DISABLED (20260812): now that
-    # replace_lines/insert_lines/copy_lines check expected_*_hash against
-    # the real line content (fs_extra_server.py) instead of full line text,
-    # live runs show the model landing on the right lines far more often —
-    # but it also frequently just omits expected_*_hash on calls where
-    # _autofill_expected_lines below has no cache hit (range not read this
-    # turn), and the hard "required" rejection this wrapper used to add on
-    # top burned a turn on an edit that would otherwise have gone through
-    # fine unverified. fs_extra_server.py's own hash check still runs
-    # whenever a value IS passed (by the model or by autofill below) — this
-    # only removes the wrapper that made passing one mandatory. Re-enable
-    # by uncommenting the line below if blind/stale edits become a problem
-    # again without it.
-    # tools = [_require_expected_lines(t, read_history) if t.name in ("replace_lines", "copy_lines", "insert_lines") else t for t in tools]
-    tools = [
-        _autofill_expected_lines(t, line_content_cache) if t.name in ("replace_lines", "copy_lines", "insert_lines") else t
-        for t in tools
-    ]
-    tools = [_add_glob_warning(t) if t.name == "search_files" else t for t in tools]
-    tools = [_add_regex_warning(t) if t.name == "search_code" else t for t in tools]
+    tools = [_add_verify_reminder(t) if t.name in ("write_file", "edit_file") else t for t in tools]
+    tools = [_add_regex_warning(t) if t.name == "grep_search" else t for t in tools]
     # Снимок содержимого файла ДО мутации — outermost-обёртка, чтобы
-    # захватить состояние прямо перед реальным изменением, а не до
-    # нормализации/дедупа/verify-хинта выше по цепочке (см.
+    # захватить состояние прямо перед реальным изменением (см.
     # _snapshot_before_write). Даёт restore_file_snapshot точки возврата,
     # которых нет в git-истории (несколько незакоммиченных правок подряд).
-    # copy_lines мутирует dest_path, а не path — другой path_key.
     tools = [
-        _snapshot_before_write(t, resolved_repo_path, path_key="dest_path" if t.name == "copy_lines" else "path")
-        if t.name in ("write_file", "edit_file", "git_restore_file", "replace_lines", "copy_lines", "insert_lines") else t
+        _snapshot_before_write(t, resolved_repo_path, path_key="path")
+        if t.name in ("write_file", "edit_file") else t
         for t in tools
     ]
     # ask_user — не MCP-тул: ему нужен прямой доступ к TUI (tools/confirm.py:
@@ -412,9 +331,7 @@ async def _build_tools(repo_path: str | None = None):
     tools.append(ask_user)
     tools.append(mark_plan_step_current)
     tools.append(list_file_snapshots)
-    restore_file_snapshot_wrapped = _wrap_read_invalidation(restore_file_snapshot, read_history)
-    restore_file_snapshot_wrapped = _wrap_read_invalidation(restore_file_snapshot_wrapped, line_content_cache)
-    tools.append(restore_file_snapshot_wrapped)
+    tools.append(_wrap_read_invalidation(restore_file_snapshot, read_history))
     # Для _execute_leaked_tool_call (см. выше) — те же самые объекты тулов,
     # что видит create_agent ниже (уже с _cap_tool_output/_bind_constant_args
     # обёртками), просто доступные по имени напрямую, в обход графа.
@@ -428,9 +345,10 @@ async def _build_tools(repo_path: str | None = None):
 
 
 async def _get_tools(repo_path: str | None = None):
-    """_build_tools() spawns 8 MCP server subprocesses (npx filesystem,
-    mcp-server-git, mcp-server-fetch, our own python servers) and loads 35+
-    tool schemas — независимо от того, какая chat_model выбрана. Кешируется
+    """_build_tools() spawns several MCP server subprocesses (mcp-server-git,
+    mcp-server-fetch, our own python servers including file_ops_server.py)
+    and loads their tool schemas — независимо от того, какая chat_model
+    выбрана. Кешируется
     ОТДЕЛЬНО от модели (см. _get_agent) — переключение chat_model (voice_mode
     ON/OFF) не должно заново поднимать все MCP-подпроцессы, это дорогая и
     никак не связанная с выбором модели часть.
@@ -440,7 +358,7 @@ async def _get_tools(repo_path: str | None = None):
     на котором собрались тулы, оставался в силе НАВСЕГДА для всего
     процесса, даже когда следующий вызов приходил с другим repo_path (у
     пайплайна repo_path = os.getcwd() пересчитывается на каждый ход, см.
-    pipeline.py) — bash_exec/filesystem/git-серверы у ВСЕХ последующих
+    pipeline.py) — file_ops/git-серверы у ВСЕХ последующих
     ролей молча продолжали бы работать в первом попавшемся проекте. В
     живом тесте (mail-server) не проявилось напрямую (repo_path был один
     и тот же весь прогон), но найдено при разборе того же прогона —
@@ -519,37 +437,105 @@ class _UnloadImageGenBeforeGenModelMiddleware(AgentMiddleware):
         return await handler(request)
 
 
-# In-place file mutation idioms bash_exec could use to "fix" something
-# itself instead of just checking it — sed/perl/awk in-place edit flags,
-# any redirection into a real path (writes/overwrites — /dev/null is the
-# one legitimate exception, e.g. `cmd >/dev/null` to silence output), tee,
-# and the classic file-mutating coreutils/git commands. Not trying to be a
-# watertight sandbox (a determined model could still find a way around
-# this with e.g. a python -c one-liner) — this is a backstop for the
-# COMMON, easy way a shell command edits a file, matching the actual live
-# incident below, not exhaustive security.
-_FILE_MUTATION_PATTERNS = [
+# In-place file mutation idioms bash could use to "fix" something itself
+# instead of just checking it — sed/perl/awk in-place edit flags, tee, and
+# the classic file-mutating coreutils/git commands. Dangerous regardless of
+# WHERE they act (git mutations touch repo state; mv/cp/rm/chmod/chown/
+# truncate/dd are destructive enough, and rare enough for a genuine "just
+# check" task, that path-awareness isn't worth the complexity) — unlike a
+# plain `>`/`>>` redirect (handled separately below), these are never
+# treated as safe just because the target happens to be outside the
+# project. Not trying to be a watertight sandbox (a determined model could
+# still find a way around this with e.g. a python -c one-liner) — a
+# backstop for the COMMON, easy way a shell command edits a file.
+_UNCONDITIONAL_MUTATION_PATTERNS = [
     re.compile(r"\bsed\b[^|;&\n]*\s-i\b"),
     re.compile(r"\bperl\b[^|;&\n]*\s-i\b"),
     re.compile(r"\bgawk\b[^|;&\n]*-i\s*inplace\b"),
-    re.compile(r">>?\s*(?!/dev/null\b)\S"),
     re.compile(r"\btee\b"),
     re.compile(r"\b(mv|cp|rm|chmod|chown|truncate|dd)\b"),
     re.compile(r"\bgit\s+(apply|checkout|reset|restore|add|commit|stash)\b"),
     re.compile(r"\bpatch\b"),
 ]
 
+# Live bug #1 (2026-08-14, after git tools were removed in favor of bash for
+# every git/build/test operation): this pattern's ONLY exception used to be
+# `/dev/null` — it didn't know about `N>&M` (duplicating one file
+# descriptor onto another, e.g. `2>&1` to merge stderr into stdout), one of
+# the single most common shell idioms for capturing a build/test command's
+# FULL output. Verifier tried to compile a C project, hit a real "ncurses.h
+# not found" error, and every single retry (`gcc ... 2>&1`, `make 2>&1`,
+# even a plain `ls -la platformer 2>&1`) got denied as "looks like it would
+# modify a file in place" — `2>&1` was never touching a file at all, only
+# redirecting one already-open stream to another. Excluding `>&<digit>` (in
+# addition to `/dev/null`) fixes this without opening a bypass — `.search()`
+# still scans the WHOLE command, so `cmd 2>&1 > realfile.txt` is still
+# caught by its second, real redirect.
+_REDIRECT_PATTERN = re.compile(r">>?\s*(?!/dev/null\b)(?!&\d)\S")
+_REDIRECT_TARGET_RE = re.compile(r">>?\s*(?!/dev/null\b)(?!&\d)(\S+)")
 
-def _looks_like_file_mutation(command: str) -> bool:
-    return any(p.search(command) for p in _FILE_MUTATION_PATTERNS)
+# Live bug #2 (2026-08-15, same run continued): blocking EVERY redirect
+# outright, regardless of target, stopped Verifier from writing a
+# throwaway syntax-check file to /tmp when the real build was blocked by a
+# missing system dependency (ncurses headers) it had no way to install
+# (sudo needs an interactive password) — a genuinely reasonable way to
+# verify what CAN be checked, not an attempt to fix the project. A redirect
+# INTO the project (fixing the file being verified) and a redirect to
+# scratch space elsewhere are not the same risk — only the former is a
+# self-fix. See _looks_like_file_mutation for how the target is checked
+# against repo_path.
+_HEREDOC_START_RE = re.compile(r"<<-?\s*['\"]?\w")
 
 
-# Allowlist for Analyzer/Planner's bash_exec (roles.py:investigator_tools/
-# planner_tools — both keep bash_exec unconditionally, for legitimate
-# diagnostics per their own system prompt: "bash_exec for READ-ONLY
+def _shell_command_prefix(command: str) -> str:
+    """The part of `command` before a heredoc body starts (`<<TAG`/
+    `<<'TAG'`/`<<-TAG`) — real redirect/mutation syntax only appears here;
+    everything after is heredoc CONTENT (e.g. the C source Verifier is
+    writing to a scratch file), which can freely contain '>' as a
+    comparison operator (`x > 5`) or a word like 'rm'/'tee' inside a
+    comment/string without any of that being a real shell mutation. Live
+    bug: a heredoc body full of C comparisons (`player.vy > 10`, `x + w >
+    p->x`, ...) made the redirect-target extraction below think the
+    command wrote GameLevel-shaped garbage paths INSIDE the project,
+    rejecting a command whose one REAL redirect (`cat > /tmp/test.c
+    <<'EOF'`) was already safely outside it."""
+    m = _HEREDOC_START_RE.search(command)
+    return command[:m.start()] if m else command
+
+
+def _redirect_targets(command: str) -> list[str]:
+    return [m.group(1) for m in _REDIRECT_TARGET_RE.finditer(command)]
+
+
+def _looks_like_file_mutation(command: str, repo_path: str | None = None) -> bool:
+    """repo_path=None (Analyzer/Planner never call this — they use the
+    stricter read-only allowlist instead) falls back to the old
+    unconditional behavior: ANY redirect is treated as mutation, fail-safe.
+    When repo_path IS given (Verifier — the only caller that has one),
+    a `>`/`>>` redirect whose target(s) ALL resolve outside repo_path is
+    scratch space, not a self-fix, and is allowed through."""
+    prefix = _shell_command_prefix(command)
+    if any(p.search(prefix) for p in _UNCONDITIONAL_MUTATION_PATTERNS):
+        return True
+    if not _REDIRECT_PATTERN.search(prefix):
+        return False
+    if repo_path is None:
+        return True
+    root = os.path.realpath(repo_path)
+    for target in _redirect_targets(prefix):
+        candidate = target if os.path.isabs(target) else os.path.join(root, target)
+        resolved = os.path.realpath(candidate)
+        if resolved == root or resolved.startswith(root + os.sep):
+            return True  # at least one target lands inside the project
+    return False  # every redirect target is outside the project
+
+
+# Allowlist for Analyzer/Planner's bash (roles.py:investigator_tools/
+# planner_tools — both keep bash unconditionally, for legitimate
+# diagnostics per their own system prompt: "bash for READ-ONLY
 # diagnostic commands"). _looks_like_file_mutation above is a DENYLIST,
 # right for Verifier (which legitimately needs to run arbitrary builds/
-# tests via bash_exec, just not self-fix) — but Analyzer/Planner have no
+# tests via bash, just not self-fix) — but Analyzer/Planner have no
 # legitimate reason to run anything beyond inspection, so a default-DENY
 # allowlist fits their narrower job instead: reject shell metacharacters
 # outright (chaining/piping/substitution/redirection could launder a
@@ -590,7 +576,7 @@ def _is_read_only_bash_command(command: str) -> bool:
     """Conservative allowlist heuristic — mirrors the real live incident
     this backstops (2026-08-14, glm-4.7-flash, "сделай платформер" on an
     empty repo): Analyzer correctly investigated (get_knowledge,
-    project_tree, ls -la), saw the repo was empty, and then used bash_exec
+    project_tree, ls -la), saw the repo was empty, and then used bash
     to `cat > platformer.c << EOF`, `cat > Makefile`, `make`, and
     `apt-get install libncurses5-dev` directly — none of that is a
     diagnostic, but nothing before this stopped it. Not a watertight
@@ -625,24 +611,24 @@ def _is_read_only_bash_command(command: str) -> bool:
 
 
 class _InvestigationReadOnlyBashMiddleware(AgentMiddleware):
-    """Analyzer/Planner keep bash_exec unconditionally (roles.py:
+    """Analyzer/Planner keep bash unconditionally (roles.py:
     investigator_tools/planner_tools) for legitimate read-only diagnostics
-    — their own system prompt already says so in plain English ("bash_exec
+    — their own system prompt already says so in plain English ("bash
     for READ-ONLY diagnostic commands... never write/delete/mutate
     anything, that is entirely the Coder stage's job", prompts.py:
     _analyzer_system_prompt) — but nothing enforced that boundary at the
     tool level, only the prompt sentence. Live incident this backstops: see
     _is_read_only_bash_command's docstring above. Mechanical backstop, only
-    attached to roles whose tool set includes bash_exec but no legitimate
+    attached to roles whose tool set includes bash but no legitimate
     reason to ever mutate anything (analyzer, planner — see
     _build_role_agent; verifier gets _VerifierNoSelfFixMiddleware instead,
     a denylist, since it legitimately needs to run arbitrary builds/tests):
-    reject any bash_exec/bash_exec_bg call whose command isn't on the
+    reject any bash/bash_bg call whose command isn't on the
     narrow read-only allowlist, same "final, don't retry" contract as a
     real permission denial."""
 
     async def awrap_tool_call(self, request, handler):
-        if request.tool_call["name"] not in ("bash_exec", "bash_exec_bg"):
+        if request.tool_call["name"] not in ("bash", "bash_bg"):
             return await handler(request)
         command = str((request.tool_call.get("args") or {}).get("command", ""))
         if _is_read_only_bash_command(command):
@@ -672,39 +658,52 @@ class _VerifierNoSelfFixMiddleware(AgentMiddleware):
     plain English ("You have NO write/edit tools... a failure goes back to
     the Coder stage", prompts.py:_verifier_system_prompt) — live bug
     anyway: given a `go build` failure (unused import), qwen3-coder ran
-    `sed -i '/strconv/d' snake.go && go build snake.go` via bash_exec
-    instead of reporting it. bash_exec is the ONE tool Verifier keeps that
+    `sed -i '/strconv/d' snake.go && go build snake.go` via bash
+    instead of reporting it. bash is the ONE tool Verifier keeps that
     can still write to disk (it needs it to run builds/tests), and the
     prompt sentence alone didn't stop the model from using it to edit
     instead of just check. That edit landed with NO pre-write snapshot
-    (_snapshot_before_write only wraps write_file/edit_file/replace_lines/
-    insert_lines/copy_lines/git_restore_file — bash_exec was never in that
-    list, on purpose, since most bash_exec calls aren't edits) and
+    (_snapshot_before_write only wraps write_file/edit_file — bash was
+    never in that list, on purpose, since most bash calls aren't edits) and
     skipped the whole Coder-Verifier retry loop the pipeline is built
     around. Mechanical backstop, only attached when role == "verifier"
-    (see _build_role_agent): reject bash_exec/bash_exec_bg calls whose
+    (see _build_role_agent): reject bash/bash_bg calls whose
     command looks like an in-place file edit, pointing the model back at
     reporting the failure instead of retrying with a different shell
     trick — same "final, don't retry" contract as a real permission
     denial (prompts.py already tells every role to treat a rejected/
-    denied call as final)."""
+    denied call as final).
+
+    repo_path is passed through to _looks_like_file_mutation so a redirect
+    to scratch space OUTSIDE the project (e.g. /tmp) isn't treated as a
+    self-fix — see live bug #2 in that function's module-level comments:
+    Verifier legitimately writing a throwaway /tmp syntax-check file (the
+    real build was blocked by a missing system dependency it had no way to
+    install) was denied outright alongside real in-project edits, leaving
+    it unable to verify anything it COULD have checked."""
+
+    def __init__(self, repo_path: str):
+        self._repo_path = repo_path
 
     async def awrap_tool_call(self, request, handler):
-        if request.tool_call["name"] not in ("bash_exec", "bash_exec_bg"):
+        if request.tool_call["name"] not in ("bash", "bash_bg"):
             return await handler(request)
         command = str((request.tool_call.get("args") or {}).get("command", ""))
-        if not _looks_like_file_mutation(command):
+        if not _looks_like_file_mutation(command, self._repo_path):
             return await handler(request)
         return ToolMessage(
             content=(
                 f"Denied: this command looks like it would modify a file "
-                f"in place ({command!r}) — Verifier has no write tools on "
-                "purpose, you check, you don't fix. Report this as a "
-                "failure in your verdict instead (which file, what the "
-                "real error/output was) so it goes back to the Coder "
-                "stage — which has real write tools AND a pre-write "
+                f"inside the project ({command!r}) — Verifier has no "
+                "write tools on purpose, you check, you don't fix. Report "
+                "this as a failure in your verdict instead (which file, "
+                "what the real error/output was) so it goes back to the "
+                "Coder stage — which has real write tools AND a pre-write "
                 "snapshot for safety, unlike an unsnapshotted shell edit "
-                "here. Do not retry this or a similar command."
+                "here. Do not retry this or a similar command. (Writing a "
+                "throwaway scratch file OUTSIDE the project, e.g. under "
+                "/tmp, to help you verify something IS allowed — this "
+                "denial means the target resolves inside the project.)"
             ),
             name=request.tool_call["name"],
             tool_call_id=request.tool_call["id"],
@@ -1039,12 +1038,14 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
         # инцидент с 8 циклами "готов ли я...?".
         agent_middleware.append(_AskUserFinalizeMiddleware())
     if role == "verifier":
-        # Только Verifier держит bash_exec БЕЗ единого write-тула рядом —
-        # единственная роль, где bash_exec реально способен подменить
+        # Только Verifier держит bash БЕЗ единого write-тула рядом —
+        # единственная роль, где bash реально способен подменить
         # собой запись файла (sed -i и т.п.), см. докстринг мидлвари.
-        agent_middleware.append(_VerifierNoSelfFixMiddleware())
+        # resolved_repo_path — чтобы отличить редирект В ПРОЕКТ (самопочинка)
+        # от редиректа в /tmp и подобное (одноразовый scratch для проверки).
+        agent_middleware.append(_VerifierNoSelfFixMiddleware(resolved_repo_path))
     if role in ("analyzer", "planner"):
-        # Обе роли держат bash_exec безусловно (roles.py:investigator_tools/
+        # Обе роли держат bash безусловно (roles.py:investigator_tools/
         # planner_tools) только для диагностики, никогда для мутации — см.
         # докстринг мидлвари про живой инцидент (Analyzer, вместо сводки
         # для Planner, сам написал файлы игры через `cat > file`).
@@ -1076,7 +1077,7 @@ async def _get_role_agent(role: str, tool_names: frozenset[str], repo_path: str 
     repo_path — часть ключа-значения, а не только chat_model:
     pipeline.py пересчитывает repo_path = os.getcwd() на каждый ход, и без
     этого агент, один раз собранный под первый repo_path, молча продолжал
-    бы отвечать (и писать/выполнять bash_exec) в НЕМ, даже когда следующий
+    бы отвечать (и писать/выполнять bash) в НЕМ, даже когда следующий
     ход пришёл с другим repo_path и той же моделью — тот же класс бага,
     что и в _get_tools (см. его докстринг), только уровнем выше: там
     чинится MCP-подпроцессы/cwd, здесь — system-prompt с зашитым repo_path

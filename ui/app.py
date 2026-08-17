@@ -448,13 +448,26 @@ COMMANDS: list[tuple[str, str]] = [
 
 _KNOWN_CMDS = {cmd for cmd, _ in COMMANDS}
 
+# cli.py only handles these three while _dnd_active is True (see its own
+# "/inventory" and "/status"/"/facts" if-blocks) -- outside a D&D game
+# they fall through as a plain chat message, and the model has no matching
+# tool to call for "текущий инвентарь"/etc., just an error. Hidden from the
+# popup outside D&D mode so they're not offered when they'd only error.
+_DND_ONLY_CMDS = {"/inventory", "/status", "/facts"}
+
 
 class _CmdCompleter(Completer):
+    def __init__(self, app: "FlowAIApp | None" = None):
+        self._app = app
+
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
         if not text.startswith("/") or " " in text:
             return
+        dnd_active = bool(self._app and self._app._dnd_active)
         for cmd, desc in COMMANDS:
+            if cmd in _DND_ONLY_CMDS and not dnd_active:
+                continue
             if cmd.startswith(text):
                 yield Completion(cmd, start_position=-len(text),
                                  display=cmd, display_meta=desc)
@@ -812,7 +825,7 @@ class FlowAIApp:
         # Input buffer
         self._buffer = Buffer(
             name="input",
-            completer=merge_completers([_CmdCompleter(), _ImgRefCompleter(), _FileSearchCompleter()]),
+            completer=merge_completers([_CmdCompleter(self), _ImgRefCompleter(), _FileSearchCompleter()]),
             complete_while_typing=True,
             multiline=True,
         )

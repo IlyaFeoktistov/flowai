@@ -26,7 +26,7 @@ _pending_prompts = 0
 # никогда не проверялась пользователем. Тот же класс проблемы уже был
 # признан и пофикшен для git_* тулов (см. ask_user_tool.py:_action_and_detail
 # — у каждого своя action-ключ вместо общего "bash" с матчем по первому
-# слову), просто тот фикс не покрывал сам bash_exec, где команда — не
+# слову), просто тот фикс не покрывал сам bash, где команда — не
 # фиксированное имя тула, а произвольная строка, которая ЛЕГКО дополняется
 # после уже одобренного префикса. Когда в команде есть эти маркеры,
 # гранулярность "первое слово" отключается — approve/remember работает
@@ -91,15 +91,9 @@ _ACTION_LABELS: dict[str, str] = {
     "append_file":  "добавление в файлы",
     "delete_file":  "удаление файлов",
     "list_dir":     "просмотр директорий",
-    # git-мутации (mcp_agent) — раздельные ключи, см. mcp_agent/agent.py:_action_and_detail
-    "git_checkout":      "переключение git-веток",
-    "git_commit":        "git commit",
-    "git_add":           "git add",
-    "git_reset":         "git reset",
-    "git_create_branch": "создание git-веток",
     # mcp_agent/ask_user_tool.py:_OutOfProjectWriteApprovalMiddleware —
-    # запись filesystem-тулом (write_file/edit_file/replace_lines/...) по
-    # пути вне repo_path текущего хода.
+    # запись тулом file_ops_server.py (write_file/edit_file) по пути вне
+    # repo_path текущего хода.
     "write_outside_project": "запись вне текущего проекта",
 }
 
@@ -245,7 +239,7 @@ async def ask_permission(action: str, detail: str) -> bool:
     # что проверка здесь отключает диалоги полностью, а не только один из
     # путей. Ничего не логируем/не печатаем при выключенном режиме — если
     # человек явно попросил не спрашивать, повторяющаяся строка "разрешение
-    # не требуется" на каждый bash_exec была бы тем же шумом, от которого он
+    # не требуется" на каждый bash была бы тем же шумом, от которого он
     # и пытался избавиться.
     import settings
     if not settings.get("ask_permissions"):

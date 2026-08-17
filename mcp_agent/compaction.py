@@ -7,7 +7,7 @@ _CompactResearchMiddleware — сжимает всё до ПОСЛЕДНЕГО �
 
 Живой прогон (mail-server, сессия 20260707-135011-31723e6e): после ask_user
 и первой правки в ОДНОМ и том же ходе накопились ещё чтение + вторая правка
-+ несколько bash_exec поверх уже большой исследовательской части — общий
++ несколько bash поверх уже большой исследовательской части — общий
 объём перевалил за num_ctx=32768, и llama.cpp дважды сделал "context shift"
 (см. agent_builder.py:_ChatOllamaWithNumKeep), один раз прямо посреди
 генерации финального ответа, оборвав его на полуслове. num_keep защищает
@@ -118,7 +118,7 @@ Analyzer/Planner с их ~2.7k-токенным системным промпт�
 exceeds the available context size (30208 tokens)"), но на этот раз
 _needs_compaction's own оценка (chars//4 + запас в OLLAMA_NUM_PREDICT+3000
 из фикса #7) НИ РАЗУ не сработала за весь ~7-минутный ход — 61 вызов
-bash_exec, ни одной правки (расследование через journalctl/dmesg/docker
+bash, ни одной правки (расследование через journalctl/dmesg/docker
 logs). Разница между реальными 31564 токенами и порогом в 22904
 (num_ctx=30000 минус запас 7096) — минимум 8660 токенов, т.е. запас
 "+3000" перекрывал разрыв из прогона #7 (~20+ тулов, английская проза), но
@@ -151,7 +151,7 @@ from mcp_agent.self_heal import _failed_write_messages
 from ui.console import console
 from utils.parsing import parse_json_loose
 
-_WRITE_TOOL_NAMES = ("write_file", "edit_file", "replace_lines", "insert_lines", "copy_lines")
+_WRITE_TOOL_NAMES = ("write_file", "edit_file")
 
 # Pre-write research has no "last successful write" to cut at (see
 # _last_write_result_index below) — left alone it grows unbounded for the
@@ -168,26 +168,21 @@ _WRITE_TOOL_NAMES = ("write_file", "edit_file", "replace_lines", "insert_lines",
 PERIODIC_CHUNK_TOOL_CALLS = 8
 
 # Tool calls whose result the model may still need verbatim later: actual
-# file/code content (read_file/read_text_file/read_file_range/
-# read_multiple_files/lsp), the project's own map (project_tree, kept small
-# by max_entries in code_search_server.py), or exact grep/symbol hits
-# (search_code/search_symbols/find_files_by_name — "path:line: match", the
-# precise locations an investigation is actually built on, not noise; see
-# live-run-#4 in the module docstring). Orientation noise that's genuinely
-# safe to paraphrase away — search_files, list_directory, get_knowledge,
-# dead-end greps that found nothing — is NOT in this set. A group
-# containing any of these names is "sticky" — _compact_periodic_research
-# always keeps it raw, never folds it into a digest. See the live-run-#3
-# note in the module docstring: folding an already-returned read_file
-# result into prose left the model unable to see that file's actual code on
-# the next turn, and tool_wrappers.py:_dedupe_read_tool (a separate
-# mechanism, with its own history, unaware of compaction) then refused to
-# let it re-read the same path+params, telling it to "reuse that earlier
-# result" — which no longer existed anywhere in what the model could see.
-STICKY_TOOL_NAMES = {
-    "read_file", "read_text_file", "read_file_range", "read_multiple_files",
-    "lsp", "project_tree", "search_code", "search_symbols", "find_files_by_name",
-}
+# file/code content (read_file, lsp) or exact grep/glob hits (grep_search/
+# glob_search — "path:line: match"/file paths, the precise locations an
+# investigation is actually built on, not noise; see live-run-#4 in the
+# module docstring). Orientation noise that's genuinely safe to paraphrase
+# away — get_knowledge, dead-end greps that found nothing — is NOT in this
+# set. A group containing any of these names is "sticky" —
+# _compact_periodic_research always keeps it raw, never folds it into a
+# digest. See the live-run-#3 note in the module docstring: folding an
+# already-returned read_file result into prose left the model unable to see
+# that file's actual code on the next turn, and
+# tool_wrappers.py:_dedupe_read_tool (a separate mechanism, with its own
+# history, unaware of compaction) then refused to let it re-read the same
+# path+params, telling it to "reuse that earlier result" — which no longer
+# existed anywhere in what the model could see.
+STICKY_TOOL_NAMES = {"read_file", "lsp", "grep_search", "glob_search"}
 
 _COMPACT_SYSTEM_PROMPT = (
     "You compress a coding agent's own history in the current task into a "
@@ -463,11 +458,11 @@ def _last_write_result_index(messages: list) -> int | None:
             t for t in messages[i + 1:]
             if isinstance(t, ToolMessage) and t.tool_call_id in write_call_ids
         ]
-        # .status alone misses replace_lines/insert_lines/copy_lines
-        # (fs_extra_server.py) — they never raise a protocol-level MCP
-        # error on a semantic failure (stale expected_first_line, bad
-        # range, ...), they just return a normal "Error: ..." string, so
-        # .status stays "success" even when nothing was written. Reuses
+        # .status alone misses write_file/edit_file (file_ops_server.py) —
+        # they never raise a protocol-level MCP error on a semantic failure
+        # (old_string not found/not unique, size/binary guard, ...), they
+        # just return a normal "Error: ..." string, so .status stays
+        # "success" even when nothing was written. Reuses
         # the same check as coder_verdict (self_heal.py:_failed_write_
         # messages) so "counts as a successful write" means the same
         # thing everywhere — see that function's docstring for the live
@@ -558,8 +553,8 @@ class _CompactResearchMiddleware(AgentMiddleware):
         pre-write research turn by turn (_group_turns — never splitting an
         AIMessage from its own ToolMessages): turns whose result the model
         may still need verbatim (_group_is_sticky, see STICKY_TOOL_NAMES)
-        are always kept raw, in place; everything else (search_code,
-        dead-end greps, ...) accumulates into a pending buffer that gets
+        are always kept raw, in place; everything else (bash, get_knowledge,
+        git status/diff, ...) accumulates into a pending buffer that gets
         frozen into its own digest once it reaches
         PERIODIC_CHUNK_TOOL_CALLS tool calls — cached by that buffer's own
         exact content, so once packed it's never re-summarized. Whatever's
@@ -679,21 +674,16 @@ class _CompactResearchMiddleware(AgentMiddleware):
 # imported — pipeline.py already imports agent_builder.py (which imports
 # this module) to build role agents, so importing pipeline.py FROM here
 # would be circular. Keep the two in sync by hand if a new write tool with
-# its own path-arg name is ever added (currently: copy_lines uses
-# dest_path, everything else uses path).
-_WRITE_TOOL_PATH_KEY = {
-    "write_file": "path", "edit_file": "path", "replace_lines": "path",
-    "insert_lines": "path", "copy_lines": "dest_path",
-}
+# its own path-arg name is ever added.
+_WRITE_TOOL_PATH_KEY = {"write_file": "path", "edit_file": "path"}
 
 # Tools whose whole job is "hand back this path's current content" —
 # exactly what a later successful write to that SAME path invalidates. NOT
-# search_code/search_symbols/find_files_by_name/lsp: those return short
-# match/line-number snippets, not a file dump, so the size win from marking
-# them stale is small, while their line numbers becoming stale after an
-# edit is arguably still useful context ("here's where it USED to be").
-_READ_TOOL_PATH_KEY = {"read_file": "path", "read_text_file": "path", "read_file_range": "path"}
-_READ_MULTI_TOOL_NAME = "read_multiple_files"  # args: {"paths": [...]}
+# grep_search/glob_search/lsp: those return short match/path snippets, not a
+# file dump, so the size win from marking them stale is small, while their
+# line numbers becoming stale after an edit is arguably still useful context
+# ("here's where it USED to be").
+_READ_TOOL_PATH_KEY = {"read_file": "path"}
 
 
 def _stale_read_marker(paths: list[str]) -> str:
@@ -709,9 +699,8 @@ def _stale_read_marker(paths: list[str]) -> str:
 
 class _DropStaleReadsMiddleware(AgentMiddleware):
     """Mechanical (no LLM call, unlike _CompactResearchMiddleware above) —
-    replaces the CONTENT of a read_file/read_text_file/read_file_range/
-    read_multiple_files ToolMessage with a short marker, IF a later
-    successful write in the same conversation touched that same path. The
+    replaces the CONTENT of a read_file ToolMessage with a short marker, IF a
+    later successful write in the same conversation touched that same path. The
     old content is dropped outright, not summarized into prose — there is
     nothing to paraphrase, it's simply wrong now (the file has since
     changed), so keeping it verbatim only risks the model reasoning from
@@ -763,10 +752,6 @@ class _DropStaleReadsMiddleware(AgentMiddleware):
                     p = args.get(_READ_TOOL_PATH_KEY[name])
                     if p:
                         read_paths_by_call_id[tc["id"]] = [p]
-                elif name == _READ_MULTI_TOOL_NAME:
-                    ps = [p for p in (args.get("paths") or []) if p]
-                    if ps:
-                        read_paths_by_call_id[tc["id"]] = ps
 
         new_messages = list(messages)
         dropped = 0

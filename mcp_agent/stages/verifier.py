@@ -19,7 +19,7 @@ def verifier_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: st
     if not _has_execution_evidence(new_tool_msgs):
         return {
             "relevant": False,
-            "reason": "no bash_exec call was made this round — Verifier must actually run a real check, reading files/diffs alone is not verification",
+            "reason": "no bash call was made this round — Verifier must actually run a real check, reading files/diffs alone is not verification",
         }
     if not round_final_text.strip():
         return {"relevant": False, "reason": "ran a check but wrote no final report"}
@@ -45,7 +45,7 @@ def verifier_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: st
 def verifier_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_final_text: str) -> str:
     if not _has_execution_evidence(new_tool_msgs):
         return (
-            "You must actually run a real check via bash_exec (the test "
+            "You must actually run a real check via bash (the test "
             "suite, a linter/type-checker, or executing the changed script) "
             "— reading files or the diff alone is not verification."
         )

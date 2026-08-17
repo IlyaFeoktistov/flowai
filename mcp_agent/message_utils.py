@@ -20,21 +20,22 @@ def _content_text(content: Any) -> str:
 # Живой прогон (mail-server, 20260707-155842-8b900098): MCP tool results
 # normally come back as a LIST of content blocks ([{'type': 'text', 'text':
 # '...'}, ...]), not a plain string — langchain_mcp_adapters' standard shape
-# for every filesystem/git/bash_exec/fs_extra tool result. str() on that
+# for every file_ops/bash tool result. str() on that
 # list stringifies the whole Python structure and, critically, ESCAPES any
 # real newlines inside the text into literal two-character '\n' sequences.
 # That silently broke several things that assumed m.content was already
 # clean text:
 #   - self_heal.py's _execution_evidence_shows_failure did
 #     str(m.content).startswith("error") — never matches, since the string
-#     actually starts with "[{'type': 'text'..." — a failed bash_exec (even
+#     actually starts with "[{'type': 'text'..." — a failed bash (even
 #     a fatal crash) was never caught, letting the model report success
 #     off nothing but an unrelated earlier `php -l`.
 #   - ui/stream.py's tool_end renderer splits the result on real newlines to
-#     detect and color a unified diff (replace_lines' own diff output) —
-#     with newlines escaped to text, a multi-line diff collapses into ONE
-#     "line", so the diff never rendered; the user saw a truncated garbled
-#     repr instead of the actual (tool-generated, not LLM-generated) diff.
+#     detect and color a unified diff (write_file/edit_file's own diff
+#     output) — with newlines escaped to text, a multi-line diff collapses
+#     into ONE "line", so the diff never rendered; the user saw a truncated
+#     garbled repr instead of the actual (tool-generated, not
+#     LLM-generated) diff.
 # _content_text (above) doesn't fix this — json.dumps has the exact same
 # escaping problem. This extracts and joins the real text blocks instead;
 # falls back to str() for a plain string or an unrecognized shape.
@@ -53,11 +54,11 @@ def _dedupe_identical_tool_results(messages: list) -> list:
     зовёт модель заново на каждый раунд, таща за собой всю историю) иногда
     накапливаются два ToolMessage с одним и тем же тулом+аргументами И
     ДОСЛОВНО одинаковым результатом — например, модель дважды вызвала
-    один и тот же bash_exec, не заметив, что уже это сделала.
+    один и тот же bash, не заметив, что уже это сделала.
 
     В отличие от _dedupe_read_tool (который блокирует ПОВТОРНОЕ выполнение
-    read_file/read_text_file — они идемпотентны, блокировать безопасно),
-    здесь мы НИКОГДА не трогаем сам вызов тула: bash_exec и любой другой тул
+    read_file — он идемпотентен, блокировать безопасно),
+    здесь мы НИКОГДА не трогаем сам вызов тула: bash и любой другой тул
     с побочными эффектами обязан выполняться каждый раз, когда модель его
     зовёт — состояние могло измениться между вызовами (git status, pytest
     после правки), и повторный вызов часто НАМЕРЕННО перепроверяет текущее

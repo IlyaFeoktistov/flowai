@@ -55,8 +55,9 @@ import re
 import time
 from datetime import datetime
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
+import settings
 from mcp_agent.agent import _investigation_signals  # общий подсчёт "мест разведки" для auto-capture, см. его докстринг
 from mcp_agent.agent_builder import _get_role_agent
 from mcp_agent.debug_log import log_event
@@ -128,16 +129,45 @@ def _parse_numbered_plan(text: str) -> list[str]:
     return steps
 
 
+def _started_plan_step_numbers(round_msgs: list) -> list[int]:
+    """1-based step_number args from every mark_plan_step_current call this
+    Coder round made — a real tool call the model issues once, in order,
+    right before it BEGINS each step (see prompts.py:_coder_system_prompt
+    and ask_user_tool.py:mark_plan_step_current), not a guess reconstructed
+    from parsing Coder's own freeform final report.
+
+    Live bug this replaces: plan_step_done used to come from counting how
+    many numbered lines _parse_numbered_plan found in Coder's OWN report
+    and marking that many indices done starting from 0 — completely
+    unrelated to which steps were actually worked on. One real run: round 1
+    marked only step 0 done because the report happened to have 1 numbered
+    line (even though the round did more), then round 2's report happened
+    to number all 9 lines and ALL 9 steps flipped done in one shot, before
+    Verifier had even looked at the result. A round that resumes at step 4
+    (e.g. after Verifier sent steps 1-3 back already fixed) would wrongly
+    stomp 0-3 as done too under the old scheme.
+
+    Same lookup pattern as self_heal.py:_written_paths — ToolMessage itself
+    doesn't carry the call's args, only the matching AIMessage.tool_calls
+    does."""
+    numbers = []
+    for m in round_msgs:
+        if isinstance(m, AIMessage):
+            for tc in (m.tool_calls or []):
+                if tc.get("name") == "mark_plan_step_current":
+                    n = (tc.get("args") or {}).get("step_number")
+                    if isinstance(n, int):
+                        numbers.append(n)
+    return numbers
+
+
 # Отслеживаем реально тронутые файлы В РЕАЛЬНОМ ВРЕМЕНИ, по tool_start, а
 # не постфактум по StageResult.all_round_msgs (см. _written_paths) — если
 # отмена (Ctrl+C) прилетает СЕРЕДИНЕ run_stage, до того как он успеет
 # вернуть результат, all_round_msgs теряется вместе с ним, и touched_paths
 # остался бы пустым в except-ветке ниже ровно тогда, когда предупреждение
-# нужнее всего. copy_lines мутирует dest_path, не path.
-_WRITE_TOOL_PATH_KEY = {
-    "write_file": "path", "edit_file": "path", "replace_lines": "path",
-    "insert_lines": "path", "copy_lines": "dest_path",
-}
+# нужнее всего.
+_WRITE_TOOL_PATH_KEY = {"write_file": "path", "edit_file": "path"}
 
 
 def _track_touched_paths(on_event, touched_paths: set[str]):
@@ -201,7 +231,7 @@ def _investigator_scope_note(is_final_answer: bool, is_followup: bool = False) -
     refuse instead of trying — a live incident (2026-08-14, glm-4.7-flash)
     reproduced exactly that: the model obediently answered "I can't access
     project files" to a question that needed nothing more than
-    `cat mcp_agent/model_config.py` (bash_exec, which it always had
+    `cat mcp_agent/model_config.py` (bash, which it always had
     regardless of needs_project).
 
     Live incidents this still fixes: (1) final answers to pure questions
@@ -266,7 +296,18 @@ async def stream_chat(messages: list[dict], on_event=None):
     needs_change = flags["needs_change"]
     change_is_ambiguous = flags["change_is_ambiguous"] and needs_change
 
-    if not (needs_project or needs_shell or needs_change):
+    # casual_answers_enabled — тумблер в /settings, дефолт ВЫКЛ. answer_casual
+    # (router.py) — bare create_agent(tools=[]) без stage_runner'а вокруг, а
+    # значит без verdict/guidance ретраев и БЕЗ compaction (см. её докстринг
+    # про _CASUAL_HISTORY_WINDOW) — на моделях, склонных к повторам без
+    # верификации ответа, это уходило в бесконечный слоп (см. коммит
+    # "Fix casual-chat coherence collapse"). Когда тумблер выключен, эти же
+    # сообщения (needs_change=false) просто не отбиваются здесь и идут в
+    # обычную analyzer-ветку ниже — is_final_answer=not needs_change уже
+    # верно (True), так что Analyzer отвечает с той же verdict/guidance/
+    # recursion-machinery, что и на project-вопросах, но не вызывает
+    # Planner/Coder/Verifier.
+    if not (needs_project or needs_shell or needs_change) and settings.get("casual_answers_enabled"):
         text = await answer_casual(messages, on_event=on_event)
         if on_event:
             await on_event({
@@ -499,15 +540,28 @@ async def stream_chat(messages: list[dict], on_event=None):
                 return
 
             if plan_steps and on_event:
-                # Coder обязан отчитаться "numbered 1:1 with the plan" (см.
-                # mcp_agent/prompts.py:_coder_system_prompt) — сколько шагов
-                # он сам перечислил в отчёте, столько и отмечаем
-                # выполненными. Не идеальная гранулярность (не по каждому
-                # tool-call отдельно), но честная: основана на том, что
-                # Coder реально заявил.
-                reported = _parse_numbered_plan(coder_text)
-                for i in range(min(len(reported), len(plan_steps))):
-                    await on_event({"type": "plan_step_done", "index": i})
+                # _started_plan_step_numbers — реальные вызовы
+                # mark_plan_step_current(N), не парсинг отчёта (см. её
+                # докстринг про живой баг со счётчиком строк). Раз этот
+                # coder-раунд дошёл сюда (не hit_recursion_limit/
+                # hit_context_overflow/пустой текст, см. проверку выше),
+                # Coder остановился штатно — "STOP and report back... once
+                # every step is applied" (_coder_system_prompt) — так что
+                # каждый шаг, на который он реально переключался в этом
+                # раунде, считаем выполненным, номер к номеру.
+                started = _started_plan_step_numbers(coder_result.all_round_msgs)
+                if started:
+                    for n in sorted(set(started)):
+                        if 1 <= n <= len(plan_steps):
+                            await on_event({"type": "plan_step_done", "index": n - 1})
+                else:
+                    # Coder не вызвал mark_plan_step_current ни разу в этом
+                    # раунде (мелкие модели иногда пропускают) — старый
+                    # эвристический фолбэк по счёту строк в отчёте лучше,
+                    # чем совсем ничего не отмечать.
+                    reported = _parse_numbered_plan(coder_text)
+                    for i in range(min(len(reported), len(plan_steps))):
+                        await on_event({"type": "plan_step_done", "index": i})
 
             if on_event:
                 await on_event({"type": "stage_changed", "stage": "verifier"})

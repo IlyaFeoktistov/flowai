@@ -1,6 +1,6 @@
 """
 Process-tree kill helper shared by cli.py's "!command" and
-mcp_agent/servers/bash_exec_server.py's bash_exec — both spawn a command via
+mcp_agent/servers/bash_server.py's bash — both spawn a command via
 `asyncio.create_subprocess_shell` (= `sh -c ...`), and asyncio.subprocess.
 Process.kill() only signals that immediate `sh -c` wrapper, not whatever it
 spawned. Live-verified (20260812): even a SINGLE literal command with no
@@ -16,7 +16,7 @@ wrapper, but the caller never gets its result back, and the real target
 process (the whole reason for killing anything) keeps running regardless.
 
 killpg() was tried for exactly this and reverted elsewhere in this codebase
-(see bash_exec_server.py's own docstring) — signalling a whole process
+(see bash_server.py's own docstring) — signalling a whole process
 GROUP risks reaching unrelated processes that happen to share it (shell
 job control, this same terminal session, ...). This instead walks
 /proc/<pid>/task/*/children (Linux-only, no subprocess spawn/shell needed)
@@ -49,7 +49,7 @@ def kill_process_tree(pid: int, sig: int = signal.SIGKILL) -> None:
     dying and us getting around to it. Best-effort: a process that's
     already gone (ProcessLookupError) or not ours to signal
     (PermissionError) is silently skipped, same tolerance as
-    bash_exec_server.py's own _is_pid_alive."""
+    bash_server.py's own _is_pid_alive."""
     for child in _children(pid):
         kill_process_tree(child, sig)
     try:

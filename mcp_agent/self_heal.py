@@ -94,7 +94,7 @@ _JUDGE_SNIPPET_CHARS = 2000
 
 # На живом прогоне маленький judge_model (тот же qwen3:8b, что и основная
 # модель) один раз пометил "relevant: true" раунд, где была только успешная
-# запись файла (write_file) без единого bash_exec — то есть сам факт "файл
+# запись файла (write_file) без единого bash — то есть сам факт "файл
 # записан" судья спутал с "код проверен, что работает". Ловим это
 # ДЕТЕРМИНИРОВАННО, без ещё одного вызова маленькой модели, которая уже
 # показала, что путает эти две вещи.
@@ -105,17 +105,9 @@ _JUDGE_SNIPPET_CHARS = 2000
 # (шаг 4 воркфлоу) и так уже требует верификации ПОСЛЕ ЛЮБОЙ записи кода, а
 # не только когда юзер попросил явно. Убрали угадывание — теперь правило
 # завязано только на структуру вызовов этого раунда: код записан → нужна
-# bash_exec-верификация, вне зависимости от формулировки задачи.
+# bash-верификация, вне зависимости от формулировки задачи.
 def _wrote_code(tool_messages: list[ToolMessage]) -> bool:
-    # replace_lines (fs_extra_server.py) mutates file content exactly like
-    # write_file/edit_file — live run: a round that only called replace_lines
-    # (no write_file/edit_file) slipped past this check entirely and fell
-    # through to the semantic judge instead of the deterministic "no
-    # bash_exec" verdict below. insert_lines belongs here for the same
-    # reason (a round whose only edit was a successful insert_lines was
-    # missing from this tuple while _failed_write_messages below already
-    # covers it — the two must agree on what counts as "code was written").
-    return any(m.name in ("write_file", "edit_file", "replace_lines", "insert_lines", "copy_lines") for m in tool_messages)
+    return any(m.name in ("write_file", "edit_file") for m in tool_messages)
 
 
 def _has_successful_write(tool_messages: list[ToolMessage]) -> bool:
@@ -123,16 +115,11 @@ def _has_successful_write(tool_messages: list[ToolMessage]) -> bool:
     result. Paired with _failed_write_messages in coder_verdict/
     quick_fix_verdict so an EARLIER failed attempt that the model then
     retried and got right within the SAME round doesn't make a real,
-    later success count as "nothing was actually written". Live run
-    (some-site, styles.css): two replace_lines calls were rejected by the
-    expected_first_line multi-line guard, the model then fixed its
-    arguments and a third call actually deleted the target line — but the
-    round was still rejected outright because _failed_write_messages saw
-    the first two failures and nothing checked for the third call's
-    success. Mirrors the "only the LAST result matters" principle already
-    applied to bash_exec in _execution_evidence_shows_failure above —
-    without it, this fix would just be applying that lesson only halfway."""
-    write_names = ("write_file", "edit_file", "replace_lines", "insert_lines", "copy_lines")
+    later success count as "nothing was actually written". Mirrors the
+    "only the LAST result matters" principle already applied to bash in
+    _execution_evidence_shows_failure above — without it, this fix would
+    just be applying that lesson only halfway."""
+    write_names = ("write_file", "edit_file")
     return any(
         m.name in write_names and m.status != "error" and not _tool_text(m.content).lstrip().startswith("Error")
         for m in tool_messages
@@ -140,16 +127,16 @@ def _has_successful_write(tool_messages: list[ToolMessage]) -> bool:
 
 
 def _has_execution_evidence(tool_messages: list[ToolMessage]) -> bool:
-    return any(m.name == "bash_exec" for m in tool_messages)
+    return any(m.name == "bash" for m in tool_messages)
 
 
 def _execution_evidence_shows_failure(round_msgs: list) -> bool:
-    """_has_execution_evidence only checks that bash_exec was CALLED, not
-    that it succeeded — live run: self-heal saw bash_exec in the round and
+    """_has_execution_evidence only checks that bash was CALLED, not
+    that it succeeded — live run: self-heal saw bash in the round and
     treated that as sufficient verification, twice in a row, while its
     result started with 'Error (exit 1): ... IndentationError' both times.
     The broken file was never caught by the retry logic; the user had to
-    stop the process by hand instead. bash_exec (see bash_exec_server.py)
+    stop the process by hand instead. bash (see bash_server.py)
     always prefixes a non-zero exit with 'Error (exit N):'.
 
     Needs round_msgs (not just tool_messages) — uses _bash_commands to see
@@ -167,13 +154,13 @@ def _execution_evidence_shows_failure(round_msgs: list) -> bool:
          and re-ran the EXACT SAME command, which came back clean. The
          earlier failure shouldn't keep counting once its own re-run says
          otherwise — only the LAST result of each distinct command matters.
-      2. A repo-wide `find . -exec php -l {} \\;` that hit bash_exec's own
+      2. A repo-wide `find . -exec php -l {} \\;` that hit bash's own
          timeout ('Error: command timeout', no exit code at all) — that's
          a badly-scoped verification command, not evidence the CODE is
          broken; it never even finished running. Only a completed run with
          a real non-zero exit ('Error (exit N):') is evidence about the
          code — a bare 'Error: ...' (timeout, no command, an exception
-         raised by bash_exec itself) says nothing either way and must not
+         raised by bash itself) says nothing either way and must not
          overwrite a real prior result for that same command.
 
     Live run (2026-08-13): Verifier guessed two nonexistent project
@@ -205,31 +192,20 @@ def _execution_evidence_shows_failure(round_msgs: list) -> bool:
     return any(last_verdict_by_command.values())
 
 
-# Живой прогон: edit_file упал с MCP-ошибкой валидации аргументов
-# ("edits": expected array, got object — модель передала один объект правки
-# вместо массива [{oldText, newText}]) — langchain_mcp_adapters превращает
-# CallToolResult(isError=True) в ToolMessage(status="error"), само сообщение
-# при этом остаётся с name="edit_file" в new_tool_msgs. _wrote_code видит
-# только ИМЯ вызванного тула, не его исход — упавшая правка засчитывалась
-# как "код записан", и модель получала совет "запусти bash_exec, чтобы
-# проверить" вместо того, чтобы узнать, что файл вообще не тронут и почему.
-#
-# replace_lines/insert_lines/copy_lines (fs_extra_server.py) никогда не
-# кидают протокольную MCP-ошибку на семантический провал (несовпадение
-# expected_first_line/expected_last_line, промах диапазона и т.п.) — они
-# просто ВОЗВРАЩАЮТ обычную строку "Error: ...", так что .status у них
-# всегда не "error" даже когда файл не тронут вообще. Живой прогон
-# (f9557fc89f824e2cac92b51b9181a500): Coder 5 раз подряд отправил
-# ПОБАЙТОВО идентичный replace_lines, 5 раз получил "Error: line 59
-# doesn't match expected_first_line", ни разу не перечитал файл — потому
-# что coder_verdict (stages/coder.py) не видел в этом провал: _wrote_code
-# засчитывал сам факт вызова replace_lines по имени, а этот же провал не
-# ловился и здесь (проверялся только .status). Раунд отчитывался как
-# "правки применены" при нуле реальных изменений на диске.
+# write_file/edit_file (file_ops_server.py) never throw a protocol-level MCP
+# error on a semantic failure (old_string not found/not unique, size/binary
+# guard, ...) — they just RETURN a plain "Error: ..." string, so .status is
+# never "error" even when the file was never touched. Live run (predecessor
+# to this exact tool, same shape of bug): Coder sent a byte-for-byte
+# identical line-based edit 5 times in a row, got "Error: ..." each time,
+# never re-read the file — the round-level verdict didn't see this as a
+# failure because it only checked .status, not the returned text. Checking
+# _tool_text(...).startswith("Error") alongside .status catches this class
+# regardless of which of the two signals the tool actually uses.
 def _failed_write_messages(tool_messages: list[ToolMessage]) -> list[ToolMessage]:
     return [
         m for m in tool_messages
-        if m.name in ("write_file", "edit_file", "replace_lines", "insert_lines", "copy_lines")
+        if m.name in ("write_file", "edit_file")
         and (m.status == "error" or _tool_text(m.content).lstrip().startswith("Error"))
     ]
 
@@ -315,15 +291,14 @@ _GIT_DIFF_TOOL_NAMES = ("git_diff", "git_diff_staged", "git_diff_unstaged")
 # файла/диффа — используются, чтобы понять, "восстановилась" ли модель
 # после обрезания где-то раньше в этом же раунде.
 _GROUNDING_TOOL_NAMES = _GIT_DIFF_TOOL_NAMES + (
-    "bash_exec", "read_file", "read_text_file", "read_file_range",
-    "search_code", "search_code_semantic",
+    "bash", "read_file", "grep_search", "search_code_semantic",
 )
 
 
 def _recovered_after_truncation(tool_messages: list[ToolMessage], last_truncated: int) -> bool:
     """Живой прогон: retry на обрезанный результат срабатывал ДАЖЕ когда
     модель после этого честно последовала совету промпта — позвала более
-    узкий bash_exec `git diff -- <path>`, перечитала конкретный файл, или
+    узкий bash `git diff -- <path>`, перечитала конкретный файл, или
     повторила тот же тул с более узким запросом — и получила ПОЛНУЮ,
     необрезанную картину. Штрафовать раунд в этом случае значит наказывать
     модель за то, что она поступила ровно так, как просит система, вместо
@@ -341,13 +316,10 @@ def _recovered_after_truncation(tool_messages: list[ToolMessage], last_truncated
 
 # Навигационные/discovery-тулы — обрезание их результата почти никогда не
 # прячет "тот самый" ответ (просто "файлов/коммитов было больше, чем
-# показано"), а совет "сузь запрос" для многих из них невыполним в принципе
-# (у directory_tree/git_log вообще нет параметра, которым можно сузить).
-# Штрафовать раунд за их обрезание — чистые потери без защиты от чего-либо.
-_NAV_TOOL_NAMES = (
-    "list_directory", "list_directory_with_sizes", "directory_tree",
-    "search_files", "git_log", "list_deleted_paths", "list_file_snapshots",
-)
+# показано"), а совет "сузь запрос" невыполним в принципе (git_log не имеет
+# параметра, которым можно сузить). Штрафовать раунд за их обрезание —
+# чистые потери без защиты от чего-либо.
+_NAV_TOOL_NAMES = ("git_log", "list_deleted_paths", "list_file_snapshots")
 
 
 def _has_truncated_output(tool_messages: list[ToolMessage]) -> bool:
@@ -383,7 +355,7 @@ def _extract_diffed_paths(tool_messages: list[ToolMessage]) -> set[str]:
     return paths
 
 
-_WRITE_TOOL_NAMES = ("write_file", "edit_file", "replace_lines", "move_file", "copy_lines")
+_WRITE_TOOL_NAMES = ("write_file", "edit_file")
 
 
 def _written_paths(round_msgs: list) -> set[str]:
@@ -406,10 +378,9 @@ def _written_paths(round_msgs: list) -> set[str]:
         if not tc:
             continue
         args = tc.get("args") or {}
-        for key in ("path", "destination", "dest_path"):
-            p = args.get(key)
-            if p:
-                paths.add(p)
+        p = args.get("path")
+        if p:
+            paths.add(p)
     return paths
 
 
@@ -449,7 +420,7 @@ _TEST_PATH_RE = re.compile(r"[\w./\\-]*(?:test|spec)[\w./\\-]*\.\w+", re.IGNOREC
 
 
 def _bash_commands(round_msgs: list) -> list[tuple[str, str]]:
-    """[(command, result_text)] for every bash_exec call this round — same
+    """[(command, result_text)] for every bash call this round — same
     tool_call_id lookup pattern as _written_paths above (ToolMessage doesn't
     carry the call's args, only the matching AIMessage.tool_calls does)."""
     calls_by_id = {}
@@ -460,7 +431,7 @@ def _bash_commands(round_msgs: list) -> list[tuple[str, str]]:
                     calls_by_id[tc["id"]] = tc
     out = []
     for m in round_msgs:
-        if isinstance(m, ToolMessage) and m.name == "bash_exec":
+        if isinstance(m, ToolMessage) and m.name == "bash":
             tc = calls_by_id.get(m.tool_call_id)
             command = str((tc.get("args") or {}).get("command", "")) if tc else ""
             out.append((command, _tool_text(m.content)))
@@ -474,9 +445,9 @@ def _bash_commands(round_msgs: list) -> list[tuple[str, str]]:
 # back real test file paths. `php -l` only parses the file; it proves
 # nothing about whether the changed behavior is correct, and the discovered
 # tests were simply never run. _has_execution_evidence only checks that
-# bash_exec was called at all — a syntax-only command satisfies it just as
+# bash was called at all — a syntax-only command satisfies it just as
 # well as a real test run, so this slipped through as "verified". Flags the
-# narrower, common case: every bash_exec call this round is a bare syntax/
+# narrower, common case: every bash call this round is a bare syntax/
 # lint check, none of them is an actual test-runner invocation, and some
 # tool result from this same round names a real test file — i.e. a proper
 # check was one command away and wasn't taken.
@@ -521,7 +492,7 @@ def _verified_with_syntax_check_only_despite_discoverable_tests(round_msgs: list
         if any(_is_relevant(m.group(0)) for m in _TEST_PATH_RE.finditer(result)):
             return True
     for m in tool_msgs:
-        if m.name == "bash_exec":
+        if m.name == "bash":
             continue
         if any(_is_relevant(mm.group(0)) for mm in _TEST_PATH_RE.finditer(_tool_text(m.content))):
             return True
@@ -701,7 +672,7 @@ async def _execute_leaked_tool_call(tools_by_name: dict, name: str, args: dict) 
     в обход create_agent/HumanInTheLoopMiddleware — раз мы сами дёргаем тул
     вместо графа, именно этот код теперь единственное место, где решается,
     нужно ли спросить подтверждение (см. TOOLS_REQUIRING_APPROVAL) — иначе
-    мутирующий тул (bash_exec, write_file, ...) выполнился бы в обход
+    мутирующий тул (bash, write_file, ...) выполнился бы в обход
     permission-диалога только потому, что его вызов не распознал парсер
     модели. По той же причине — единственное место (для ЭТОГО, обходного
     пути) где нужно повторить VRAM-side-effect

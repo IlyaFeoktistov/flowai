@@ -1,24 +1,24 @@
 """
-Кастомный MCP-сервер: bash_exec.
+Кастомный MCP-сервер: bash.
 
 Готового shell/exec-сервера с нужной permission-гранулярностью в
 официальном/community MCP-реестре нет (проверено: только filesystem, git,
 fetch, everything, pdf) — поэтому этот наш. Сам permission-гейт НЕ здесь:
 подтверждение — забота клиента (HumanInTheLoopMiddleware в mcp_agent/agent.py),
 как и для всех остальных MCP-серверов в этой миграции — единая точка,
-а не логика внутри каждого тула (как было в tools/bash_exec.py + tools/confirm.py).
+а не логика внутри каждого тула (как было в tools/bash.py + tools/confirm.py).
 
-bash_exec_bg/bash_exec_bg_check/bash_exec_bg_list — то же самое, но не
+bash_bg/bash_bg_check/bash_bg_list — то же самое, но не
 блокируя ход: старт возвращает job_id сразу, результат забирается позже
 отдельным вызовом. Нужны для команд, которые реально долго идут (тест-сьют,
-сборка, миграция) — иначе только bash_exec с TIMEOUT=60s, то есть либо
+сборка, миграция) — иначе только bash с TIMEOUT=60s, то есть либо
 уложиться в минуту, либо получить "command timed out" на честно работающей
 команде.
 
 Живой баг (найден по докладу пользователя "кажется, бекграунд не работает"):
 раньше состояние job'ов держалось в module-level dict (_BG_JOBS) и сам
 процесс запускался через asyncio.create_subprocess_shell +
-asyncio.create_task — ровно тот же приём, что и у обычного bash_exec, просто
+asyncio.create_task — ровно тот же приём, что и у обычного bash, просто
 без ожидания. Расчёт был на то, что "MCP-сервер поднимается один раз на
 сессию flowai и живёт до её конца" (тот же принцип, что у lsp_server.py) —
 но это предположение НЕВЕРНО для stdio-транспорта в установленной версии
@@ -28,14 +28,14 @@ langchain-mcp-adapters (0.3.0): её MultiServerMCPClient.get_tools() созда
 be created for each tool call"). Из этого следует два независимых провала
 старой схемы:
   1. _BG_JOBS — пустой dict в СВЕЖЕМ процессе на каждый вызов: job,
-     запущенный в bash_exec_bg, физически не существовал для процесса,
-     обслуживающего следующий bash_exec_bg_check — тот всегда отвечал "no
+     запущенный в bash_bg, физически не существовал для процесса,
+     обслуживающего следующий bash_bg_check — тот всегда отвечал "no
      such job", что старый код даже предвидел в тексте своей же ошибки
      ("...or the server was restarted") — здесь этот случай происходит
      ВСЕГДА, не как редкий крайний случай.
   2. asyncio.create_task(...) — фоновая задача внутри ТЕКУЩЕГО event loop,
      который сам вот-вот остановится (процесс завершается сразу после
-     возврата ответа от bash_exec_bg) — сама команда либо не успевала
+     возврата ответа от bash_bg) — сама команда либо не успевала
      запуститься, либо обрывалась вместе с процессом-родителем, а не
      продолжала жить как реальный фоновый процесс ОС.
 
@@ -49,7 +49,7 @@ be created for each tool call"). Из этого следует два неза�
     получает его сигналов), с выводом в файл (не в pipe — держать pipe
     открытым через границу процессов невозможно) и отдельным
     файлом-маркером exit-кода, который пишет сама обёрнутая команда, когда
-    реально завершится. bash_exec_bg_check/bash_exec_bg_list читают эти
+    реально завершится. bash_bg_check/bash_bg_list читают эти
     файлы + пробуют databaseNexus PID (os.kill(pid, 0)) — никакого
     ожидания в асинхронном тасте, которому неоткуда пережить свой процесс.
 
@@ -59,7 +59,7 @@ be created for each tool call"). Из этого следует два неза�
 асинхронный хук в prompt_toolkit, а не просто MCP-тул).
 
 Запуск (обычно через MultiServerMCPClient, но можно и вручную):
-    python3 -m mcp_agent.servers.bash_exec_server
+    python3 -m mcp_agent.servers.bash_server
 """
 import asyncio
 import os
@@ -82,20 +82,20 @@ sys.path.insert(0, _PROJECT_ROOT)
 import storage  # noqa: E402
 from utils.proc import kill_process_tree  # noqa: E402
 
-mcp = FastMCP("bash_exec")
+mcp = FastMCP("bash")
 
 MAX_OUTPUT = 5000
 TIMEOUT = 60
-# Потолок для bash_exec's own timeout= argument (see bash_exec below) — a
+# Потолок для bash's own timeout= argument (see bash below) — a
 # call this long still blocks the WHOLE synchronous tool call/turn, unlike
-# bash_exec_bg (which doesn't block at all). Past this, bash_exec_bg is the
+# bash_bg (which doesn't block at all). Past this, bash_bg is the
 # right tool, not a bigger timeout= here.
 MAX_TIMEOUT = 600
 
 # Фоновые команды не относятся 60-секундным TIMEOUT'ом — это специально для
 # команд, которые дольше секунд, но всё равно нужен потолок, чтобы
 # зависший/забытый процесс не копился в системе вечно. Обеспечивается самой
-# ОС-командой `timeout` (обёртка запускаемой команды, см. bash_exec_bg) —
+# ОС-командой `timeout` (обёртка запускаемой команды, см. bash_bg) —
 # раньше это был asyncio.wait_for, который здесь неприменим (нечему больше
 # ждать в умирающем процессе).
 BG_TIMEOUT = 1800
@@ -155,7 +155,7 @@ def _sandwich_truncate(text: str, max_chars: int) -> str:
 
 
 @mcp.tool()
-async def bash_exec(command: str, timeout: int = TIMEOUT) -> str:
+async def bash(command: str, timeout: int = TIMEOUT) -> str:
     """Execute a bash command on the local machine and return its output.
     Use for: system info, scripts, git, installing packages, any shell command.
     Default timeout is 60s. If you already have good reason to expect THIS
@@ -164,7 +164,7 @@ async def bash_exec(command: str, timeout: int = TIMEOUT) -> str:
     should be narrowed instead — pass a bigger timeout= (up to 600s)
     instead of retrying the same call against the default and hitting the
     same wall. For anything open-ended or likely to run past a few
-    minutes, use bash_exec_bg instead — it doesn't block this turn at
+    minutes, use bash_bg instead — it doesn't block this turn at
     all."""
     if not command.strip():
         return "Error: no command specified"
@@ -172,10 +172,10 @@ async def bash_exec(command: str, timeout: int = TIMEOUT) -> str:
 
     try:
         # stdin=DEVNULL — БЕЗ этого create_subprocess_shell оставляет
-        # дочернему процессу stdin ЭТОГО (bash_exec_server'а) процесса как
+        # дочернему процессу stdin ЭТОГО (bash_server'а) процесса как
         # есть, то есть настоящий терминальный stdin (stdio-транспорт MCP,
         # см. модульный docstring). Живой инцидент (20260812): скомпилированный
-        # Go-бинарник читал ввод через bufio.NewReader(os.Stdin) — bash_exec
+        # Go-бинарник читал ввод через bufio.NewReader(os.Stdin) — bash
         # его честно запустил и завис на 60-секундном таймауте... кроме
         # того, что таймаут не успел сработать (родительский процесс
         # оборвался раньше), и осиротевший бинарник остался висеть НАПРЯМУЮ
@@ -280,7 +280,7 @@ async def bash_exec(command: str, timeout: int = TIMEOUT) -> str:
         else:
             retry_hint = (
                 f"Already at the {MAX_TIMEOUT}s cap for this tool — if it "
-                "still isn't enough, this belongs in bash_exec_bg instead "
+                "still isn't enough, this belongs in bash_bg instead "
                 "(doesn't block this turn at all), not a bigger timeout= "
                 "here."
             )
@@ -355,13 +355,13 @@ def _prune_finished_bg_jobs(conn) -> None:
 
 
 @mcp.tool()
-async def bash_exec_bg(command: str) -> str:
+async def bash_bg(command: str) -> str:
     """Start a bash command in the BACKGROUND and return a job id
     immediately, instead of blocking this turn until it finishes. Use for
-    anything that legitimately takes longer than bash_exec's 60s timeout —
+    anything that legitimately takes longer than bash's 60s timeout —
     a test suite, a build, a long migration/import script. Check on it with
-    bash_exec_bg_check(job_id) later — there's no automatic notification
-    when it's done, so don't call bash_exec_bg_check in a tight loop right
+    bash_bg_check(job_id) later — there's no automatic notification
+    when it's done, so don't call bash_bg_check in a tight loop right
     after starting it; do other useful work (or finish your response) and
     check back after a plausible amount of time has passed."""
     if not command.strip():
@@ -372,7 +372,7 @@ async def bash_exec_bg(command: str) -> str:
         rows = conn.execute("SELECT pid, exit_path FROM bg_jobs").fetchall()
         running = sum(1 for pid, exit_path in rows if not os.path.exists(exit_path) and _is_pid_alive(pid))
         if running >= MAX_BG_JOBS:
-            return f"Error: {MAX_BG_JOBS} background jobs already running — check bash_exec_bg_list and wait for one to finish"
+            return f"Error: {MAX_BG_JOBS} background jobs already running — check bash_bg_list and wait for one to finish"
 
         _prune_finished_bg_jobs(conn)
 
@@ -384,7 +384,7 @@ async def bash_exec_bg(command: str) -> str:
         # asyncio.wait_for, только теперь его обеспечивает сама ОС-команда,
         # а не наш процесс (у которого нет шанса дождаться). echo $? —
         # exit-код именно обёрнутой команды (timeout вернёт 124, если сам
-        # её убил по таймауту — bash_exec_bg_check это различает).
+        # её убил по таймауту — bash_bg_check это различает).
         # start_new_session=True — новая сессия ОС (как nohup/setsid):
         # процесс переживает смерть ЭТОГО (родительского) процесса, которая
         # наступит сразу после того, как эта функция вернёт ответ — см.
@@ -405,15 +405,15 @@ async def bash_exec_bg(command: str) -> str:
             (job_id, command, proc.pid, time.time(), str(output_path), str(exit_path)),
         )
         conn.commit()
-        return f'Started as job "{job_id}". Check progress/result with bash_exec_bg_check("{job_id}").'
+        return f'Started as job "{job_id}". Check progress/result with bash_bg_check("{job_id}").'
     finally:
         conn.close()
 
 
 @mcp.tool()
-async def bash_exec_bg_check(job_id: str) -> str:
-    """Check a background job started by bash_exec_bg: still running, or
-    finished with its output (same truncation as bash_exec). Safe to call
+async def bash_bg_check(job_id: str) -> str:
+    """Check a background job started by bash_bg: still running, or
+    finished with its output (same truncation as bash). Safe to call
     repeatedly — checking a finished job doesn't clear its stored result."""
     conn = _jobs_conn()
     try:
@@ -456,8 +456,8 @@ async def bash_exec_bg_check(job_id: str) -> str:
 
 
 @mcp.tool()
-async def bash_exec_bg_list() -> str:
-    """List background jobs started with bash_exec_bg (most recent first,
+async def bash_bg_list() -> str:
+    """List background jobs started with bash_bg (most recent first,
     up to the retention cap), with their command and current status — check
     this before starting a new background command if you're not sure what's
     already running."""

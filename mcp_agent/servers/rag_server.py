@@ -71,7 +71,7 @@ def _format_results(results: list[dict]) -> str:
 async def search_code_semantic(query: str, top_k: int = 5) -> str:
     """Semantic (meaning-based) search over the project's code/docs — finds
     relevant files even when your query's wording differs from the actual
-    code. Use search_code (grep) for exact strings/patterns; use this for
+    code. Use grep_search for exact strings/patterns; use this for
     conceptual questions like 'where do we limit tool output size'. Requires
     reindex_code_search to have been run at least once."""
     store = _get_code_store()

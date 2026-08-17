@@ -4,13 +4,13 @@
 пользователем, разгребающим последствия.
 
 - _save_file_snapshot/_snapshot_before_write: снимок содержимого файла ДО
-  каждой мутирующей записи (write_file/edit_file/replace_lines/copy_lines/
-  git_restore_file) — обёртка над тулами применяется в agent_builder.py.
+  каждой мутирующей записи (write_file/edit_file) — обёртка над тулами
+  применяется в agent_builder.py.
 - list_file_snapshots/restore_file_snapshot: ручной откат к конкретному
   снимку по запросу модели/пользователя.
 - _revert_turn_paths: автоматический откат всех правок ОДНОГО хода, когда
   self-heal в stream_chat (mcp_agent/agent.py) исчерпал попытки, а
-  bash_exec-проверка так и не прошла (см. _execution_evidence_shows_failure
+  bash-проверка так и не прошла (см. _execution_evidence_shows_failure
   в mcp_agent/self_heal.py) — вместо того, чтобы оставить сломанный код в
   проекте и понадеяться, что пользователь заметит.
 
@@ -80,10 +80,10 @@ def clear_session_file_snapshots() -> None:
 
 def _save_file_snapshot(repo_path: str, path: str, tool_name: str) -> None:
     """Snapshot a file's content right BEFORE a mutating tool touches it.
-    git_restore_file only reaches back to a committed ref — it can't return
-    to an intermediate uncommitted state (edit A, then edit B, both
-    uncommitted, revert only B). Snapshotting before every write_file/
-    edit_file/git_restore_file call gives restore_file_snapshot real
+    `git checkout <ref> -- <path>` via bash only reaches back to a
+    committed ref — it can't return to an intermediate uncommitted state
+    (edit A, then edit B, both uncommitted, revert only B). Snapshotting
+    before every write_file/edit_file call gives restore_file_snapshot real
     checkpoints to go back to, independent of git history. Best-effort: a
     missing/new/unreadable file just means no snapshot for this call — never
     blocks the actual edit that's about to happen."""
@@ -105,11 +105,10 @@ def _save_file_snapshot(repo_path: str, path: str, tool_name: str) -> None:
 
 
 def _snapshot_before_write(tool: BaseTool, repo_path: str, path_key: str = "path") -> BaseTool:
-    """Wraps write_file/edit_file/git_restore_file/copy_lines to snapshot
-    the file's pre-call content — see _save_file_snapshot. Runs regardless
-    of whether the call itself later succeeds; a snapshot identical to a
-    failed call's no-op result is harmless. path_key differs for copy_lines
-    (mutates dest_path, not path)."""
+    """Wraps write_file/edit_file to snapshot the file's pre-call content —
+    see _save_file_snapshot. Runs regardless of whether the call itself
+    later succeeds; a snapshot identical to a failed call's no-op result is
+    harmless."""
     original_coroutine = tool.coroutine
     if original_coroutine is None:
         return tool
@@ -134,11 +133,11 @@ def _snapshot_before_write(tool: BaseTool, repo_path: str, path_key: str = "path
 @tool
 async def list_file_snapshots(path: str, limit: int = 10) -> str:
     """List saved checkpoints of a file's content, most recent first — each
-    one was captured automatically right before a write_file/edit_file/
-    git_restore_file call touched this file. Use this before
-    restore_file_snapshot to find the right snapshot_id: e.g. the user says
-    'undo my last change but keep the one before it' — list first to see
-    which id corresponds to which point, don't guess an id."""
+    one was captured automatically right before a write_file/edit_file
+    call touched this file. Use this before restore_file_snapshot to find
+    the right snapshot_id: e.g. the user says 'undo my last change but keep
+    the one before it' — list first to see which id corresponds to which
+    point, don't guess an id."""
     limit = max(1, min(limit, 50))
     conn = _snapshot_conn()
     rows = conn.execute(
@@ -147,7 +146,7 @@ async def list_file_snapshots(path: str, limit: int = 10) -> str:
         (path, _SESSION_ID, limit),
     ).fetchall()
     if not rows:
-        return f"No snapshots found for {path!r} — it was never touched by write_file/edit_file/git_restore_file in this session history."
+        return f"No snapshots found for {path!r} — it was never touched by write_file/edit_file in this session history."
     lines = [f"id={r[0]}  ts={r[1]}  before={r[2]}  size={r[3]} chars" for r in rows]
     return "\n".join(lines)
 
@@ -155,15 +154,15 @@ async def list_file_snapshots(path: str, limit: int = 10) -> str:
 @tool
 async def restore_file_snapshot(path: str, snapshot_id: int) -> str:
     """Restore a file to an EARLIER UNCOMMITTED checkpoint saved by
-    list_file_snapshots — for reverting to an intermediate edit (not just the
-    last git commit). Use this instead of git_restore_file when the target
-    state was never committed: e.g. the file was edited twice without a
-    commit in between and only the second edit should be undone.
-    git_restore_file only goes back to a git ref, discarding EVERY
-    uncommitted change to the file at once — it cannot stop at a specific
-    prior edit. Call list_file_snapshots(path) first to find the right
-    snapshot_id; this call overwrites the file's CURRENT content, so get the
-    id right before calling."""
+    list_file_snapshots — for reverting to an intermediate edit, not just
+    the last git commit: e.g. the file was edited twice without a commit in
+    between and only the second edit should be undone. Use `bash` with
+    `git checkout <ref> -- <path>` instead when the target state WAS
+    committed to git — that goes back to a git ref but discards EVERY
+    uncommitted change at once, it cannot stop at a specific prior edit the
+    way this tool does. Call list_file_snapshots(path) first to find the
+    right snapshot_id; this call overwrites the file's CURRENT content, so
+    get the id right before calling."""
     conn = _snapshot_conn()
     row = conn.execute(
         "SELECT content, ts, tool_name FROM file_snapshots WHERE id = ? AND path = ? AND session_id = ?",

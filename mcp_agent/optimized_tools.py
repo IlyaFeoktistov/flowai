@@ -1,73 +1,39 @@
 """
 "Оптимизированный" набор тулов — settings.optimized_tools (см.
-settings.py/ui/tui/settings.py). Только урезание списка, БЕЗ
-переименования: тулы остаются под своими родными MCP-именами
-(write_file/edit_file/bash_exec/read_file_range/...) — self_heal.py,
+settings.py/ui/tui/settings.py). Только урезание списка, БЕЗ переименования:
+тулы остаются под своими родными MCP-именами — self_heal.py,
 config.py:TOOLS_REQUIRING_APPROVAL, ask_user_tool.py, compaction.py и весь
 остальной код, matching по имени тула, продолжают работать без единой
-правки. Переименование в духе Claude Code (Bash/Read/Write/...)
-обсуждалось и было отклонено — цепочка мест, matching'ящих по буквальному
-имени тула (approval-гейт HumanInTheLoopMiddleware в первую очередь —
-тихая потеря approval на Bash/Write было бы security-регрессией, не просто
-багом), сделала бы риск несоразмерным цели "покороче список".
+правки.
 
 Смысл: и Analyzer, и Coder, и voice_mode-агент (когда он всё же получает
-тулы) в легаси-пути видят ВСЕ ~60 тулов сразу, независимо от задачи (см.
-router.py/roles.py — ровно то, чего у легаси-агента НЕТ и что уже чинит
-новый пайплайн через per-request классификацию needs_project/needs_shell).
-Этот флаг — статичный (не per-запрос) урезанный список в духе Claude Code
-— по одному тулу на "смысл" (bash/read/grep/glob/write), но write здесь НЕ
-один: write_file (целиком) + replace_lines/insert_lines/copy_lines
-(точечно, по номерам строк) — БЕЗ edit_file, см. _CORE_TOOL_NAMES про то,
-почему именно edit_file исключён, а точечные line-based тулы оставлены.
+тулы) в легаси-пути видят ВСЕ доступные тулы сразу, независимо от задачи
+(см. router.py/roles.py — ровно то, чего у легаси-агента НЕТ и что уже
+чинит новый пайплайн через per-request классификацию needs_project/
+needs_shell). file_ops_server.py's консолидация (read_file/write_file/
+edit_file/grep_search/glob_search вместо дюжины почти-дублей — filesystem
+MCP-сервер + code_search_server.py + fs_extra_server.py) и удаление
+отдельных git-тулов (git status/diff/log/commit/checkout идут через
+bash("git ...") — отдельного git-сервера в проекте больше нет вообще, не
+только в этом урезанном режиме) уже закрыли большую часть исходной жалобы
+сами по себе — этот тумблер теперь в основном сужает генеративные тулы
+(когда gen_agent_tools включён отдельным тумблером).
 
-Действует и в новом пайплайне (mcp_agent/roles.py:_apply_optimized_filter,
-2026-08-14) — раньше было "НЕ трогает новый пайплайн, там своя композиция
-решает эту же задачу иначе", но per-request needs_project/needs_shell
-решают ДРУГУЮ задачу (какие КАТЕГОРИИ тулов роли вообще нужны — читает ли
-она проект, гоняет ли shell), а не эту (сколько ПОЧТИ-ДУБЛЕЙ внутри
-category-группы видит модель одновременно): investigator_tools() и
-остальные компоновщики роли всё равно собирают read_file И read_text_file
-И read_multiple_files И search_files И directory_tree И project_tree И
-search_symbols разом, даже когда needs_project=true и roles.py уже решил
-"этой роли ЧТО-ТО читающее нужно" — тот же класс шума, что и в легаси-пути,
-просто на другом уровне. Один и тот же тумблер сужает оба пути до одного и
-того же набора OPTIMIZED_TOOL_NAMES.
-
-git-тулы (git_status/git_diff/git_commit/...) исключены целиком — Claude
-Code не имеет отдельных git-тулов вообще, всё идёт через Bash; здесь то же
-самое — git-операции в этом режиме идут через bash_exec("git ...").
+Действует и в новом пайплайне (mcp_agent/roles.py:_apply_optimized_filter).
 """
 
 # Один тул на "смысл", без дублей — see module docstring.
 _CORE_TOOL_NAMES = {
-    # bash — bash_exec_bg*/check/list не "диверсия" в смысле жалобы (это
+    # bash — bash_bg*/check/list не "диверсия" в смысле жалобы (это
     # разные РЕЖИМЫ запуска — sync/async, не 5 способов одного и того же),
     # остаются все.
-    "bash_exec", "bash_exec_bg", "bash_exec_bg_check", "bash_exec_bg_list",
-    # read — read_file_range один: путь + опциональный диапазон строк,
-    # ближайший аналог Claude Code Read(file_path, offset, limit). Никаких
-    # read_file/read_text_file/read_multiple_files рядом.
-    "read_file_range",
-    # grep — один поиск по содержимому, без search_symbols/search_code_semantic.
-    "search_code",
-    # glob — один поиск по имени файла, без search_files/list_directory/
-    # directory_tree/project_tree (листинг директории — bash_exec("ls ...")).
-    "find_files_by_name",
-    # write — write_file (целиком) + точечные replace_lines/insert_lines/
-    # copy_lines, БЕЗ edit_file. Живой прогон: qwen3-coder:30b на edit_file
-    # регулярно проваливал byte-for-byte oldText-совпадение после
-    # нескольких правок подряд (файл на диске расходился с тем, что модель
-    # "помнила" о нём) — 2-3 провала "Could not find exact match", потом
-    # сдавалась и переписывала файл целиком через write_file всё равно, но
-    # только после нескольких потерянных раундов на пустые попытки.
-    # replace_lines/insert_lines не страдают тем же — они адресуются по
-    # номеру строки, а не по повторению существующего текста, так что тот
-    # же класс провала для них не воспроизводится; убирать их вместе с
-    # edit_file было бы перебором — точечная правка нужна для больших
-    # файлов, где переписывать всё целиком через write_file дорого и
-    # рискованно (шанс невольно потерять кусок при пересборке по памяти).
-    "write_file", "replace_lines", "insert_lines", "copy_lines",
+    "bash", "bash_bg", "bash_bg_check", "bash_bg_list",
+    # read/grep/glob — file_ops_server.py, уже по одному тулу на смысл, без
+    # почти-дублей, ничего сужать не нужно.
+    "read_file", "grep_search", "glob_search",
+    # write — write_file (целиком) и edit_file (уникальная подстрока) —
+    # ровно два инструмента с разным назначением, не почти-дубли друг друга.
+    "write_file", "edit_file",
     # web
     "web_search", "fetch", "analyze_image",
     # ask_user — HITL, не тул с диверсией смысла.
@@ -92,24 +58,6 @@ OPTIMIZED_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
-# Приоритет ТОЛЬКО для "write"-семейства (см. докстринг модуля выше про
-# edit_file) — сортировка стабильна, так что порядок всего остального
-# сохраняется как есть, меняется только позиция write_file относительно
-# replace_lines/insert_lines/copy_lines. Живой прогон (20260812, XOR-в-Go
-# задача): tools_available залогировал write_file ПЕРВЫМ из 20 тулов —
-# чистая случайность порядка регистрации MCP-серверов (filesystem-сервер
-# первым в build_mcp_connections), а не решение — replace_lines/
-# insert_lines/copy_lines оказались на местах 16-18, почти в конце. Модель
-# в этом же прогоне трижды перезаписала файл целиком через write_file
-# вместо точечной правки, один раз со случайной потерей большей части
-# содержимого файла при реконструкции по памяти. Известное свойство
-# LLM-tool-choice — смещение к тулам, стоящим раньше в списке, особенно
-# под неопределённостью/после отказов — здесь работало ровно в обратную
-# сторону от желаемого: узкий, безопасный точечный инструмент должен идти
-# раньше тупого "перепиши всё", а не после него.
-_WRITE_FAMILY_PRIORITY = {"replace_lines": 0, "insert_lines": 0, "copy_lines": 0, "write_file": 1}
-
-
 def build_optimized_tools(tools: list) -> tuple[list, dict]:
     """Фильтрует уже загруженный и обёрнутый список тулов (agent_builder.py:
     _get_tools — dedupe/verify-reminder/snapshot-обёртки уже применены к
@@ -117,5 +65,4 @@ def build_optimized_tools(tools: list) -> tuple[list, dict]:
     подмножество, ничего пересобирать не нужно) под OPTIMIZED_TOOL_NAMES.
     Возвращает (tools, tools_by_name) — та же форма, что _get_tools()."""
     filtered = [t for t in tools if t.name in OPTIMIZED_TOOL_NAMES]
-    filtered.sort(key=lambda t: _WRITE_FAMILY_PRIORITY.get(t.name, -1))
     return filtered, {t.name: t for t in filtered}

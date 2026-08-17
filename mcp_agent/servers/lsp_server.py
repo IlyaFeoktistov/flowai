@@ -1,16 +1,14 @@
 """
 Кастомный MCP-сервер: прокси к настоящему Language Server Protocol —
 goToDefinition/findReferences/hover/documentSymbol/workspaceSymbol/
-goToImplementation/prepareCallHierarchy/incomingCalls/outgoingCalls. Тот
-же набор операций, что у встроенного LSP-тула Claude Code.
+goToImplementation/prepareCallHierarchy/incomingCalls/outgoingCalls.
 
-search_symbols (code_search_server.py) — grep по паттернам вида "def
-{query}"/"class {query}": быстро и не требует ничего, кроме rg/grep, но
-это угадайка по написанию. Она не отличает вызов функции от переменной с
-тем же именем, не проследит импорт до реального определения в другом
-файле, не покажет тип. lsp здесь общается с настоящим языковым сервером
-(тем же протоколом, что использует любой нормальный редактор) — результат
-семантически точный, а не текстовый.
+grep_search(pattern="def {query}"/"class {query}") — быстро и не требует
+ничего, кроме rg/grep, но это угадайка по написанию. Она не отличает вызов
+функции от переменной с тем же именем, не проследит импорт до реального
+определения в другом файле, не покажет тип. lsp здесь общается с настоящим
+языковым сервером (тем же протоколом, что использует любой нормальный
+редактор) — результат семантически точный, а не текстовый.
 
 Готовой Python-библиотеки с таким интерфейсом (per-language клиент +
 единый generic API под произвольный сервер) не нашлось — есть
@@ -98,7 +96,7 @@ _child_procs: list[asyncio.subprocess.Process] = []
 @atexit.register
 def _cleanup_children():
     # Точечный terminate() по каждому известному процессу, а не killpg —
-    # тот же принцип, что и в bash_exec_server.py: осиротевший процесс —
+    # тот же принцип, что и в bash_server.py: осиротевший процесс —
     # меньшая беда, чем случайно затронуть что-то за пределами этого
     # дерева. atexit синхронный, await здесь невозможен — best-effort.
     for proc in _child_procs:
@@ -394,8 +392,8 @@ async def lsp(operation: str, filePath: str, line: int = 1, character: int = 1, 
     goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls.
 
     Semantically exact — follows imports and type info via a real language
-    server, unlike search_symbols (regex-based, language-agnostic but a
-    guess by spelling). Use this when search_symbols found a plausible
+    server, unlike grep_search (text-based, language-agnostic but a guess by
+    spelling). Use this when a grep_search for a name found a plausible
     match but you need the ACTUAL definition/callers, or when renaming/
     refactoring and you must find every real usage, not every string match.
 

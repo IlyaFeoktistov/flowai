@@ -69,6 +69,16 @@ def _voice_badge() -> str:
     return f"[yellow]stt {stt}[/] · [dim]озвучка выкл[/]"
 
 
+def _update_badge() -> str:
+    """Пусто, пока update.py:refresh_cache (фоновая проверка при старте,
+    см. cli.py:main) не найдёт коммиты впереди HEAD — сам git fetch тут не
+    делается, только чтение уже посчитанного settings-кэша."""
+    behind = settings.get("update_commits_behind") or 0
+    if behind <= 0:
+        return ""
+    return f"  [bright_black]│[/]  [yellow]⬆ обновление ({behind})[/] · [dim]/update[/]"
+
+
 def print_header(app=None) -> None:
     chat    = settings.get("chat_model")
     vision  = settings.get("vision_model")
@@ -83,6 +93,7 @@ def print_header(app=None) -> None:
     gpu_badge = _ollama_gpu_badge()
     voice_badge = _voice_badge()
     gen3d_badge = _gen3d_badge()
+    update_badge = _update_badge()
 
     # Capture rendered output into a string buffer
     buf = io.StringIO()
@@ -95,7 +106,8 @@ def print_header(app=None) -> None:
         f"  [bright_black]│[/]  [bright_black]vision:[/] [yellow]{vision}[/]"
         f"  [bright_black]│[/]  [bright_black]imggen:[/] [yellow]{imggen}[/] {device_badge}"
         f"  [bright_black]│[/]  [bright_black]voice:[/] {voice_badge}"
-        f"  [bright_black]│[/]  [bright_black]3D:[/] {gen3d_badge}",
+        f"  [bright_black]│[/]  [bright_black]3D:[/] {gen3d_badge}"
+        f"{update_badge}",
         title=f"[bright_black]{_display_cwd()}[/]",
         subtitle="[bright_black]/gen · /img · /paste · /usage · /settings · /help[/]",
         border_style="bright_black",

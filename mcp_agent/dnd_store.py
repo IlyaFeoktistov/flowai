@@ -1,7 +1,7 @@
 """
 Хранилище состояния D&D-режима (/dnd, cli.py) — SQLite через storage.connect()
 (общий flowai.db, тот же принцип "CREATE TABLE IF NOT EXISTS по требованию",
-что уже применяют settings.py и mcp_agent/servers/fs_extra_server.py — не
+что уже применяют settings.py и mcp_agent/servers/file_ops_server.py — не
 переиспользуем memory/ (memory/sqlite_store.py): та таблица — один JSON-блоб
 на user_id, а тут реляционные данные с выборками по game_id (инвентарь,
 партия, факты), под это нужны отдельные таблицы, не один документ.
