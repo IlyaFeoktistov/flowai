@@ -436,6 +436,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("/talk",      "speak text directly, no model"),
     ("/usage",    "session statistics"),
     ("/doctor",   "health check: Ollama/model/MCP servers/storage"),
+    ("/update",   "check and pull flowAI updates from git"),
     ("/settings", "model and GPU settings"),
     ("/memory",   "view and delete remembered facts/knowledge"),
     ("/dnd",      "D&D mode: list saves / new game / continue / exit"),
