@@ -597,13 +597,19 @@ async def stream_chat(messages: list[dict], on_event=None):
             saved_knowledge_this_turn = saved_knowledge_this_turn or c_saved
             coder_text = coder_result.final_text.strip()
 
-            if coder_result.hit_recursion_limit or coder_result.hit_context_overflow or not coder_text:
+            if (
+                coder_result.hit_recursion_limit
+                or coder_result.hit_context_overflow
+                or not coder_text
+                or (coder_result.verdict and not coder_result.verdict.get("relevant"))
+            ):
                 reverted = _revert_turn_paths(touched_paths, turn_start_wall) if touched_paths else []
                 stage_label = "QuickFix" if coder_role == "quick_fix" else "Coder"
                 msg = (
                     f"⚠️ {stage_label} не справился с задачей"
                     + (f" (исчерпан бюджет {ROLE_RECURSION_LIMIT[coder_role]} шагов)" if coder_result.hit_recursion_limit else "")
                     + (" (запрос разросся больше контекста модели)" if coder_result.hit_context_overflow else "")
+                    + (f" ({coder_result.verdict['reason']})" if coder_result.verdict and not coder_result.verdict.get("relevant") else "")
                     + "."
                 )
                 if reverted:
@@ -672,6 +678,17 @@ async def stream_chat(messages: list[dict], on_event=None):
             if verifier_result.verdict and verifier_result.verdict.get("kind") == "execution_failure":
                 verifier_feedback = verifier_text
                 continue
+
+            if (
+                verifier_result.verdict
+                and not verifier_result.verdict.get("relevant")
+            ):
+                await _capture_if_useful(plan_context_text + "\n\n" + coder_text)
+                reason = verifier_result.verdict.get("reason", "результат не признан релевантным")
+                yield await _finish(
+                    f"⚠️ Verifier не смог завершить проверку ({reason}).\n\nОтчёт: " + coder_text
+                )
+                return
 
             break
         else:
