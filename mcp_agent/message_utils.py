@@ -100,6 +100,39 @@ def _dedupe_identical_tool_results(messages: list) -> list:
                             "see the later call below for the actual output.)"
                         )
                     })
+                elif total_count[key] > 1:
+                    # This IS the newest copy of a repeated (name, args, result)
+                    # — unlike the older copies above (already collapsed, the
+                    # model has seen them), THIS one is what the model is about
+                    # to reason from next, so the nudge has to land here, not on
+                    # a copy that gets replaced. Live incident (2026-08-18):
+                    # Verifier called `go get pkg@<bogus-pseudo-version>` 5 times
+                    # in a row, ~10s apart, getting the exact same "invalid
+                    # version" error every time — no state changed between
+                    # calls, so blind repetition could never have produced a
+                    # different result, and the run never reached a verdict
+                    # (looked like a hang). _dedupe_read_tool already nudges
+                    # this way for read_file's offset/limit hunting; side-effect
+                    # tools like bash have no such backstop otherwise, since
+                    # they're never blocked from re-running (state legitimately
+                    # can change between calls, e.g. re-running tests after a
+                    # fix — see this function's own docstring).
+                    hint = (
+                        f"\n\n[You've now called `{name}` with these exact "
+                        f"arguments {total_count[key]} times this turn and "
+                        "gotten the EXACT SAME result every time — nothing "
+                        "changed, so repeating it unchanged again will not "
+                        "produce a different outcome. Change the command/"
+                        "arguments/approach, or stop and report this as a "
+                        "blocker instead of retrying it as-is.]"
+                    )
+                    # _tool_text, not _content_text — the latter json.dumps's
+                    # list-shaped MCP content (escaping real newlines into
+                    # literal '\n', see this module's own docstring on why
+                    # that's wrong for anything the model has to actually
+                    # read); _content_text stays fine for the dedup KEY above
+                    # since equality doesn't care about escaping.
+                    m = m.model_copy(update={"content": _tool_text(m.content) + hint})
         result.append(m)
     return result
 
