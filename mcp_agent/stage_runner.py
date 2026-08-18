@@ -31,6 +31,7 @@ from langgraph.errors import GraphRecursionError
 from tools.confirm import ask_user_question
 from mcp_agent.debug_log import log_event
 from mcp_agent.delegate_tool import _SUBAGENT_TOOLS, _suppress_during_subagent_tools  # noqa: F401 (re-exported, see below)
+from mcp_agent.model_config import MAX_SELF_HEAL_ASKS
 from mcp_agent.self_heal import (
     _execute_leaked_tool_call,
     _extract_ask_user_shape,
@@ -65,6 +66,12 @@ class StageResult:
     tokens_in: int = 0
     tokens_out: int = 0
     llm_calls: int = 0
+    # Суммарное время реальной генерации токенов (см. _stream_round's gen_ms
+    # docstring) по ВСЕМ попыткам — no pipeline.py stage currently reports
+    # this in its own "stats" event, но mcp_agent/agent.py's legacy caller
+    # does (tok/s в UI), так что run_stage не должен его тихо отбрасывать.
+    gen_duration_ms: int = 0
+    attempts_used: int = 0
     verdict: dict | None = None  # None = ни разу не проверялось (нечего проверять), иначе последний verdict
     hit_recursion_limit: bool = False
     hit_generation_error: bool = False
@@ -75,7 +82,7 @@ async def run_stage(
     agent, payload: dict, on_event, *,
     judge_model, tools_by_name: dict, read_history: dict,
     verdict_fn, guidance_fn, max_attempts: int, recursion_limit: int,
-    stage_name: str,
+    stage_name: str, mid_turn_queue=None,
 ) -> StageResult:
     """Крутит agent.astream(...) с self-heal ретраями до max_attempts, как
     внутренний while-цикл mcp_agent/agent.py:stream_chat, но без завязки на
@@ -92,7 +99,11 @@ async def run_stage(
     on_event получает ту же трубу событий, что и весь пайплайн — добавляет
     stage=stage_name к tool_start/tool_end/verdict, чтобы debug_log
     (mcp_agent/debug_log.py) и UI (ui/stream.py:"stage_changed") могли
-    отличить, какая стадия сейчас говорит."""
+    отличить, какая стадия сейчас говорит.
+
+    mid_turn_queue — see _stream_round's own docstring (mcp_agent/agent.py);
+    forwarded through as-is, default None means no mid-turn injection, same
+    as before this parameter existed here."""
     from mcp_agent.agent import _stream_round  # локальный импорт — общий низкоуровневый стример, без цикла импортов на уровне модуля
 
     on_event = _suppress_during_subagent_tools(on_event)
@@ -117,6 +128,7 @@ async def run_stage(
     read_history.clear()
     config = {"configurable": {"thread_id": _next_thread_id()}, "recursion_limit": recursion_limit}
     tokens_in = tokens_out = llm_calls = 0
+    gen_duration_ms = 0
     emitted = 0
     result = None
     attempt = 0
@@ -124,17 +136,19 @@ async def run_stage(
     round_msgs: list = []
     verdict: dict | None = None
     generation_error_bonus_used = False
+    self_heal_asks_used = 0
 
     while attempt < max_attempts:
         log_event("stage_attempt", stage=stage_name, n=attempt + 1, max=max_attempts)
         attempt_start = emitted
         try:
-            result, emitted, tin, tout, calls, hit_limit_this_round, hit_overflow_this_round, _gen_ms = await _stream_round(
-                agent, payload, config, on_event, emitted
+            result, emitted, tin, tout, calls, hit_limit_this_round, hit_overflow_this_round, round_gen_ms = await _stream_round(
+                agent, payload, config, on_event, emitted, mid_turn_queue=mid_turn_queue,
             )
             tokens_in += tin
             tokens_out += tout
             llm_calls += calls
+            gen_duration_ms += round_gen_ms
         except ollama.ResponseError as e:
             if attempt == max_attempts - 1:
                 # Live run (mail-server, f9557fc.../ee810cad...): Coder's
@@ -157,6 +171,7 @@ async def run_stage(
                     return StageResult(
                         final_text="", all_round_msgs=all_round_msgs,
                         tokens_in=tokens_in, tokens_out=tokens_out, llm_calls=llm_calls,
+                        gen_duration_ms=gen_duration_ms, attempts_used=attempt + 1,
                         hit_generation_error=True,
                     )
             round_digests.append(f"- rejected: the model's last response failed to generate/parse ({e})")
@@ -182,6 +197,7 @@ async def run_stage(
                 return StageResult(
                     final_text=round_final_text, round_msgs=round_msgs, all_round_msgs=all_round_msgs,
                     tokens_in=tokens_in, tokens_out=tokens_out, llm_calls=llm_calls,
+                    gen_duration_ms=gen_duration_ms, attempts_used=attempt + 1,
                     hit_recursion_limit=True,
                 )
             verdict = {"relevant": False, "reason": f"ran out of its {recursion_limit}-step budget mid-investigation"}
@@ -217,6 +233,7 @@ async def run_stage(
                 return StageResult(
                     final_text=round_final_text, round_msgs=round_msgs, all_round_msgs=all_round_msgs,
                     tokens_in=tokens_in, tokens_out=tokens_out, llm_calls=llm_calls,
+                    gen_duration_ms=gen_duration_ms, attempts_used=attempt + 1,
                     hit_context_overflow=True,
                 )
             verdict = {"relevant": False, "reason": "the request grew too large for the model's context window mid-investigation"}
@@ -298,7 +315,19 @@ async def run_stage(
         # Punt-to-user rescue: раунд закончился текстовым вопросом вместо
         # настоящего ask_user — открываем настоящий диалог с этим же
         # вопросом вместо того, чтобы жечь попытку на "вызови тул как надо".
-        if ("?" in round_final_text or "？" in round_final_text) and not _called_ask_user(new_tool_msgs):
+        # MAX_SELF_HEAL_ASKS cap — without it a model that keeps punting to
+        # the user forever would loop indefinitely: each punt does
+        # `max_attempts += 1; attempt += 1`, so the gap between attempt and
+        # max_attempts never closes and `attempt == max_attempts - 1` never
+        # fires. mcp_agent/agent.py's legacy self-heal loop already caps
+        # this the same way (self_heal_asks_used < MAX_SELF_HEAL_ASKS) —
+        # this was missing here since run_stage was extracted from it.
+        if (
+            ("?" in round_final_text or "？" in round_final_text)
+            and not _called_ask_user(new_tool_msgs)
+            and self_heal_asks_used < MAX_SELF_HEAL_ASKS
+        ):
+            self_heal_asks_used += 1
             shape = await _extract_ask_user_shape(judge_model, round_final_text)
             if on_event:
                 await on_event({"type": "tool_start", "name": "ask_user", "args": shape, "stage": stage_name})
@@ -329,6 +358,7 @@ async def run_stage(
         final_text=final_text, round_msgs=round_msgs,
         all_round_msgs=all_round_msgs,
         tokens_in=tokens_in, tokens_out=tokens_out, llm_calls=llm_calls,
+        gen_duration_ms=gen_duration_ms, attempts_used=attempt + 1,
         verdict=verdict,
     )
 
