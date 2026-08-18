@@ -55,15 +55,15 @@ import re
 import time
 from datetime import datetime
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import settings
-from mcp_agent.agent import _investigation_signals  # общий подсчёт "мест разведки" для auto-capture, см. его докстринг
+from mcp_agent.agent import _investigation_signals, _round_call_info  # общие разборщики round_msgs, см. их докстринги
 from mcp_agent.agent_builder import _get_role_agent
 from mcp_agent.debug_log import log_event
 from mcp_agent.knowledge import format_knowledge, load_knowledge, maybe_auto_capture
 from mcp_agent.message_utils import _to_lc_messages
-from mcp_agent.model_config import CODER_VERIFIER_MAX_ROUNDS
+from mcp_agent.model_config import ANALYZER_RAW_READS_CHAR_CAP, CODER_VERIFIER_MAX_ROUNDS
 from mcp_agent.roles import (
     ROLE_MAX_ATTEMPTS,
     ROLE_RECURSION_LIMIT,
@@ -82,6 +82,59 @@ from mcp_agent.stages.coder import coder_guidance, coder_verdict
 from mcp_agent.stages.planner import planner_guidance, planner_verdict
 from mcp_agent.stages.quick_fix import quick_fix_guidance, quick_fix_verdict
 from mcp_agent.stages.verifier import verifier_guidance, verifier_verdict
+
+
+# Only tools whose ToolMessage.content actually carries file CONTENT (not
+# just paths/symbol names) — read_file/grep_search, per
+# file_ops_server.py — are worth forwarding verbatim; glob_search/lsp/etc.
+# return listings the Analyzer's own text summary already names.
+_RAW_READ_TOOL_NAMES = frozenset({"read_file", "grep_search"})
+
+
+def _format_raw_reads(round_msgs: list) -> str:
+    """Собирает VERBATIM содержимое read_file/grep_search вызовов Analyzer'а
+    (сырые ToolMessage.content, не пересказ) в один блок для форварда
+    Planner/Coder — не заменяет требование к Analyzer цитировать код в
+    своём отчёте (_analyzer_system_prompt), а страхует его: если Analyzer
+    что-то не процитировал/переформулировал при переносе в prose, сырой
+    результат тула всё равно долетает до следующей стадии.
+
+    Дедуп по (name, args) — тот же вызов с тем же путём/окном внутри одной
+    попытки уже отдаёт stub "already read..." (tool_wrappers.py:
+    _dedupe_read_tool) вместо контента; такие стабы отфильтровываются, а не
+    форвардятся (в них нет самого контента)."""
+    call_info = _round_call_info(round_msgs)
+    seen_keys: set[tuple] = set()
+    parts: list[str] = []
+    total = 0
+    omitted = 0
+    for m in round_msgs:
+        if not isinstance(m, ToolMessage) or m.tool_call_id not in call_info:
+            continue
+        name, args = call_info[m.tool_call_id]
+        if name not in _RAW_READ_TOOL_NAMES:
+            continue
+        content = str(m.content)
+        if content.startswith("(You already read"):
+            continue
+        key = (name, tuple(sorted(args.items())))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        args_desc = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        entry = f"`{name}({args_desc})`:\n{content}"
+        if total + len(entry) > ANALYZER_RAW_READS_CHAR_CAP:
+            omitted += 1
+            continue
+        parts.append(entry)
+        total += len(entry)
+    if omitted:
+        parts.append(
+            f"(...{omitted} more read(s) omitted here — over the "
+            f"{ANALYZER_RAW_READS_CHAR_CAP}-char forwarding cap; re-call the "
+            "tool yourself if you genuinely need one of them)"
+        )
+    return "\n\n".join(parts)
 
 
 def _seed_stage_payload(original_messages: list, stage_digests: list[tuple[str, str]]) -> dict:
@@ -432,7 +485,21 @@ async def stream_chat(messages: list[dict], on_event=None):
         if on_event:
             await on_event({"type": "stage_changed", "stage": "planner"})
 
-        planner_payload = _seed_stage_payload(original_messages, [("Analyzer", analyzer_text)])
+        # Сырое содержимое того, что Analyzer реально прочитал read_file/
+        # grep_search'ом — форвардится ОТДЕЛЬНЫМ блоком в digest Planner'а
+        # (и ниже, тем же base_digest, Coder'у), чтобы обеим стадиям не
+        # приходилось перечитывать те же файлы/паттерны с нуля ради точного
+        # текущего текста, если Analyzer в своём отчёте что-то не
+        # процитировал буквально (см. _format_raw_reads).
+        analyzer_raw_reads = _format_raw_reads(analyzer_result.all_round_msgs)
+        planner_digest = [("Analyzer", analyzer_text)]
+        if analyzer_raw_reads:
+            planner_digest.append((
+                "Analyzer's raw file reads (verbatim tool output — do NOT "
+                "re-read the same file/pattern, it's already here in full)",
+                analyzer_raw_reads,
+            ))
+        planner_payload = _seed_stage_payload(original_messages, planner_digest)
         planner_tool_names = frozenset(planner_tools())
         planner_agent, _model, planner_judge, planner_tools_by_name, planner_read_history, _cr, _tok = (
             await _get_role_agent("planner", planner_tool_names, repo_path)
@@ -477,6 +544,12 @@ async def stream_chat(messages: list[dict], on_event=None):
 
         plan_context_text = planner_text
         base_digest = [("Analyzer", analyzer_text), ("Planner", planner_text)]
+        if analyzer_raw_reads:
+            base_digest.append((
+                "Analyzer's raw file reads (verbatim tool output — do NOT "
+                "re-read the same file/pattern, it's already here in full)",
+                analyzer_raw_reads,
+            ))
         coder_role = "coder"
         exec_tool_names = frozenset(coder_tools())
 

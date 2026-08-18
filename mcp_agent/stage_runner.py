@@ -100,6 +100,21 @@ async def run_stage(
     round_digests: list[str] = []
     all_round_msgs: list = []
 
+    # read_history is shared per repo_path across EVERY role/stage/round for
+    # the life of the process (_get_tools's cache, see agent_builder.py) —
+    # but this call is about to start a brand-new thread with no memory of
+    # any earlier conversation. Without this clear, a leftover "you already
+    # read `path`" entry from a DIFFERENT thread (a previous stage, a
+    # previous Coder<->Verifier round, even a previous turn) makes
+    # _dedupe_read_tool hand this fresh thread a stub pointing at an
+    # "earlier result" it never actually saw — the real file content never
+    # reaches it. Live incident: Verifier's round-2 thread got exactly that
+    # stub for platformer.c/.h because quick_fix's round-2 thread had just
+    # read them first, in the same shared dict, in a wholly separate
+    # conversation. _seed_retry already clears this for retries WITHIN one
+    # run_stage call (see below) — this extends the same invariant to the
+    # call boundary itself.
+    read_history.clear()
     config = {"configurable": {"thread_id": _next_thread_id()}, "recursion_limit": recursion_limit}
     tokens_in = tokens_out = llm_calls = 0
     emitted = 0

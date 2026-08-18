@@ -328,3 +328,11 @@ CODER_VERIFIER_MAX_ROUNDS = 2
 # теперь есть бюджет контекста, чтобы это себе позволить. Не отменяет сам
 # механизм обрезания — просто отодвигает порог.
 TOOL_OUTPUT_CHAR_CAP = int(os.getenv("TOOL_OUTPUT_CHAR_CAP", "20000"))
+
+# Cap on the COMBINED block of Analyzer's raw read_file/grep_search results
+# forwarded verbatim to Planner/Coder (mcp_agent/pipeline.py:_format_raw_reads)
+# — separate from TOOL_OUTPUT_CHAR_CAP above, which already caps each
+# INDIVIDUAL tool call; a thorough investigation can rack up many calls that
+# each pass that per-call cap, so the sum still needs its own ceiling to
+# avoid ballooning Planner/Coder's context with everything Analyzer read.
+ANALYZER_RAW_READS_CHAR_CAP = int(os.getenv("ANALYZER_RAW_READS_CHAR_CAP", "40000"))
