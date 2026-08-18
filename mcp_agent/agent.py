@@ -75,7 +75,7 @@ from mcp_agent.debug_log import log_event  # noqa: E402
 from mcp_agent.delegate_tool import current_on_event as _delegate_on_event  # noqa: E402
 from mcp_agent.delegate_tool import _suppress_during_subagent_tools  # noqa: E402
 from mcp_agent.knowledge import format_knowledge, load_knowledge, maybe_auto_capture  # noqa: E402
-from mcp_agent.message_utils import _to_lc_messages, _tool_text  # noqa: E402
+from mcp_agent.message_utils import _calls_by_id, _to_lc_messages, _tool_text  # noqa: E402
 from mcp_agent.model_config import DEBUG, MAX_ATTEMPTS, MAX_SELF_HEAL_ASKS, RECURSION_LIMIT  # noqa: E402
 from mcp_agent.self_heal import (  # noqa: E402
     _called_ask_user,
@@ -433,12 +433,10 @@ _READ_TOOL_NAMES = ("read_file", "grep_search", "glob_search", "search_code_sema
 
 
 def _round_call_info(round_msgs: list) -> dict[str, tuple[str, dict]]:
-    call_info: dict[str, tuple[str, dict]] = {}
-    for m in round_msgs:
-        if isinstance(m, AIMessage):
-            for tc in (m.tool_calls or []):
-                call_info[tc["id"]] = (tc["name"], tc.get("args") or {})
-    return call_info
+    return {
+        tc_id: (tc["name"], tc.get("args") or {})
+        for tc_id, tc in _calls_by_id(round_msgs).items()
+    }
 
 
 def _investigation_signals(round_msgs: list) -> tuple[set[str], bool]:

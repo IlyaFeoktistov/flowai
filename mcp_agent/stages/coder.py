@@ -8,25 +8,23 @@ verdict проверяет только "были ли реально сдела
 mcp_agent/agent.py, просто без всей верификационной части (execution_
 failure/syntax_only и т.д. — то, что здесь БЫЛО про bash, целиком
 переехало в mcp_agent/stages/verifier.py)."""
-from mcp_agent.self_heal import _failed_write_messages, _has_successful_write, _wrote_code
+from mcp_agent.self_heal import _failed_write_messages, _wrote_code, _write_stage_outcome
 
 
 def coder_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: str) -> dict:
-    failed = _failed_write_messages(new_tool_msgs)
-    # _has_successful_write guard: a failed attempt earlier in the round
-    # that the model then retried and got right must not still fail the
-    # whole round — only reject here when EVERY write attempt failed.
-    if failed and not _has_successful_write(new_tool_msgs):
+    outcome = _write_stage_outcome(new_tool_msgs, round_final_text)
+    if outcome == "failed_write":
+        failed = _failed_write_messages(new_tool_msgs)
         return {
             "relevant": False,
             "reason": f"the `{failed[0].name}` call failed with a tool error — nothing was actually written, the plan isn't done",
         }
-    if not _wrote_code(new_tool_msgs):
+    if outcome == "no_write":
         return {
             "relevant": False,
             "reason": "no write/edit tool was called this round — the plan requires actual code changes, not just reading",
         }
-    if not round_final_text.strip():
+    if outcome == "no_report":
         return {
             "relevant": False,
             "reason": "edits were made but no final report was written — report what changed for each numbered plan step",

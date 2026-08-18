@@ -32,7 +32,7 @@ from utils.parsing import parse_json_loose
 from mcp_agent.ask_user_tool import _action_and_detail
 from mcp_agent.config import TOOLS_REQUIRING_APPROVAL
 from mcp_agent.debug_log import log_event
-from mcp_agent.message_utils import _tool_text
+from mcp_agent.message_utils import _calls_by_id, _tool_text
 from mcp_agent.model_config import DEBUG, OLLAMA_NUM_CTX
 from tools.confirm import ask_permission
 
@@ -210,6 +210,30 @@ def _failed_write_messages(tool_messages: list[ToolMessage]) -> list[ToolMessage
     ]
 
 
+def _write_stage_outcome(new_tool_msgs: list, round_final_text: str) -> str:
+    """Classifies a Coder/QuickFix round into one of 4 outcomes —
+    'failed_write' | 'no_write' | 'no_report' | 'ok'. Both stages
+    (mcp_agent/stages/coder.py, mcp_agent/stages/quick_fix.py) ran this
+    exact same 3-check sequence, in the same order, over these same 3
+    predicates — byte-identical control flow, only the reason/guidance
+    WORDING differed (Coder talks about "the plan"'s numbered steps,
+    QuickFix has no plan to refer to). That wording is real per-role
+    content, not duplication — this collapses only the decision logic
+    both stages agreed on, leaving each stage's own verdict_fn/guidance_fn
+    to supply its own text per outcome."""
+    failed = _failed_write_messages(new_tool_msgs)
+    # _has_successful_write guard: a failed attempt earlier in the round
+    # that the model then retried and got right must not still fail the
+    # whole round — only reject here when EVERY write attempt failed.
+    if failed and not _has_successful_write(new_tool_msgs):
+        return "failed_write"
+    if not _wrote_code(new_tool_msgs):
+        return "no_write"
+    if not round_final_text.strip():
+        return "no_report"
+    return "ok"
+
+
 # То же самое угадывание по ключевым словам ("правки", "diff", "изменения")
 # было и здесь — заменили на структурный чек: смотрим не на текст задачи, а
 # на СОДЕРЖИМОЕ реального результата git_status. Если он сообщил о
@@ -362,14 +386,9 @@ def _written_paths(round_msgs: list) -> set[str]:
     """Paths touched by a write/edit tool this round, used by stream_chat's
     execution-failure fallback (see _execution_evidence_shows_failure) to
     know what to auto-revert. ToolMessage itself doesn't carry the call's
-    args — only the matching AIMessage.tool_calls does (same lookup pattern
-    as _sibling_tool_names above), matched by tool_call_id."""
-    calls_by_id = {}
-    for m in round_msgs:
-        if isinstance(m, AIMessage):
-            for tc in (m.tool_calls or []):
-                if tc.get("id"):
-                    calls_by_id[tc["id"]] = tc
+    args — only the matching AIMessage.tool_calls does (see
+    message_utils.py:_calls_by_id), matched by tool_call_id."""
+    calls_by_id = _calls_by_id(round_msgs)
     paths = set()
     for m in round_msgs:
         if not isinstance(m, ToolMessage) or m.name not in _WRITE_TOOL_NAMES or m.status == "error":
@@ -420,15 +439,10 @@ _TEST_PATH_RE = re.compile(r"[\w./\\-]*(?:test|spec)[\w./\\-]*\.\w+", re.IGNOREC
 
 
 def _bash_commands(round_msgs: list) -> list[tuple[str, str]]:
-    """[(command, result_text)] for every bash call this round — same
-    tool_call_id lookup pattern as _written_paths above (ToolMessage doesn't
-    carry the call's args, only the matching AIMessage.tool_calls does)."""
-    calls_by_id = {}
-    for m in round_msgs:
-        if isinstance(m, AIMessage):
-            for tc in (m.tool_calls or []):
-                if tc.get("id"):
-                    calls_by_id[tc["id"]] = tc
+    """[(command, result_text)] for every bash call this round — see
+    message_utils.py:_calls_by_id for why the join through tool_call_id is
+    needed at all (ToolMessage doesn't carry the call's args)."""
+    calls_by_id = _calls_by_id(round_msgs)
     out = []
     for m in round_msgs:
         if isinstance(m, ToolMessage) and m.name == "bash":

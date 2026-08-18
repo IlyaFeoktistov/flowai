@@ -38,6 +38,27 @@ from mcp_agent.message_utils import _content_text
 _TRUNCATE_HEAD_RATIO = 0.6
 
 
+def _rewrap_tool(
+    tool: BaseTool, *, coroutine, description: str | None = None, args_schema=None,
+) -> BaseTool:
+    """Rebuilds `tool` as a StructuredTool around a new `coroutine` (and,
+    optionally, a new `description`/`args_schema`), copying every other
+    field (response_format/metadata/handle_tool_error) unchanged. Every
+    wrapper below — and mcp_agent/snapshots.py:_snapshot_before_write —
+    used to reconstruct this same 7-field StructuredTool by hand, varying
+    only the 1-3 fields that actually change for that wrapper; single home
+    for that reconstruction now."""
+    return StructuredTool(
+        name=tool.name,
+        description=tool.description if description is None else description,
+        args_schema=tool.args_schema if args_schema is None else args_schema,
+        coroutine=coroutine,
+        response_format=tool.response_format,
+        metadata=tool.metadata,
+        handle_tool_error=tool.handle_tool_error,
+    )
+
+
 def _sandwich_truncate(text: str, max_chars: int) -> str:
     """Раньше обрезка была чисто head (первые max_chars, остальное отброшено)
     — для вывода тестов/линтеров/git diff самое важное (итог, traceback,
@@ -84,15 +105,7 @@ def _cap_tool_output(tool: BaseTool, max_chars: int) -> BaseTool:
             content = _sandwich_truncate(content, max_chars)
         return content, artifact
 
-    return StructuredTool(
-        name=tool.name,
-        description=tool.description,
-        args_schema=tool.args_schema,
-        coroutine=_call,
-        response_format=tool.response_format,
-        metadata=tool.metadata,
-        handle_tool_error=tool.handle_tool_error,
-    )
+    return _rewrap_tool(tool, coroutine=_call)
 
 
 def _dedupe_read_tool(tool: BaseTool, read_history: dict) -> BaseTool:
@@ -148,15 +161,7 @@ def _dedupe_read_tool(tool: BaseTool, read_history: dict) -> BaseTool:
                 content = content + hint
         return content, artifact
 
-    return StructuredTool(
-        name=tool.name,
-        description=tool.description,
-        args_schema=tool.args_schema,
-        coroutine=_call,
-        response_format=tool.response_format,
-        metadata=tool.metadata,
-        handle_tool_error=tool.handle_tool_error,
-    )
+    return _rewrap_tool(tool, coroutine=_call)
 
 
 def _invalidate_read_cache_tool(tool: BaseTool, read_history: dict, get_paths) -> BaseTool:
@@ -191,15 +196,7 @@ def _invalidate_read_cache_tool(tool: BaseTool, read_history: dict, get_paths) -
                 read_history.pop(path, None)
         return result
 
-    return StructuredTool(
-        name=tool.name,
-        description=tool.description,
-        args_schema=tool.args_schema,
-        coroutine=_call,
-        response_format=tool.response_format,
-        metadata=tool.metadata,
-        handle_tool_error=tool.handle_tool_error,
-    )
+    return _rewrap_tool(tool, coroutine=_call)
 
 
 # Тулы, после которых read_history инвалидируется точечно (только путь(и) из
@@ -264,15 +261,7 @@ def _add_verify_reminder(tool: BaseTool) -> BaseTool:
                 content = content + hint
         return content, artifact
 
-    return StructuredTool(
-        name=tool.name,
-        description=tool.description + _VERIFY_REMINDER,
-        args_schema=tool.args_schema,
-        coroutine=_call,
-        response_format=tool.response_format,
-        metadata=tool.metadata,
-        handle_tool_error=tool.handle_tool_error,
-    )
+    return _rewrap_tool(tool, coroutine=_call, description=tool.description + _VERIFY_REMINDER)
 
 
 # Дописывается к description grep_search (file_ops_server.py): без
@@ -290,15 +279,7 @@ _REGEX_WARNING = (
 
 
 def _add_regex_warning(tool: BaseTool) -> BaseTool:
-    return StructuredTool(
-        name=tool.name,
-        description=tool.description + _REGEX_WARNING,
-        args_schema=tool.args_schema,
-        coroutine=tool.coroutine,
-        response_format=tool.response_format,
-        metadata=tool.metadata,
-        handle_tool_error=tool.handle_tool_error,
-    )
+    return _rewrap_tool(tool, coroutine=tool.coroutine, description=tool.description + _REGEX_WARNING)
 
 
 def _bind_constant_args(tool: BaseTool, constants: dict) -> BaseTool:
@@ -335,12 +316,4 @@ def _bind_constant_args(tool: BaseTool, constants: dict) -> BaseTool:
             kwargs.pop(k, None)
         return await original_coroutine(**kwargs, **constants)
 
-    return StructuredTool(
-        name=tool.name,
-        description=tool.description,
-        args_schema=reduced_schema,
-        coroutine=_call,
-        response_format=tool.response_format,
-        metadata=tool.metadata,
-        handle_tool_error=tool.handle_tool_error,
-    )
+    return _rewrap_tool(tool, coroutine=_call, args_schema=reduced_schema)

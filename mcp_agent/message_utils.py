@@ -17,6 +17,26 @@ def _content_text(content: Any) -> str:
     return json.dumps(content, sort_keys=True, default=str)
 
 
+def _calls_by_id(messages: list) -> dict[str, dict]:
+    """{tool_call_id: tc} for every tool call across `messages` — ToolMessage
+    itself never carries the call's own name/args, only the matching
+    AIMessage.tool_calls does, so anything that needs to join a ToolMessage
+    result back to what invoked it has to build this same join first.
+    Single home for a lookup that was independently reimplemented
+    byte-for-byte in agent.py (_round_call_info), self_heal.py
+    (_written_paths, _bash_commands) and compaction.py (_render_transcript)
+    — each one's own docstring already pointed at one of the others as
+    "same lookup pattern", so the duplication was known, just never
+    collapsed."""
+    calls_by_id: dict[str, dict] = {}
+    for m in messages:
+        if isinstance(m, AIMessage):
+            for tc in (m.tool_calls or []):
+                if tc.get("id"):
+                    calls_by_id[tc["id"]] = tc
+    return calls_by_id
+
+
 # Живой прогон (mail-server, 20260707-155842-8b900098): MCP tool results
 # normally come back as a LIST of content blocks ([{'type': 'text', 'text':
 # '...'}, ...]), not a plain string — langchain_mcp_adapters' standard shape

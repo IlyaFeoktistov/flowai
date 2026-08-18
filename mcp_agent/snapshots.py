@@ -23,9 +23,10 @@ import shutil
 import uuid
 from datetime import datetime
 
-from langchain_core.tools import BaseTool, StructuredTool, tool
+from langchain_core.tools import BaseTool, tool
 
 import storage
+from mcp_agent.tool_wrappers import _rewrap_tool
 
 # Уникален на каждый запуск процесса flowai — НЕ os.getpid() (PID пересдаётся
 # ОС между запусками, риск редкого, но реального коллизии со сброшенной
@@ -119,15 +120,7 @@ def _snapshot_before_write(tool: BaseTool, repo_path: str, path_key: str = "path
             _save_file_snapshot(repo_path, path, tool.name)
         return await original_coroutine(**kwargs)
 
-    return StructuredTool(
-        name=tool.name,
-        description=tool.description,
-        args_schema=tool.args_schema,
-        coroutine=_call,
-        response_format=tool.response_format,
-        metadata=tool.metadata,
-        handle_tool_error=tool.handle_tool_error,
-    )
+    return _rewrap_tool(tool, coroutine=_call)
 
 
 @tool

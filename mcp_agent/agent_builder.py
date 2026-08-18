@@ -725,6 +725,37 @@ async def _evict_ollama_model(model_name: str) -> None:
         pass
 
 
+def _compute_num_keep(system_prompt_tokens_estimate: int) -> int:
+    """+1500 tokens of slack for the user's own task text and the short
+    digest/correction messages injected between attempts — neither is part
+    of the system prompt estimate itself. Capped at half of num_ctx:
+    num_keep only helps if there's still enough ROOM left after it for the
+    part of the history llama.cpp actually discards on a context shift;
+    keeping more than half would defeat that. Same formula for both the
+    legacy monolith (_build_agent) and every pipeline role (_build_role_agent)
+    — they differ only in WHICH prompt's token estimate they pass in."""
+    return min(settings.get("num_ctx") // 2, system_prompt_tokens_estimate + 1500)
+
+
+def _base_agent_middleware(resolved_repo_path: str, hitl_middleware: HumanInTheLoopMiddleware) -> list:
+    """The 6-middleware base both the legacy monolith agent (_build_agent)
+    and every pipeline role agent (_build_role_agent) start from, before
+    their own mode/role-specific extras (delegate-nudge/voice for the
+    former; ask-user-finalize/verifier-no-self-fix/investigation-read-only-
+    bash for the latter — see each function's own tail). `hitl_middleware`
+    is the caller's own HumanInTheLoopMiddleware instance (its interrupt_on
+    set differs per caller, so it's built by the caller, not here) —
+    everything else in this list is identical across every caller."""
+    return [
+        _ToolErrorGuardMiddleware(),
+        _UnloadImageGenBeforeGenModelMiddleware(),
+        hitl_middleware,
+        _AskUserGuardMiddleware(),
+        _OutOfProjectWriteApprovalMiddleware(resolved_repo_path),
+        _DedupeToolResultsMiddleware(),
+    ]
+
+
 async def _build_agent(repo_path: str | None = None):
     tools, tools_by_name, read_history, resolved_repo_path = await _get_tools(repo_path)
 
@@ -774,13 +805,7 @@ async def _build_agent(repo_path: str | None = None):
         system_prompt = _build_optimized_system_prompt(resolved_repo_path)
     else:
         system_prompt = _build_system_prompt(resolved_repo_path)
-    # +1500 tokens of slack for the user's own task text and the short
-    # digest/correction messages stream_chat injects between attempts
-    # (_start_next_attempt) — neither is part of the system prompt itself.
-    # Capped at half of num_ctx: num_keep only helps if there's still enough
-    # ROOM left after it for the part of the history llama.cpp actually
-    # discards on a context shift; keeping more than half would defeat that.
-    num_keep = min(settings.get("num_ctx") // 2, prompts._SYSTEM_PROMPT_TOKENS_ESTIMATE + 1500)
+    num_keep = _compute_num_keep(prompts._SYSTEM_PROMPT_TOKENS_ESTIMATE)
 
     # reasoning=... -> Ollama's "think" API field. Живой замер на этой машине:
     # qwen3:14b на простом промпте сгенерировала 1722 токена невидимого
@@ -901,14 +926,7 @@ async def _build_agent(repo_path: str | None = None):
     # Только не в voice_mode — там agent_tools пуст, delegate самого нет в
     # наборе, подталкивать не к чему (см. delegate_tool.py про то, почему
     # эта миддлварь вообще существует — промпт-совета оказалось недостаточно).
-    agent_middleware = [
-        _ToolErrorGuardMiddleware(),
-        _UnloadImageGenBeforeGenModelMiddleware(),
-        middleware,
-        _AskUserGuardMiddleware(),
-        _OutOfProjectWriteApprovalMiddleware(resolved_repo_path),
-        _DedupeToolResultsMiddleware(),
-    ]
+    agent_middleware = _base_agent_middleware(resolved_repo_path, middleware)
     if not voice_mode:
         agent_middleware.append(_DelegateNudgeMiddleware())
     agent_middleware.append(_DropStaleReadsMiddleware())
@@ -975,12 +993,12 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
 
     MAIN_MODEL = settings.get("chat_model")
 
-    # Тот же num_keep-расчёт, что в _build_agent, но от ЛОКАЛЬНОЙ оценки
+    # Та же _compute_num_keep, что в _build_agent, но от ЛОКАЛЬНОЙ оценки
     # токенов ЭТОЙ роли, не от общего мутируемого prompts.
     # _SYSTEM_PROMPT_TOKENS_ESTIMATE — иначе 4 разных по размеру промпта
     # затирали бы одно и то же значение друг у друга.
     system_prompt, system_prompt_tokens_estimate = prompts._build_role_system_prompt(role, resolved_repo_path)
-    num_keep = min(settings.get("num_ctx") // 2, system_prompt_tokens_estimate + 1500)
+    num_keep = _compute_num_keep(system_prompt_tokens_estimate)
 
     model = _build_chat_model(
         model_tag=MAIN_MODEL,
@@ -1023,14 +1041,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
         interrupt_on={name: True for name in approval_tools(tool_names)},
     )
     compact_research = _CompactResearchMiddleware(judge_model)
-    agent_middleware = [
-        _ToolErrorGuardMiddleware(),
-        _UnloadImageGenBeforeGenModelMiddleware(),
-        middleware,
-        _AskUserGuardMiddleware(),
-        _OutOfProjectWriteApprovalMiddleware(resolved_repo_path),
-        _DedupeToolResultsMiddleware(),
-    ]
+    agent_middleware = _base_agent_middleware(resolved_repo_path, middleware)
     if role == "planner":
         # Только Planner имеет ask_user (roles.py:planner_tools) — эта
         # мидлварь не даёт ему звать что-либо ещё после первого

@@ -145,7 +145,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_ollama import ChatOllama
 
 from mcp_agent.debug_log import log_event
-from mcp_agent.message_utils import _tool_text
+from mcp_agent.message_utils import _calls_by_id, _tool_text
 from mcp_agent.model_config import DEBUG, OLLAMA_NUM_PREDICT
 from mcp_agent.self_heal import _failed_write_messages
 from ui.console import console
@@ -240,12 +240,7 @@ def _task_frame_len(messages: list) -> int:
 
 
 def _render_transcript(messages: list) -> str:
-    calls_by_id = {}
-    for m in messages:
-        if isinstance(m, AIMessage):
-            for tc in (m.tool_calls or []):
-                if tc.get("id"):
-                    calls_by_id[tc["id"]] = tc
+    calls_by_id = _calls_by_id(messages)
     lines = []
     for m in messages:
         if isinstance(m, HumanMessage) and m.content:
