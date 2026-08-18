@@ -11,7 +11,6 @@ judge-модели (Ollama) и собирает всё через create_agent.
 chat_model (voice_mode) без пересоздания подпроцессов — см. docstring
 _get_agent/_get_tools ниже.
 """
-import asyncio
 import os
 import re
 
@@ -35,6 +34,7 @@ from mcp_agent.ask_user_tool import (
     ask_user,
     mark_plan_step_current,
 )
+from mcp_agent.build_cache import BuildCache
 from mcp_agent.compaction import _CompactResearchMiddleware, _DropStaleReadsMiddleware
 from mcp_agent.config import build_mcp_connections, TOOLS_REQUIRING_APPROVAL
 from mcp_agent.debug_log import log_event
@@ -267,8 +267,14 @@ from mcp_agent.tool_wrappers import (
     _wrap_read_invalidation,
 )
 
-_tools_cache: dict[str, tuple] = {}
-_tools_cache_lock = asyncio.Lock()
+# Both caches below are mcp_agent.build_cache.BuildCache — see its module
+# docstring for why this shape (get-or-build, rebuild when a "freshness"
+# tuple changes) lives in one place instead of being reimplemented by hand
+# per cache. _tools_cache is keyed by repo_path with a constant freshness
+# (True) — it only ever changes via invalidate_tool_caches() below, never
+# automatically, since raising MCP subprocesses is expensive and unrelated
+# to which model is selected (see _get_tools's own docstring).
+_tools_cache = BuildCache()
 
 # Кешируется ОТДЕЛЬНО от тулов, вместе с (chat_model, voice_mode), на
 # которых он собран (см. _get_agent) — voice_mode (settings.py:set_value)
@@ -279,10 +285,9 @@ _tools_cache_lock = asyncio.Lock()
 # обычной chat_model (пользователь сам так настроил), тег при переключении
 # voice_mode не меняется вообще — без voice_mode в ключе кеш решил бы, что
 # пересобирать нечего, и агент остался бы с пустым тулсетом/голосовым
-# промптом (или наоборот) до следующей смены МОДЕЛИ, а не режима.
-_agent_cache: tuple | None = None
-_agent_cache_key: tuple | None = None  # (chat_model, voice_mode)
-_agent_cache_lock = asyncio.Lock()
+# промптом (или наоборот) до следующей смены МОДЕЛИ, а не режима. Single
+# slot (key=None) — there's only ever one legacy monolith agent per process.
+_agent_cache = BuildCache()
 
 
 async def _load_tools_resilient(client: MultiServerMCPClient, server_names: list[str]) -> list:
@@ -364,14 +369,8 @@ async def _get_tools(repo_path: str | None = None):
     и тот же весь прогон), но найдено при разборе того же прогона —
     чинится заранее, до того как ударит на реальной смене проекта в
     рамках одного процесса."""
-    global _tools_cache
     key = repo_path or os.getcwd()
-    if key in _tools_cache:
-        return _tools_cache[key]
-    async with _tools_cache_lock:
-        if key not in _tools_cache:
-            _tools_cache[key] = await _build_tools(repo_path)
-    return _tools_cache[key]
+    return await _tools_cache.get_or_build(key, True, lambda: _build_tools(repo_path))
 
 
 _UNLOADABLE_SUBPROCESS_TOOLS = ("unload_image_gen_model", "unload_music_gen_model")
@@ -942,9 +941,9 @@ async def _build_agent(repo_path: str | None = None):
     return agent, model, judge_model, tools_by_name, read_history, compact_research
 
 
-_role_agent_cache: dict[tuple, tuple] = {}
-_role_agent_cache_key: dict[tuple, tuple] = {}  # (role, tool_names) -> (chat_model, repo_path)
-_role_agent_cache_lock = asyncio.Lock()
+# Freshness key: (chat_model, resolved_repo_path, expert_streaming_enabled,
+# num_ctx) — see _get_role_agent for why each element is there.
+_role_agent_cache = BuildCache()
 
 
 def invalidate_tool_caches() -> None:
@@ -953,8 +952,8 @@ def invalidate_tool_caches() -> None:
     agent — holds a direct reference to the OLD tools list baked in at
     build time via _build_agent's agent_tools = tools + [...]), and
     _role_agent_cache (pipeline roles, same problem one level up). None of
-    these caches' keys — (chat_model, voice_mode) for the agent, (role,
-    tool_names) -> (chat_model, repo_path) for role agents, plain repo_path
+    these caches' freshness keys — (chat_model, voice_mode, ...) for the
+    agent, (chat_model, repo_path, ...) for role agents, plain repo_path
     for tools — include settings.gen_agent_tools, so toggling it in
     /settings would otherwise sit inert until the NEXT flowai process even
     though build_mcp_connections (mcp_agent/config.py) already reacts to it
@@ -963,12 +962,9 @@ def invalidate_tool_caches() -> None:
     call finishing against the stale (still perfectly valid) tools list —
     every call issued after this one sees the fresh set, spawning/dropping
     the image_gen/music/gen_model MCP subprocesses as needed on next use."""
-    global _tools_cache, _agent_cache, _agent_cache_key, _role_agent_cache, _role_agent_cache_key
-    _tools_cache = {}
-    _agent_cache = None
-    _agent_cache_key = None
-    _role_agent_cache = {}
-    _role_agent_cache_key = {}
+    _tools_cache.clear()
+    _agent_cache.clear()
+    _role_agent_cache.clear()
 
 
 async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: str | None = None):
@@ -1100,25 +1096,23 @@ async def _get_role_agent(role: str, tool_names: frozenset[str], repo_path: str 
     — если несколько уже закешированы, это может вызвать evict несколько
     раз подряд, что безопасно (best-effort, см. _evict_ollama_model),
     просто не отличается по цене от одного вызова."""
-    global _role_agent_cache, _role_agent_cache_key
     current_model = settings.get("chat_model")
     cache_key = (role, tool_names)
     current_value = (
         current_model, repo_path or os.getcwd(),
         settings.get("expert_streaming_enabled"), settings.get("num_ctx"),
     )
-    cached_value = _role_agent_cache_key.get(cache_key)
-    if cache_key in _role_agent_cache and cached_value == current_value:
-        return _role_agent_cache[cache_key]
-    async with _role_agent_cache_lock:
-        cached_value = _role_agent_cache_key.get(cache_key)
-        if cache_key not in _role_agent_cache or cached_value != current_value:
-            old_model = cached_value[0] if cached_value is not None else None
-            _role_agent_cache[cache_key] = await _build_role_agent(role, tool_names, repo_path)
-            _role_agent_cache_key[cache_key] = current_value
-            if old_model is not None and old_model != current_model:
-                await _evict_ollama_model(old_model)
-    return _role_agent_cache[cache_key]
+
+    async def _on_stale(old_freshness, _new_freshness):
+        old_model = old_freshness[0]
+        if old_model != current_model:
+            await _evict_ollama_model(old_model)
+
+    return await _role_agent_cache.get_or_build(
+        cache_key, current_value,
+        lambda: _build_role_agent(role, tool_names, repo_path),
+        on_stale=_on_stale,
+    )
 
 
 async def _get_agent(repo_path: str | None = None):
@@ -1139,22 +1133,20 @@ async def _get_agent(repo_path: str | None = None):
     этот agent).
     Пересборка агента здесь дешёвая (тулы уже в кеше) — новая ChatOllama +
     create_agent, без повторного подъёма подпроцессов."""
-    global _agent_cache, _agent_cache_key
     current_model = settings.get("chat_model")
     current_key = (
         current_model, settings.get("voice_mode"), repo_path or os.getcwd(),
         settings.get("optimized_tools"), settings.get("always_delegate_search"),
         settings.get("expert_streaming_enabled"), settings.get("num_ctx"),
     )
-    if _agent_cache is not None and _agent_cache_key == current_key:
-        return _agent_cache
-    async with _agent_cache_lock:
-        if _agent_cache is None or _agent_cache_key != current_key:
-            old_model = _agent_cache_key[0] if _agent_cache_key is not None else None
-            _agent_cache = await _build_agent(repo_path)
-            _agent_cache_key = current_key
-            if old_model is not None and old_model != current_model:
-                await _evict_ollama_model(old_model)
-    return _agent_cache
+
+    async def _on_stale(old_freshness, _new_freshness):
+        old_model = old_freshness[0]
+        if old_model != current_model:
+            await _evict_ollama_model(old_model)
+
+    return await _agent_cache.get_or_build(
+        None, current_key, lambda: _build_agent(repo_path), on_stale=_on_stale,
+    )
 
 

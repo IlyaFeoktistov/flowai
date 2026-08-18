@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 import settings
 from mcp_agent import dnd_store as store
 from mcp_agent.agent_builder import _ChatOllamaWithNumKeep
+from mcp_agent.build_cache import BuildCache
 from mcp_agent.dnd_tools import build_dnd_tools
 from mcp_agent.message_utils import _to_lc_messages
 from mcp_agent.model_config import (
@@ -56,13 +57,14 @@ DND_RECURSION_LIMIT = 80
 # тулов (build_dnd_tools замыкает game_id, см. его докстринг), так что нельзя
 # просто держать один агент на процесс, как делает _get_casual_agent (там
 # tools=[] всегда, никакой игровой привязки). Значение — (agent, model,
-# tools_by_name); отдельная key-map — chat_model, на котором он собран, чтобы
-# смена модели в /settings подхватывалась на следующий ход этой же игры (тот
-# же принцип, что agent_builder.py:_get_role_agent, без асинхронного лока —
-# цена гонки при переключении модели прямо в момент начала хода minimal и не
-# опаснее самого race'а, который там уже допускается best-effort).
-_dnd_agent_cache: dict[int, tuple] = {}
-_dnd_agent_cache_key: dict[int, str] = {}
+# tools_by_name); freshness — chat_model, на котором он собран, чтобы смена
+# модели в /settings подхватывалась на следующий ход этой же игры (тот же
+# принцип, что agent_builder.py:_get_role_agent). mcp_agent.build_cache.
+# BuildCache — see its module docstring; its internal lock is a free bonus
+# here (this used to be the one cache of this shape with no lock at all,
+# accepting the race as harmless best-effort — the shared lock removes that
+# race for free, not a behavior change worth avoiding).
+_dnd_agent_cache = BuildCache()
 
 # Matches a message ending in "?" (Latin or Cyrillic keyboards both produce
 # ASCII '?'; включаем и полноширинный '？' на случай другой локали/раскладки
@@ -450,44 +452,41 @@ def _dnd_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_fi
 
 
 async def _get_dnd_agent(game_id: int):
-    global _dnd_agent_cache, _dnd_agent_cache_key
     current_model = settings.get("chat_model")
-    if game_id in _dnd_agent_cache and _dnd_agent_cache_key.get(game_id) == current_model:
-        return _dnd_agent_cache[game_id]
 
-    model = _ChatOllamaWithNumKeep(
-        model=current_model,
-        base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-        keep_alive=OLLAMA_KEEP_ALIVE,
-        num_ctx=OLLAMA_NUM_CTX,
-        num_predict=OLLAMA_NUM_PREDICT,
-        reasoning=settings.get("show_thinking"),
-        temperature=MODEL_TEMPERATURE,
-        # Live bug: long dnd sessions (many back-and-forth turns, same
-        # narrator voice for 20+ minutes) kept reusing the same imagery
-        # ("магия пульсирует", "всё дрожит") turn after turn — this
-        # constructor was copied from router.py:_get_casual_agent (one-off
-        # casual replies, where repetition across turns is a non-issue) and
-        # never picked up the same anti-repetition tuning agent_builder.py's
-        # coding-pipeline models already carry. Ollama's own default
-        # (repeat_penalty=1.1, repeat_last_n=64 tokens) is tuned for short
-        # single replies, not a long narrative conversation — same
-        # constants the coding pipeline already uses for the same reason
-        # (see model_config.py's own docstring on why 64 tokens was too
-        # short a window in practice).
-        repeat_penalty=REPEAT_PENALTY,
-        repeat_last_n=REPEAT_LAST_N,
-    )
-    tools = build_dnd_tools(game_id)
-    tools_by_name = {t.name: t for t in tools}
-    agent = create_agent(
-        model, tools, system_prompt=_DND_SYSTEM_PROMPT,
-        middleware=[_StopAfterQuestionMiddleware()], checkpointer=InMemorySaver(),
-    )
-    value = (agent, model, tools_by_name)
-    _dnd_agent_cache[game_id] = value
-    _dnd_agent_cache_key[game_id] = current_model
-    return value
+    async def _build():
+        model = _ChatOllamaWithNumKeep(
+            model=current_model,
+            base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+            keep_alive=OLLAMA_KEEP_ALIVE,
+            num_ctx=OLLAMA_NUM_CTX,
+            num_predict=OLLAMA_NUM_PREDICT,
+            reasoning=settings.get("show_thinking"),
+            temperature=MODEL_TEMPERATURE,
+            # Live bug: long dnd sessions (many back-and-forth turns, same
+            # narrator voice for 20+ minutes) kept reusing the same imagery
+            # ("магия пульсирует", "всё дрожит") turn after turn — this
+            # constructor was copied from router.py:_get_casual_agent (one-off
+            # casual replies, where repetition across turns is a non-issue) and
+            # never picked up the same anti-repetition tuning agent_builder.py's
+            # coding-pipeline models already carry. Ollama's own default
+            # (repeat_penalty=1.1, repeat_last_n=64 tokens) is tuned for short
+            # single replies, not a long narrative conversation — same
+            # constants the coding pipeline already uses for the same reason
+            # (see model_config.py's own docstring on why 64 tokens was too
+            # short a window in practice).
+            repeat_penalty=REPEAT_PENALTY,
+            repeat_last_n=REPEAT_LAST_N,
+        )
+        tools = build_dnd_tools(game_id)
+        tools_by_name = {t.name: t for t in tools}
+        agent = create_agent(
+            model, tools, system_prompt=_DND_SYSTEM_PROMPT,
+            middleware=[_StopAfterQuestionMiddleware()], checkpointer=InMemorySaver(),
+        )
+        return (agent, model, tools_by_name)
+
+    return await _dnd_agent_cache.get_or_build(game_id, current_model, _build)
 
 
 # Живой запрос пользователя: мировой лор (королевства, короли, таверны,

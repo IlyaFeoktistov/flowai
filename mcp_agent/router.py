@@ -59,6 +59,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 import settings
 from mcp_agent.agent_builder import _build_chat_model
+from mcp_agent.build_cache import BuildCache
 from mcp_agent.debug_log import log_event
 from mcp_agent.message_utils import _to_lc_messages
 from mcp_agent.model_config import CASUAL_NUM_PREDICT, JUDGE_NUM_PREDICT
@@ -167,8 +168,9 @@ _CASUAL_CHAT_SYSTEM_PROMPT = (
 
 _classify_model_cache = None
 _classify_model_cache_key: str | None = None
-_casual_agent_cache: tuple | None = None
-_casual_agent_cache_key: str | None = None
+# mcp_agent.build_cache.BuildCache — see its module docstring; single slot
+# (key=None), freshness = chat_model tag.
+_casual_agent_cache = BuildCache()
 
 
 def _get_classify_model():
@@ -262,35 +264,34 @@ async def _get_casual_agent():
     Через _build_chat_model — см. docstring _get_classify_model выше про
     живой баг с двумя одновременными полными процессами модели, если
     строить ChatOllama здесь напрямую вместо единой точки сборки."""
-    global _casual_agent_cache, _casual_agent_cache_key
     current_model = settings.get("chat_model")
-    if _casual_agent_cache is not None and _casual_agent_cache_key == current_model:
-        return _casual_agent_cache
-    model = _build_chat_model(
-        model_tag=current_model,
-        # CASUAL_NUM_PREDICT (not the general OLLAMA_NUM_PREDICT=4096, tuned
-        # for tool-using roles that write whole files/diffs) — see its own
-        # docstring in model_config.py for the live run this bounds: given
-        # enough tokens, this model can spiral into incoherent rambling
-        # with no natural stop; a shorter cap doesn't fix the tendency, it
-        # just bounds how much garbage one bad turn can produce.
-        num_predict=CASUAL_NUM_PREDICT,
-        reasoning=settings.get("show_thinking"),
-        num_keep=4,
-        # create_agent below binds tools=[] — this is exactly the path that
-        # broke on "Война и мир" (see has_tools's docstring in
-        # agent_builder.py): a model whose tool-call-syntax repeat_penalty
-        # override was applied even here, on plain prose with zero tools,
-        # removing its only defense against repeating itself.
-        has_tools=False,
-    )
-    agent = create_agent(
-        model, [], system_prompt=_CASUAL_CHAT_SYSTEM_PROMPT,
-        middleware=[], checkpointer=InMemorySaver(),
-    )
-    _casual_agent_cache = (agent, model)
-    _casual_agent_cache_key = current_model
-    return _casual_agent_cache
+
+    async def _build():
+        model = _build_chat_model(
+            model_tag=current_model,
+            # CASUAL_NUM_PREDICT (not the general OLLAMA_NUM_PREDICT=4096, tuned
+            # for tool-using roles that write whole files/diffs) — see its own
+            # docstring in model_config.py for the live run this bounds: given
+            # enough tokens, this model can spiral into incoherent rambling
+            # with no natural stop; a shorter cap doesn't fix the tendency, it
+            # just bounds how much garbage one bad turn can produce.
+            num_predict=CASUAL_NUM_PREDICT,
+            reasoning=settings.get("show_thinking"),
+            num_keep=4,
+            # create_agent below binds tools=[] — this is exactly the path that
+            # broke on "Война и мир" (see has_tools's docstring in
+            # agent_builder.py): a model whose tool-call-syntax repeat_penalty
+            # override was applied even here, on plain prose with zero tools,
+            # removing its only defense against repeating itself.
+            has_tools=False,
+        )
+        agent = create_agent(
+            model, [], system_prompt=_CASUAL_CHAT_SYSTEM_PROMPT,
+            middleware=[], checkpointer=InMemorySaver(),
+        )
+        return (agent, model)
+
+    return await _casual_agent_cache.get_or_build(None, current_model, _build)
 
 
 def _casual_verdict(round_msgs, new_tool_msgs, round_final_text) -> dict:
