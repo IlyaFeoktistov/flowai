@@ -42,9 +42,9 @@ _conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value 
 _conn.commit()
 
 _state: dict = {
-    # glm-4.7-flash:q4_K_M (не qwen3-coder:30b) — признанный дефолт с
-    # 2026-08-14: живыми прогонами (см. expert_streaming.py, раздел
-    # «GLM-4.7-Flash») подтверждены и загрузка, и корректная остановка
+    # glm-4.7-flash:q4_K_M (не qwen3-coder:30b) — признанный дефолт:
+    # (см. expert_streaming.py, раздел «GLM-4.7-Flash») подтверждены и
+    # загрузка, и корректная остановка
     # генерации на expert-streaming backend'е, при близком к qwen3-coder:30b
     # весе (17.7 GB против 18 GB) и заметно лучшей скорости на этом железе.
     # Требует expert_streaming_enabled=ВКЛ (см. ниже) — обычный Ollama-путь

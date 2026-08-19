@@ -239,7 +239,7 @@ def _add_verify_reminder(tool: BaseTool) -> BaseTool:
     write_file/edit_file местах — description (видна ДО вызова, влияет на
     решение) и хинт на сам успешный результат (видна СРАЗУ ПОСЛЕ, пока
     контекст ещё "здесь") — вместо единственного места в системном
-    промпте, которое теряется среди остального текста на живых прогонах."""
+    промпте, которое легко теряется среди остального текста."""
     original_coroutine = tool.coroutine
     if original_coroutine is None:
         return tool

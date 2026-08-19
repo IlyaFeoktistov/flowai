@@ -27,7 +27,7 @@ path) закрывает браузинг структуры проекта, wri
     сторонний npm-пакет; теперь тул свой, гард можно держать в естественном
     месте, а не снаружи.
   - grep_search/glob_search переиспользуют SKIP_DIRS/_HAS_RG/_run/_sh из
-    старого code_search_server.py как есть (тот же живой опыт с venv-tts/
+    старого code_search_server.py как есть (та же логика игнора venv-tts/
     vendor/, см. их комментарии ниже) — не переизобретены с нуля.
 
 required_permission (TOOL_PERMISSIONS ниже) — декларативный тег
