@@ -264,6 +264,7 @@ def _show_help() -> None:
         "[bold cyan]/talk[/] [dim]текст[/]              — озвучить текст напрямую, без модели\n"
         "[bold cyan]/usage[/]                   — статистика токенов\n"
         "[bold cyan]/doctor[/]                  — проверка Ollama/модели/MCP-серверов/хранилища\n"
+        "[bold cyan]/clean[/] [dim]logs|trash|snapshots|projects|all[/] — почистить накопившийся за всё время хлам (логи/корзину/индексы); без аргумента — только отчёт, ничего не удаляет\n"
         "[bold cyan]/update[/]                  — проверить и подтянуть обновления flowAI из git\n"
         "[bold cyan]/settings[/]                — настройки моделей и GPU\n"
         "[bold cyan]/memory[/]                  — что помнит нейронка, точечное/полное удаление\n"
@@ -613,6 +614,13 @@ async def main() -> None:
             console.print("[dim]  🩺 проверяю Ollama/модели/MCP/хранилище…[/]\n")
             report = await run_doctor()
             console.print(Panel(report, title="[bright_black]doctor[/]", border_style="bright_black", padding=(0, 2)))
+            console.print()
+            return
+
+        if cmd == "/clean":
+            from clean import run_clean
+            report = run_clean(cmd_args or None)
+            console.print(Panel(report, title="[bright_black]clean[/]", border_style="bright_black", padding=(0, 2)))
             console.print()
             return
 
