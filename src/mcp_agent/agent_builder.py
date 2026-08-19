@@ -825,15 +825,34 @@ def _compute_num_keep(system_prompt_tokens_estimate: int) -> int:
     return min(settings.get("num_ctx") // 2, system_prompt_tokens_estimate + 1500)
 
 
-def _base_agent_middleware(resolved_repo_path: str, hitl_middleware: HumanInTheLoopMiddleware) -> list:
+def _base_agent_middleware(
+    resolved_repo_path: str, hitl_middleware: HumanInTheLoopMiddleware,
+    pre_hitl: list | None = None,
+) -> list:
     """The 7-middleware base both the legacy monolith agent (_build_agent)
     and every pipeline role agent (_build_role_agent) start from, before
     their own mode/role-specific extras (delegate-nudge/voice for the
-    former; ask-user-finalize/verifier-no-self-fix/investigation-read-only-
-    bash for the latter — see each function's own tail). `hitl_middleware`
-    is the caller's own HumanInTheLoopMiddleware instance (its interrupt_on
-    set differs per caller, so it's built by the caller, not here) —
-    everything else in this list is identical across every caller.
+    former; ask-user-finalize for the latter — see each function's own
+    tail). `hitl_middleware` is the caller's own HumanInTheLoopMiddleware
+    instance (its interrupt_on set differs per caller, so it's built by
+    the caller, not here) — everything else in this list is identical
+    across every caller.
+
+    `pre_hitl` (role-specific mechanical bash-content rejectors —
+    _VerifierNoSelfFixMiddleware/_InvestigationReadOnlyBashMiddleware, see
+    _build_role_agent's own tail) MUST be inserted BEFORE hitl_middleware,
+    not appended after it as the pre-fix code used to: langchain's
+    middleware order is outermost-first (langchain.agents.factory.
+    _chain_tool_call_wrappers's own docstring, "first = outermost" —
+    request flows through them in list order before ever reaching the
+    tool), so a middleware appended AFTER hitl_middleware only runs once
+    hitl_middleware's own approval interrupt has already fired and been
+    answered. Live-run consequence of the old order: Verifier's `cat >
+    file <<EOF` self-fix attempt sat on a real 41-SECOND human approval
+    wait (the whole file content shown in the prompt), then got denied
+    anyway by _VerifierNoSelfFixMiddleware regardless of the answer — the
+    mechanical rejection should short-circuit before ever asking, not
+    after.
 
     PluginHookMiddleware is unconditional (not gated behind whether any
     plugin is even installed) — mcp_agent.plugins.load_hooks() is itself
@@ -842,6 +861,7 @@ def _base_agent_middleware(resolved_repo_path: str, hitl_middleware: HumanInTheL
     return [
         _ToolErrorGuardMiddleware(),
         _UnloadImageGenBeforeGenModelMiddleware(),
+        *(pre_hitl or ()),
         hitl_middleware,
         _AskUserGuardMiddleware(),
         _OutOfProjectWriteApprovalMiddleware(resolved_repo_path),
@@ -1137,7 +1157,26 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
         interrupt_on={name: True for name in approval_tools(tool_names)},
     )
     compact_research = _CompactResearchMiddleware(judge_model)
-    agent_middleware = _base_agent_middleware(resolved_repo_path, middleware)
+
+    # These two run BEFORE hitl_middleware (see _base_agent_middleware's
+    # pre_hitl parameter) — a command they're going to reject mechanically
+    # must never reach the human approval prompt in the first place.
+    pre_hitl: list = []
+    if role == "verifier":
+        # Только Verifier держит bash БЕЗ единого write-тула рядом —
+        # единственная роль, где bash реально способен подменить
+        # собой запись файла (sed -i и т.п.), см. докстринг мидлвари.
+        # resolved_repo_path — чтобы отличить редирект В ПРОЕКТ (самопочинка)
+        # от редиректа в /tmp и подобное (одноразовый scratch для проверки).
+        pre_hitl.append(_VerifierNoSelfFixMiddleware(resolved_repo_path))
+    if role in ("analyzer", "planner"):
+        # Обе роли держат bash безусловно (roles.py:investigator_tools/
+        # planner_tools) только для диагностики, никогда для мутации — см.
+        # докстринг мидлвари про сценарий, который она блокирует (Analyzer,
+        # вместо сводки для Planner, сам пишет файлы через `cat > file`).
+        pre_hitl.append(_InvestigationReadOnlyBashMiddleware())
+
+    agent_middleware = _base_agent_middleware(resolved_repo_path, middleware, pre_hitl)
     if role == "planner":
         # Только Planner имеет ask_user (roles.py:planner_tools) — эта
         # мидлварь не даёт ему звать что-либо ещё после первого
@@ -1145,19 +1184,6 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
         # зацикленных "готов ли я...?"-переспросов, который она блокирует.
         agent_middleware.append(_AskUserFinalizeMiddleware())
         agent_middleware.append(_AskUserFinalizeNumPredictMiddleware())
-    if role == "verifier":
-        # Только Verifier держит bash БЕЗ единого write-тула рядом —
-        # единственная роль, где bash реально способен подменить
-        # собой запись файла (sed -i и т.п.), см. докстринг мидлвари.
-        # resolved_repo_path — чтобы отличить редирект В ПРОЕКТ (самопочинка)
-        # от редиректа в /tmp и подобное (одноразовый scratch для проверки).
-        agent_middleware.append(_VerifierNoSelfFixMiddleware(resolved_repo_path))
-    if role in ("analyzer", "planner"):
-        # Обе роли держат bash безусловно (roles.py:investigator_tools/
-        # planner_tools) только для диагностики, никогда для мутации — см.
-        # докстринг мидлвари про сценарий, который она блокирует (Analyzer,
-        # вместо сводки для Planner, сам пишет файлы через `cat > file`).
-        agent_middleware.append(_InvestigationReadOnlyBashMiddleware())
     agent_middleware.append(_DropStaleReadsMiddleware())
     agent_middleware.append(compact_research)
 
