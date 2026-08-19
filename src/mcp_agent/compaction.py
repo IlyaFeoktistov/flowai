@@ -726,7 +726,18 @@ class _DropStaleReadsMiddleware(AgentMiddleware):
 
     Only touches request.messages for THIS model call, same non-invasive
     pattern as _CompactResearchMiddleware/_DedupeToolResultsMiddleware
-    (message_utils.py) — the real graph state/checkpointer is untouched."""
+    (message_utils.py) — the real graph state/checkpointer is untouched.
+    Because of that, the SAME stale read is rediscovered fresh on every
+    later model call in the same conversation (the override never
+    persists), so without _already_logged the "dropped N stale read(s)"
+    line would repeat once per round for the rest of the conversation —
+    on screen this reads exactly like the agent looping/repeating itself,
+    even though the actual override behavior underneath is correct. Only
+    the LOG is deduplicated (per tool_call_id, this instance's lifetime);
+    the content override itself still runs on every call, as it must."""
+
+    def __init__(self):
+        self._already_logged: set[str] = set()
 
     async def awrap_model_call(self, request, handler):
         messages = request.messages
@@ -768,6 +779,7 @@ class _DropStaleReadsMiddleware(AgentMiddleware):
 
         new_messages = list(messages)
         dropped = 0
+        newly_logged = 0
         for i, m in enumerate(messages):
             if not isinstance(m, ToolMessage):
                 continue
@@ -782,10 +794,14 @@ class _DropStaleReadsMiddleware(AgentMiddleware):
                 tool_call_id=m.tool_call_id, status=m.status,
             )
             dropped += 1
+            if m.tool_call_id not in self._already_logged:
+                self._already_logged.add(m.tool_call_id)
+                newly_logged += 1
 
         if not dropped:
             return await handler(request)
-        if DEBUG:
-            console.print(f"[dim][MCP-AGENT] dropped {dropped} stale read(s), superseded by a later write[/]")
-        log_event("stale_reads_dropped", count=dropped)
+        if newly_logged:
+            if DEBUG:
+                console.print(f"[dim][MCP-AGENT] dropped {newly_logged} stale read(s), superseded by a later write[/]")
+            log_event("stale_reads_dropped", count=newly_logged)
         return await handler(request.override(messages=new_messages))
