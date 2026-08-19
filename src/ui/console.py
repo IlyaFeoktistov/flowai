@@ -56,6 +56,19 @@ def safe_write(text: str) -> None:
     _proxy.write(text)
 
 
+def debug_print(msg: str) -> None:
+    """console.print for a DEBUG-only diagnostic line (compaction/
+    agent_builder/delegate_tool/self_heal/agent.py traces) — always starts
+    on its own fresh line first. These fire independently of the live
+    streamed answer text (written via safe_write, tracked by
+    ui/stream.py's own _last_written_was_newline) — without a leading
+    newline here, a debug line printed while the cursor is still mid-line
+    (an unflushed streamed answer with no trailing newline yet) visually
+    glues onto its tail instead of starting on its own line."""
+    safe_write("\n")
+    console.print(msg)
+
+
 def set_title(text: str) -> None:
     if _proxy._app is None:
         safe_write(f"\033]0;{text}\007")

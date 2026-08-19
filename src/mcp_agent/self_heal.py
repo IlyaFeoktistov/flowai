@@ -27,7 +27,7 @@ import re
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_ollama import ChatOllama
 
-from ui.console import console
+from ui.console import debug_print
 from utils.parsing import parse_json_loose
 from mcp_agent.ask_user_tool import _action_and_detail
 from mcp_agent.config import TOOLS_REQUIRING_APPROVAL
@@ -815,7 +815,7 @@ async def _extract_ask_user_shape(judge_model, answer_text: str) -> dict:
         # извлечение не должно блокировать сам self-heal, просто откатываемся
         # к исходному (менее аккуратному, но рабочему) варианту без вариантов.
         if DEBUG:
-            console.print(f"[dim][MCP-AGENT] ask_user extraction failed: {e}[/]")
+            debug_print(f"[dim][MCP-AGENT] ask_user extraction failed: {e}[/]")
         log_event("ask_user_extraction_failed", error=str(e))
         return {"question": answer_text, "options": [], "recommended": None}
 
@@ -911,6 +911,6 @@ async def _semantic_check(
         verdict = {"relevant": True, "reason": f"semantic check unavailable: {e}"}
 
     if DEBUG:
-        console.print(f"[dim][MCP-AGENT] Semantic verdict: {verdict}[/]")
+        debug_print(f"[dim][MCP-AGENT] Semantic verdict: {verdict}[/]")
     log_event("semantic_verdict", **verdict)
     return verdict

@@ -144,7 +144,7 @@ from mcp_agent.debug_log import log_event
 from mcp_agent.message_utils import _calls_by_id, _tool_text
 from mcp_agent.model_config import DEBUG, OLLAMA_NUM_PREDICT
 from mcp_agent.self_heal import _failed_write_messages
-from ui.console import console
+from ui.console import debug_print
 from utils.parsing import parse_json_loose
 
 _WRITE_TOOL_NAMES = ("write_file", "edit_file")
@@ -540,7 +540,7 @@ async def _summarize_research(judge_model, prefix: list) -> str:
         # fail open — тот же принцип, что в self_heal.py: сломанное сжатие
         # не должно ронять ход, просто в этот раз ход останется несжатым.
         if DEBUG:
-            console.print(f"[dim][MCP-AGENT] research compaction failed: {e}[/]")
+            debug_print(f"[dim][MCP-AGENT] research compaction failed: {e}[/]")
         log_event("research_compaction_failed", error=str(e))
         return ""
 
@@ -631,7 +631,7 @@ class _CompactResearchMiddleware(AgentMiddleware):
         # alone (cache hits included) made this print every round for as
         # long as the SAME already-summarized chunks kept being reapplied.
         if fresh_digest_count and DEBUG:
-            console.print(
+            debug_print(
                 f"[dim][MCP-AGENT] periodic research compaction: "
                 f"{chunk_index} chunk(s) attempted -> {digest_count} "
                 "digest(s)[/]"
@@ -683,7 +683,7 @@ class _CompactResearchMiddleware(AgentMiddleware):
         # compaction in the debug log, even though only `is_fresh` rounds
         # actually paid for a summarization call.
         if is_fresh and DEBUG:
-            console.print(
+            debug_print(
                 f"[dim][MCP-AGENT] compacted history: {len(prefix)} messages "
                 f"-> digest ({len(digest)} chars) + {len(rest)} kept verbatim[/]"
             )
@@ -825,6 +825,6 @@ class _DropStaleReadsMiddleware(AgentMiddleware):
             return await handler(request)
         if newly_logged:
             if DEBUG:
-                console.print(f"[dim][MCP-AGENT] dropped {newly_logged} stale read(s), superseded by a later write[/]")
+                debug_print(f"[dim][MCP-AGENT] dropped {newly_logged} stale read(s), superseded by a later write[/]")
             log_event("stale_reads_dropped", count=newly_logged)
         return await handler(request.override(messages=new_messages))

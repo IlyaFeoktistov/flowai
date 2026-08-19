@@ -46,7 +46,7 @@ from mcp_agent.self_heal import (
 )
 from mcp_agent.tool_wrappers import _dedupe_read_tool
 import settings
-from ui.console import console
+from ui.console import debug_print
 
 # С достаточно большим набором read-only тулов (например 25) модель может
 # не сформировать настоящий structured tool_calls, а слить его текстом в
@@ -130,7 +130,7 @@ class _DelegateNudgeMiddleware(AgentMiddleware):
             return await handler(request)
 
         if DEBUG:
-            console.print(f"[dim][MCP-AGENT] delegate nudge injected after {explore_count} exploration calls[/]")
+            debug_print(f"[dim][MCP-AGENT] delegate nudge injected after {explore_count} exploration calls[/]")
 
         nudge = HumanMessage(content=(
             f"(System note: you've made a lot of read/search calls in this "

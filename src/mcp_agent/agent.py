@@ -74,7 +74,7 @@ from langgraph.errors import GraphRecursionError  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
 import settings  # noqa: E402
-from ui.console import console  # noqa: E402
+from ui.console import debug_print  # noqa: E402
 from mcp_agent import prompts  # noqa: E402
 from mcp_agent.agent_builder import _get_agent  # noqa: E402
 from mcp_agent.ask_user_tool import _ask_decisions  # noqa: E402
@@ -598,7 +598,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     original_messages = payload["messages"]
 
     if DEBUG:
-        console.print(f"[dim][MCP-AGENT] Task: {task_text}[/]")
+        debug_print(f"[dim][MCP-AGENT] Task: {task_text}[/]")
     log_event("task", text=task_text)
 
     # settings.get("self_heal_enabled")=False -> ровно одна попытка: первый
@@ -767,7 +767,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
         await maybe_auto_capture(judge_model, os.getcwd(), task_text, investigated_items, final_text)
 
     if DEBUG:
-        console.print(
+        debug_print(
             f"[dim][MCP-AGENT] Done: tokens_in={tokens_in} tokens_out={tokens_out} "
             f"duration={time.monotonic() - turn_start:.1f}s[/]"
         )

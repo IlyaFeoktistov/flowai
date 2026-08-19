@@ -26,7 +26,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 import expert_streaming
 import settings
 from mcp_agent import ollama_kv_cache
-from ui.console import console
+from ui.console import console, debug_print
 from mcp_agent.ask_user_tool import (
     _AskUserFinalizeMiddleware,
     _AskUserFinalizeNumPredictMiddleware,
@@ -380,7 +380,7 @@ async def _build_tools(repo_path: str | None = None):
     tools_by_name = {t.name: t for t in tools}
 
     if DEBUG:
-        console.print(f"[dim][MCP-AGENT] Loaded {len(tools)} tools: {[t.name for t in tools]}[/]")
+        debug_print(f"[dim][MCP-AGENT] Loaded {len(tools)} tools: {[t.name for t in tools]}[/]")
     log_event("tools_loaded", names=[t.name for t in tools])
 
     return tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, raw_read_file_tool
@@ -1051,7 +1051,7 @@ async def _build_agent(repo_path: str | None = None):
     # Здесь — уже финальный agent_tools, ровно тот список объектов, что идёт
     # в create_agent() ниже.
     if DEBUG:
-        console.print(f"[dim][MCP-AGENT] Model has {len(agent_tools)} tools available this turn: {[t.name for t in agent_tools]}[/]")
+        debug_print(f"[dim][MCP-AGENT] Model has {len(agent_tools)} tools available this turn: {[t.name for t in agent_tools]}[/]")
     log_event("tools_available", names=[t.name for t in agent_tools])
 
     # Last in the list — see compaction.py's module docstring on why it
@@ -1172,7 +1172,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     agent_tools = filter_tools(tool_names | plugin_tool_names, tools)
 
     if DEBUG:
-        console.print(f"[dim][MCP-AGENT] Role '{role}' has {len(agent_tools)} tools available this turn: {[t.name for t in agent_tools]}[/]")
+        debug_print(f"[dim][MCP-AGENT] Role '{role}' has {len(agent_tools)} tools available this turn: {[t.name for t in agent_tools]}[/]")
     log_event("tools_available", role=role, names=[t.name for t in agent_tools])
 
     middleware = HumanInTheLoopMiddleware(

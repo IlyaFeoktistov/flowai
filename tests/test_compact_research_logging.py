@@ -49,7 +49,7 @@ def _force_compaction(monkeypatch):
 @pytest.mark.asyncio
 async def test_first_compaction_of_a_prefix_prints(monkeypatch):
     printed = []
-    monkeypatch.setattr(compaction_module.console, "print", lambda msg: printed.append(msg))
+    monkeypatch.setattr(compaction_module, "debug_print", lambda msg: printed.append(msg))
     middleware = _CompactResearchMiddleware(judge_model=None)
 
     result = await middleware.awrap_model_call(_make_request(_conversation_with_one_write()), _handler)
@@ -62,7 +62,7 @@ async def test_first_compaction_of_a_prefix_prints(monkeypatch):
 @pytest.mark.asyncio
 async def test_reapplying_the_same_cached_digest_does_not_reprint(monkeypatch):
     printed = []
-    monkeypatch.setattr(compaction_module.console, "print", lambda msg: printed.append(msg))
+    monkeypatch.setattr(compaction_module, "debug_print", lambda msg: printed.append(msg))
     middleware = _CompactResearchMiddleware(judge_model=None)
 
     await middleware.awrap_model_call(_make_request(_conversation_with_one_write()), _handler)
@@ -84,7 +84,7 @@ async def test_reapplying_the_same_cached_digest_does_not_reprint(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_genuinely_new_write_moves_the_cut_and_prints_again(monkeypatch):
     printed = []
-    monkeypatch.setattr(compaction_module.console, "print", lambda msg: printed.append(msg))
+    monkeypatch.setattr(compaction_module, "debug_print", lambda msg: printed.append(msg))
     middleware = _CompactResearchMiddleware(judge_model=None)
 
     await middleware.awrap_model_call(_make_request(_conversation_with_one_write()), _handler)
