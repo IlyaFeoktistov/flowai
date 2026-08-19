@@ -305,17 +305,22 @@ class StreamDisplay:
         self._phase_label: str = ""
         self._current_stage: str = ""  # см. _STAGE_LABELS, "" вне нового пайплайна (легаси-агент/casual ещё не начался)
         self._content_lines: int = 0
-        # Статус-точка тула (см. on_event "tool_start"/"tool_end"): индекс
-        # строки в _app._output._lines, которую нужно перезаписать при
-        # завершении тула (только app-режим — в legacy-терминале переписать
-        # уже проскроллившую строку небезопасно, см. комментарий там же).
+        # Статус-точка тула (см. on_event "tool_start"/"tool_end"): 3-й
+        # элемент — зарезервированный при tool_start _ToolFold (ui/app.py:
+        # _OutputControl.reserve_fold, только app-режим — в legacy-терминале
+        # переписать уже проскроллившую строку небезопасно, см. комментарий
+        # там же), который держит АКТУАЛЬНУЮ (может сдвинуться, если раньше
+        # зарегистрированный тул успеет развернуться/свернуться) позицию
+        # строки тула — читать fold.trigger_line, а не кешировать индекс.
         # FIFO, не одиночное значение — модель иногда зовёт несколько тулов
         # одним сообщением (несколько tool_start подряд до их tool_end).
         # 4-й элемент — задача мигания этой конкретной точки (см. _blink_tool_dot);
         # 5-й — форматированный заголовок (см. _format_tool_call), чтобы
         # blink/tool_end переписывали ту же фразу, а не откатывались на
         # голое имя тула.
-        self._pending_tool_calls: list[tuple[str, dict, int | None, asyncio.Task | None, str]] = []
+        # 3rd element is a ui.app._ToolFold or None — not type-hinted as
+        # such to avoid importing ui.app here just for a hint.
+        self._pending_tool_calls: list[tuple] = []
         self._speech = None            # SpeechStreamer, создаётся лениво при первом voice_mode-ходе
         self._speech_buf: str = ""
         self._speech_notified: bool = False
@@ -344,23 +349,22 @@ class StreamDisplay:
     # static "... N more lines" line instead of the full dump.
     _FOLD_PREVIEW = 20
 
-    def _print_foldable_body(
-        self, markup_lines: list[str],
-        trigger_line: int | None = None, trigger_text: str | None = None,
-    ) -> None:
-        """Registers a tool result's body as fully hidden until clicked —
-        NOT a size-based "only truncate the long ones" preview: even a
-        one-line result shows nothing until the user clicks the tool's own
-        "● phrase" line (trigger_line/trigger_text — see on_event's
-        tool_end, which passes the exact line/text it just wrote there).
-        Matches the interaction directly requested: click the tool, see
-        what it did; click again to hide it back. Falls back to the old
-        static, size-capped, always-visible print in legacy-terminal mode
-        (no mouse) or if the caller has no known trigger line (defensive —
-        a tool_end with no matching tool_start)."""
-        if self._app is not None and trigger_line is not None and trigger_text is not None:
+    def _fill_tool_result(self, fold, trigger_text: str, markup_lines: list[str]) -> None:
+        """Supplies a reserved fold's real content once its tool call
+        finishes (ui/app.py:_OutputControl.reserve_fold/fill_fold) — the
+        fold's buffer POSITION was already fixed back at tool_start, not
+        here, specifically so several tools started together each land
+        their result under THEIR OWN header instead of all grouping after
+        whichever header happened to print last (see _ToolFold's own
+        docstring). Even a one-line result stays fully hidden until the
+        user clicks the tool's "● phrase" line; click again to hide it
+        back. Falls back to the old static, size-capped, always-visible
+        print in legacy-terminal mode (no mouse, `fold` is None) or if the
+        caller has no fold at all (defensive — a tool_end with no matching
+        tool_start)."""
+        if fold is not None:
             expanded = [_render_markup(ln) for ln in markup_lines]
-            self._app._output.append_fold([], expanded, trigger_line=trigger_line, trigger_text=trigger_text)
+            self._app._output.fill_fold(fold, trigger_text, expanded)
             return
         total = len(markup_lines)
         if total <= self._FOLD_PREVIEW:
@@ -372,7 +376,7 @@ class StreamDisplay:
             console.print(ln)
         console.print(f"[bright_black]     … ещё {hidden} строк[/]")
 
-    async def _blink_tool_dot(self, line_idx: int, header: str) -> None:
+    async def _blink_tool_dot(self, fold, header: str) -> None:
         """Toggles ONE pending tool's status dot between gray and white
         every _TOOL_DOT_BLINK_S seconds. Real ANSI blink (SGR 5) is avoided
         because whether it actually blinks depends on the terminal/font and
@@ -380,11 +384,19 @@ class StreamDisplay:
         via a redraw loop instead, same pattern as _footer_loop's own spinner
         tick, just targeting one specific historical line instead of the
         fixed footer row. App-mode only — see tool_start's own comment on
-        why legacy-terminal mode can't do this safely."""
+        why legacy-terminal mode can't do this safely.
+
+        Reads `fold.trigger_line` FRESH every tick rather than a line index
+        captured once at tool_start — an EARLIER tool's result being
+        expanded/collapsed while this one is still running shifts every
+        LATER fold's trigger_line (see _OutputControl.toggle_fold); a
+        cached int would silently start rewriting the wrong line the
+        moment that happens."""
         on = False
         try:
             while True:
                 await asyncio.sleep(self._TOOL_DOT_BLINK_S)
+                line_idx = fold.trigger_line
                 if self._app is None or not (0 <= line_idx < len(self._app._output._lines)):
                     return
                 on = not on
@@ -582,16 +594,23 @@ class StreamDisplay:
             # относительный сдвиг курсора не посчитать точно, если между
             # tool_start и tool_end что-то ещё напечаталось, напр. approval-
             # промпт) — там точка остаётся серой все время выполнения.
-            line_idx = None
+            # Reserved BEFORE printing the header (ui/app.py:_OutputControl.
+            # reserve_fold) — fixes this tool's result position by CALL
+            # order now, rather than waiting for tool_end to find out
+            # wherever the buffer happens to end THEN (which, for several
+            # tools started together in one turn, is after every other
+            # already-printed header — see _ToolFold's own docstring).
+            fold = None
             if self._app is not None:
                 line_idx = len(self._app._output._lines) - 1
+                fold = self._app._output.reserve_fold(line_idx)
             header = _format_tool_call(name, args)
             console.print(f"[bright_black]  ●[/] {_escape_markup(header)}")
             blink_task = (
-                asyncio.create_task(self._blink_tool_dot(line_idx, header))
-                if line_idx is not None else None
+                asyncio.create_task(self._blink_tool_dot(fold, header))
+                if fold is not None else None
             )
-            self._pending_tool_calls.append((name, args, line_idx, blink_task, header))
+            self._pending_tool_calls.append((name, args, fold, blink_task, header))
             self._stats["tools_called"] += 1
             self._phase_label = f"{random.choice(_TOOL_RUNNING_PHRASES)}..."
 
@@ -678,29 +697,31 @@ class StreamDisplay:
             # для одного и того же вызова эмитятся строго по порядку, даже
             # если модель запросила несколько тулов одним сообщением.
             pending_args: dict = {}
-            line_idx = None
+            fold = None
             blink_task = None
             header = name
             if self._pending_tool_calls:
-                _, pending_args, line_idx, blink_task, header = self._pending_tool_calls.pop(0)
+                _, pending_args, fold, blink_task, header = self._pending_tool_calls.pop(0)
             if blink_task is not None:
                 blink_task.cancel()
             # Bounds-check: /clear (or any other command) can run concurrently
             # with an in-flight turn (see cli.py's own comment on this) and
             # wipe/shrink _output._lines mid-tool-call — indexing a stale
-            # line_idx from before that would otherwise crash the whole turn
-            # on an IndexError over a purely cosmetic status dot.
+            # line index from before that would otherwise crash the whole
+            # turn on an IndexError over a purely cosmetic status dot.
             trigger_text = None
-            if line_idx is not None and self._app is not None and 0 <= line_idx < len(self._app._output._lines):
+            if fold is not None and self._app is not None and 0 <= fold.trigger_line < len(self._app._output._lines):
                 trigger_text = _render_markup(f"[bold white]  ●[/] {_escape_markup(header)}")
-                self._app._output._lines[line_idx] = trigger_text
+                self._app._output._lines[fold.trigger_line] = trigger_text
                 self._app.invalidate()
+            else:
+                fold = None  # can't attach a result to a fold whose header line is gone
 
             diffish = _format_file_edit_result(name, pending_args, result) if name in _FILE_EDIT_TOOL_NAMES and result else None
             if diffish:
                 diff_header, body = diffish
                 lines = [f"[bright_black]     └ {_escape_markup(diff_header)}[/]", *body]
-                self._print_foldable_body(lines, trigger_line=line_idx, trigger_text=trigger_text)
+                self._fill_tool_result(fold, trigger_text, lines)
             elif result:
                 lines = result.splitlines()
                 if len(lines) > 1:
@@ -712,19 +733,18 @@ class StreamDisplay:
                     # would color red as if removed, exactly like a git
                     # diff, even though this is plain command output with
                     # nothing to do with a diff at all.
-                    self._print_foldable_body(
+                    self._fill_tool_result(
+                        fold, trigger_text,
                         [f"[bright_black]     {_escape_markup(ln)}[/]" for ln in lines],
-                        trigger_line=line_idx, trigger_text=trigger_text,
                     )
                 else:
                     # Legacy-terminal fallback (no click target) keeps the
                     # old 200-char safety cap — nothing there can ever
                     # reveal the rest on demand, unlike the interactive path.
-                    interactive = self._app is not None and line_idx is not None and trigger_text is not None
-                    shown = result if interactive or len(result) <= 200 else result[:200] + "…"
-                    self._print_foldable_body(
+                    shown = result if fold is not None or len(result) <= 200 else result[:200] + "…"
+                    self._fill_tool_result(
+                        fold, trigger_text,
                         [f"[bright_black]     ↳ {_escape_markup(shown)}[/]"],
-                        trigger_line=line_idx, trigger_text=trigger_text,
                     )
             self._phase_label = f"{random.choice(_PROCESSING_PHRASES)}..."
 
