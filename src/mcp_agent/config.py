@@ -174,6 +174,7 @@ def build_mcp_connections(repo_path: str | None = None) -> dict:
         "music": (py, [_own_server("music")]),
         "gen_model": (py, [_own_server("gen_model")]),
         "lsp": (py, [_own_server("lsp")]),
+        "guide": (py, [_own_server("guide")]),
     }
 
     # gen_agent_tools (settings.py) gates the AGENT's (LLM tool-calling)

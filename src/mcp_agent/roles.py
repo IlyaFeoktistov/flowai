@@ -75,6 +75,14 @@ _SHELL_TOOLS = {"bash", "bash_bg", "bash_bg_check", "bash_bg_list"}
 # здесь нет; было ранее вообще не подключено ни к одной роли — исправлено.
 _WEB_TOOLS = {"web_search", "fetch", "analyze_image"}
 
+# flowai_guide (guide_server.py) — static self-description, no side
+# effects, no project/repo dependency at all, so it's unioned in wherever
+# _WEB_TOOLS is rather than gated by any needs_project/needs_shell flag —
+# a user asking "what are you"/"what can you do" mid-investigation
+# shouldn't need a whole extra round just because the role's tool set
+# didn't happen to include it.
+_META_TOOLS = {"flowai_guide"}
+
 # Пишущие тулы. write_file/edit_file/delete_path — file_ops_server.py,
 # "workspace_write" в его TOOL_PERMISSIONS. Никакого отдельного
 # move/create_directory: write_file создаёт недостающие родительские
@@ -141,7 +149,7 @@ def investigator_tools() -> set[str]:
     остаться в casual; needs_project влияет на _investigator_scope_note и
     is_final_answer — см. pipeline.py), просто больше не параметры этой
     функции."""
-    return _apply_optimized_filter(set(_WEB_TOOLS) | set(_SHELL_TOOLS) | _project_read_tools(has_shell=True))
+    return _apply_optimized_filter(set(_WEB_TOOLS) | _META_TOOLS | set(_SHELL_TOOLS) | _project_read_tools(has_shell=True))
 
 
 def planner_tools() -> set[str]:
@@ -168,7 +176,7 @@ def executor_tools(needs_project: bool) -> set[str]:
     запускает verifier после coder_role независимо от того, "coder" это или
     "quick_fix") — самопроверка исполнителя противоречит смыслу отдельной
     непредвзятой проверки."""
-    names = set(_WEB_TOOLS) | _WRITE_TOOLS
+    names = set(_WEB_TOOLS) | _META_TOOLS | _WRITE_TOOLS
     if needs_project:
         names |= _project_read_tools(has_shell=False)
     return _apply_optimized_filter(names)
@@ -184,7 +192,7 @@ def coder_tools() -> set[str]:
     вообще есть пронумерованный plan_steps-чек-лист над футером (см.
     pipeline.py/ui/app.py) — Planner/Analyzer/Verifier/quick_fix его не
     рисуют, им нечего отмечать текущим."""
-    raw = _project_read_tools(has_shell=False) | _WEB_TOOLS | _WRITE_TOOLS
+    raw = _project_read_tools(has_shell=False) | _WEB_TOOLS | _META_TOOLS | _WRITE_TOOLS
     return _apply_optimized_filter(raw) | {"mark_plan_step_current"}
 
 
@@ -194,7 +202,7 @@ def verifier_tools() -> set[str]:
     реально что-то запустить (тесты/линтер), независимо от того, что было
     needs_shell у САМОГО запроса. _THIN_WRAPPER_TOOLS вычитается — bash
     здесь безусловно есть, так что реальной потери возможностей нет."""
-    return _apply_optimized_filter(_project_read_tools(has_shell=True) | _WEB_TOOLS | _SHELL_TOOLS)
+    return _apply_optimized_filter(_project_read_tools(has_shell=True) | _WEB_TOOLS | _META_TOOLS | _SHELL_TOOLS)
 
 
 def filter_tools(names: set[str], tools: list) -> list:
@@ -224,7 +232,7 @@ def approval_tools(names: set[str]) -> list[str]:
 # shell") — этот набор держит то утверждение верным, никакого
 # поведенческого изменения тут нет, в отличие от investigator_tools выше.
 # _THIN_WRAPPER_TOOLS НЕ вычитаются — без bash замены им тут нет.
-LEGACY_INVESTIGATION_TOOL_NAMES = set(_WEB_TOOLS) | _PROJECT_READ_TOOLS
+LEGACY_INVESTIGATION_TOOL_NAMES = set(_WEB_TOOLS) | _META_TOOLS | _PROJECT_READ_TOOLS
 
 ROLE_RECURSION_LIMIT: dict[str, int] = {
     "analyzer": ANALYZER_RECURSION_LIMIT,
