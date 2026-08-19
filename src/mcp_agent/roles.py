@@ -131,8 +131,8 @@ def investigator_tools() -> set[str]:
     после, так что самому иметь bash тут безопасно и нужно.
 
     _SHELL_TOOLS (bash) и _PROJECT_READ_TOOLS — ОБА БЕЗУСЛОВНЫ, не
-    зависят от needs_shell/needs_project. Живой инцидент (сначала для
-    needs_shell, потом для needs_project — тот же класс бага дважды):
+    зависят от needs_shell/needs_project — тот же класс проблемы
+    проявлялся и для needs_shell, и для needs_project по отдельности:
     needs_shell/needs_project — это классификация РОУТЕРОМ ДО единого
     вызова тула, та же квантованная модель, что и основной чат, ошибается
     — investigator с needs_project=false, но реально нуждавшийся в
@@ -167,11 +167,11 @@ def executor_tools(needs_project: bool) -> set[str]:
     всегда включает _PROJECT_READ_TOOLS.
 
     БЕЗ bash — в отличие от investigator_tools, не наследует
-    _SHELL_TOOLS. Живой баг: quick_fix унаследовал безусловный bash от
-    investigator_tools (эта функция раньше звалась изнутри неё), а
-    собственный промпт (_quick_fix_system_prompt) всё ещё прямо говорил "you
-    do NOT have bash" — тот же класс несоответствия схема/промпт, что
-    уже чинили для Analyzer. Смысловая причина держать его БЕЗ shell та же,
+    _SHELL_TOOLS. Раньше эта функция вызывалась изнутри investigator_tools
+    и потому безусловно наследовала bash оттуда, хотя собственный промпт
+    (_quick_fix_system_prompt) прямо говорил "you do NOT have bash" — тот
+    же класс несоответствия схема/промпт, что уже чинили для Analyzer.
+    Смысловая причина держать его БЕЗ shell та же,
     что у coder_tools(): после quick_fix ВСЕГДА идёт Verifier (pipeline.py
     запускает verifier после coder_role независимо от того, "coder" это или
     "quick_fix") — самопроверка исполнителя противоречит смыслу отдельной

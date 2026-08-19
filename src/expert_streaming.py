@@ -300,9 +300,9 @@ _proc_config: tuple[str, int, bool] | None = None
 
 # agent_builder._build_chat_model calls ensure_running TWICE per agent build
 # (main model, then judge_model — same model_tag) — without this, a failure
-# meant spawning the ~18 GB model process twice in a row and printing the
-# same warning twice (live bug report: exact duplicate warning line back to
-# back). Short-lived negative cache: a failure for the same model_tag within
+# means spawning the ~18 GB model process twice in a row and printing the
+# same warning twice, back to back. Short-lived negative cache: a failure
+# for the same model_tag within
 # _FAILURE_COOLDOWN_S returns the SAME (False, msg) instantly instead of
 # repeating a doomed multi-second startup attempt. Not cached on success —
 # is_running()/_proc_config above already short-circuits that case.
@@ -429,13 +429,13 @@ def ensure_running(
     "порт занят" ниже и откатывался на обычный Ollama-путь, на котором эта
     архитектура физически не работает.
 
-    Живой прогон (2026-08-11, эта же машина, 6 GB VRAM): Ollama сама
-    держит qwen3-coder:30b резидентной и перезагружает её по своему
-    keep_alive независимо от этого модуля — второй процесс (наш) пытался
-    стартовать, пока Ollama-инстанс всё ещё занимал ~4 GB VRAM, и падал
-    сразу же (autofit не находит места). Обе копии одной и той же модели
-    в 6 GB одновременно попросту не помещаются — выгружаем Ollama-копию
-    ПЕРЕД стартом, а не полагаемся на то, что вызывающий код сделал это сам."""
+    Ollama сама держит модель резидентной и перезагружает её по своему
+    keep_alive независимо от этого модуля — если наш процесс пытается
+    стартовать, пока Ollama-инстанс всё ещё занимает VRAM под ту же
+    модель, он падает сразу же (autofit не находит места) на GPU с
+    ограниченным объёмом памяти, где обе копии одновременно попросту не
+    помещаются. Выгружаем Ollama-копию ПЕРЕД стартом, а не полагаемся на
+    то, что вызывающий код сделал это сам."""
     global _proc, _proc_config, _last_failure
 
     if not is_built():
@@ -459,7 +459,7 @@ def ensure_running(
         _last_failure = (model_tag, time.monotonic(), msg)
         return False, msg
 
-    # Live bug (user report): a llama-server this module started earlier can
+    # A llama-server this module started earlier can
     # outlive a crashed/restarted flowai process (Popen below has no
     # start_new_session, but that's not even the point — a FRESH flowai run
     # has its own empty _proc/_proc_config regardless, no memory of any
@@ -521,8 +521,8 @@ def ensure_running(
         # слота отъедали VRAM/RAM, которые autofit мог бы отдать под hot-store
         # экспертов вместо этого.
         "-np", "1",
-        # НЕ передавать -ngl здесь — живой прогон (2026-08-11, эта же
-        # машина): с явным "-ngl 999" рядом autofit безусловно бросает
+        # НЕ передавать -ngl здесь — с явным "-ngl 999" рядом autofit
+        # безусловно бросает
         # "-ehs -1 autofit aborted (explicit -ngl/-ncmoe or fit error);
         # expert cache is OFF" — -fit (авто-подбор -ngl под свободную VRAM,
         # common/common.h: fit_params=true) обязан остаться единственным,

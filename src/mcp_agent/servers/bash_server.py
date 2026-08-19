@@ -15,8 +15,7 @@ bash_bg/bash_bg_check/bash_bg_list — то же самое, но не
 уложиться в минуту, либо получить "command timed out" на честно работающей
 команде.
 
-Живой баг (найден по докладу пользователя "кажется, бекграунд не работает"):
-раньше состояние job'ов держалось в module-level dict (_BG_JOBS) и сам
+Раньше состояние job'ов держалось в module-level dict (_BG_JOBS) и сам
 процесс запускался через asyncio.create_subprocess_shell +
 asyncio.create_task — ровно тот же приём, что и у обычного bash, просто
 без ожидания. Расчёт был на то, что "MCP-сервер поднимается один раз на
@@ -115,9 +114,9 @@ _JOBS_DIR.mkdir(parents=True, exist_ok=True)
 _TRUNCATE_HEAD_RATIO = 0.6
 
 
-# Живой прогон (mail-server, 20260707-163337-11afd268): `php -l` on a file
-# with a genuine syntax error exits non-zero AND prints its "Errors parsing
-# FILE / PHP Parse error: ..." message to STDOUT (not stderr) — the old
+# `php -l` on a file with a genuine syntax error exits non-zero AND
+# prints its "Errors parsing FILE / PHP Parse error: ..." message to
+# STDOUT (not stderr) — the old
 # fallback `return bool(stdout.strip())` treated "printed anything to
 # stdout" as proof of success for ANY command, so this real, non-zero-exit
 # failure got returned as if it succeeded (no "Error (exit N):" prefix at
@@ -174,13 +173,13 @@ async def bash(command: str, timeout: int = TIMEOUT) -> str:
         # stdin=DEVNULL — БЕЗ этого create_subprocess_shell оставляет
         # дочернему процессу stdin ЭТОГО (bash_server'а) процесса как
         # есть, то есть настоящий терминальный stdin (stdio-транспорт MCP,
-        # см. модульный docstring). Живой инцидент (20260812): скомпилированный
-        # Go-бинарник читал ввод через bufio.NewReader(os.Stdin) — bash
-        # его честно запустил и завис на 60-секундном таймауте... кроме
-        # того, что таймаут не успел сработать (родительский процесс
-        # оборвался раньше), и осиротевший бинарник остался висеть НАПРЯМУЮ
-        # на реальном терминале пользователя (pts/3), блокируя его вплоть до
-        # ручного kill -9. С DEVNULL любое чтение stdin получает
+        # см. модульный docstring). Без этого команда, читающая stdin
+        # (например скомпилированный бинарник с bufio.NewReader(os.Stdin))
+        # зависает на реальном терминальном вводе на весь таймаут, а если
+        # родительский процесс оборвётся раньше, чем таймаут сработает,
+        # осиротевший процесс останется висеть НАПРЯМУЮ на терминале
+        # пользователя, блокируя его вплоть до ручного kill -9. С DEVNULL
+        # любое чтение stdin получает
         # МГНОВЕННЫЙ EOF вместо зависания — интерактивная программа тут же
         # падает с понятной ошибкой (модель это видит и может поправить
         # программу или передать вход через pipe/`<file`), а не блокируется
@@ -204,24 +203,21 @@ async def bash(command: str, timeout: int = TIMEOUT) -> str:
             kill_process_tree(proc.pid)
 
     # Отдельная задача-таймер + kill_process_tree, а НЕ asyncio.wait_for(proc.
-    # communicate(), timeout=...) + proc.kill() (как было раньше) — живой
-    # инцидент (20260812, тот же паттерн на "!команда" в
-    # cli.py:_run_shell_command): таймаут там ни разу не сработал — процесс
-    # провисел 269с при коде 60с, и остались живы ОБА процесса (sh-обёртка и
-    # её потомок), хотя proc.kill() шлёт SIGKILL, который нельзя ни поймать,
-    # ни проигнорировать — если бы он реально вызвался, wrapper был бы
-    # мёртв. Точная причина не установлена (в этом окружении нет живого
-    # питон-дебаггера, чтобы посмотреть, где именно терялась отмена
-    # wait_for — изолированный повтор ровно этого паттерна сработал
-    # штатно), но полагаться на то, что отмена communicate() надёжно
-    # достаёт до заблокированного чтения из pipe, — само по себе хрупкое
-    # допущение. Независимый таймер ничего не отменяет, просто убивает по
-    # будильнику.
+    # communicate(), timeout=...) + proc.kill() (как было раньше): на
+    # практике этот таймаут ненадёжен — наблюдался случай, когда процесс
+    # провисел ЗАМЕТНО дольше заданного таймаута, и остались живы ОБА
+    # процесса (sh-обёртка и её потомок), хотя proc.kill() шлёт SIGKILL,
+    # который нельзя ни поймать, ни проигнорировать — если бы он реально
+    # вызвался, wrapper был бы мёртв. Точная причина не установлена (где
+    # именно терялась отмена wait_for — не воспроизводится стабильно), но
+    # полагаться на то, что отмена communicate() надёжно достаёт до
+    # заблокированного чтения из pipe, — само по себе хрупкое допущение.
+    # Независимый таймер ничего не отменяет, просто убивает по будильнику.
     #
-    # kill_process_tree, а не голый proc.kill(), — отдельная находка при
-    # тестировании этого фикса: /bin/sh -c форкает РЕАЛЬНОГО потомка даже
-    # для одиночной команды без ";"/пайпов (живой тест: "sleep 5" — уже два
-    # разных PID, не exec-замена). Потомок наследует те же файловые
+    # kill_process_tree, а не голый proc.kill(): /bin/sh -c форкает
+    # РЕАЛЬНОГО потомка даже для одиночной команды без ";"/пайпов (даже
+    # "sleep 5" — это уже два разных PID, не exec-замена). Потомок
+    # наследует те же файловые
     # дескрипторы stdout/stderr pipe, что и sh-обёртка — kill() только
     # обёртки оставляет его сиротой, всё ещё держащим pipe открытым, и
     # proc.communicate() не увидит EOF, пока НЕ ЗАКРОЮТСЯ ВСЕ держатели
@@ -245,18 +241,17 @@ async def bash(command: str, timeout: int = TIMEOUT) -> str:
     output = "\n".join(x for x in [stdout, stderr] if x)
 
     if timed_out:
-        # Live run: a repo-wide `find . -exec php -l {} \;` (no path/name
-        # narrowing) hit this timeout, and the model retried essentially
-        # the SAME broad scan again later in the same turn instead of
-        # narrowing it — the message now says outright not to repeat it.
+        # A repo-wide, unscoped scan (e.g. `find . -exec php -l {} \;` with
+        # no path/name narrowing) can hit this timeout and get retried as
+        # essentially the SAME broad scan instead of being narrowed — the
+        # message now says outright not to repeat it.
         #
         # Tried (and reverted): killing the whole process group via
         # start_new_session=True + os.killpg() to also clean up children a
         # shell pipeline/`find -exec` spawns, since proc.kill() only kills
-        # the `/bin/sh -c` wrapper. Verified live in this sandboxed
-        # environment that killpg's blast radius wasn't reliably scoped to
-        # just this subprocess's own tree — too risky here. Left as plain
-        # proc.kill() (only the immediate wrapper) — an orphaned grandchild
+        # the `/bin/sh -c` wrapper. killpg's blast radius wasn't reliably
+        # scoped to just this subprocess's own tree — too risky here. Left
+        # as plain proc.kill() (only the immediate wrapper) — an orphaned grandchild
         # process is a smaller problem than accidentally signaling
         # processes outside this tool call.
         #

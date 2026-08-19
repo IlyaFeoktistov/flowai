@@ -54,11 +54,11 @@ def _find_call_by_id(messages: list, tool_call_id: str) -> AIMessage | None:
     return None
 
 
-# Живой прогон (mail-server, 20260707-155842-8b900098): MCP tool results
-# normally come back as a LIST of content blocks ([{'type': 'text', 'text':
-# '...'}, ...]), not a plain string — langchain_mcp_adapters' standard shape
-# for every file_ops/bash tool result. str() on that
-# list stringifies the whole Python structure and, critically, ESCAPES any
+# MCP tool results normally come back as a LIST of content blocks
+# ([{'type': 'text', 'text': '...'}, ...]), not a plain string —
+# langchain_mcp_adapters' standard shape for every file_ops/bash tool
+# result. str() on that list stringifies the whole Python structure and,
+# critically, ESCAPES any
 # real newlines inside the text into literal two-character '\n' sequences.
 # That silently broke several things that assumed m.content was already
 # clean text:
@@ -142,13 +142,12 @@ def _dedupe_identical_tool_results(messages: list) -> list:
                     # — unlike the older copies above (already collapsed, the
                     # model has seen them), THIS one is what the model is about
                     # to reason from next, so the nudge has to land here, not on
-                    # a copy that gets replaced. Live incident (2026-08-18):
-                    # Verifier called `go get pkg@<bogus-pseudo-version>` 5 times
-                    # in a row, ~10s apart, getting the exact same "invalid
-                    # version" error every time — no state changed between
-                    # calls, so blind repetition could never have produced a
-                    # different result, and the run never reached a verdict
-                    # (looked like a hang). _dedupe_read_tool already nudges
+                    # a copy that gets replaced. Without this, a role that
+                    # repeats an identical failing side-effect call (e.g.
+                    # `go get pkg@<bogus-pseudo-version>`) with no state change
+                    # between calls can loop indefinitely, getting the exact
+                    # same error every time and never reaching a verdict
+                    # (looks like a hang). _dedupe_read_tool already nudges
                     # this way for read_file's offset/limit hunting; side-effect
                     # tools like bash have no such backstop otherwise, since
                     # they're never blocked from re-running (state legitimately

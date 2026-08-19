@@ -332,14 +332,12 @@ def _needs_compaction(messages: list, system_message=None, tools=None) -> bool:
     ChatOllama for this session's chat/judge model (agent_builder.py:
     _build_chat_model) — NOT model_config.OLLAMA_NUM_CTX. That constant is
     read once at import and frozen; num_ctx is a runtime-editable setting
-    (see its own docstring in settings.py) that can sit well below it. Live
-    run (20260812, XOR-in-Go task): num_ctx had been lowered to 16384
-    (leftover from an expert_streaming_enabled test) while this gate still
-    compared against OLLAMA_NUM_CTX=65536 — the threshold ended up at
-    32768, TWICE the model's actual window, so compaction never fired for
-    the whole ~14-minute run and the model eventually lost track of the
-    file (hallucinated a expected_first_hash that appears nowhere in its
-    own read history). Compaction's whole job is protecting THIS call's
+    (see its own docstring in settings.py) that can sit well below it. If
+    num_ctx is lowered (e.g. for testing) while this gate still compares
+    against the frozen OLLAMA_NUM_CTX=65536, the threshold can end up at
+    twice the model's actual window, so compaction never fires for the
+    whole turn and the model can eventually lose track of earlier content
+    it never actually re-read. Compaction's whole job is protecting THIS call's
     real context, so it must measure against the same number that call
     actually uses.
 
@@ -510,13 +508,13 @@ async def _summarize_research(judge_model, prefix: list) -> str:
         # options={} is Ollama-specific (ChatOllama._chat_params merges it
         # into params["options"]) — judge_model is the same _build_chat_model
         # fork as the main model (agent_builder.py), so with settings.
-        # expert_streaming_enabled it's a ChatOpenAI, not a ChatOllama. Live
-        # bug (2026-08-14, glm-4.7-flash/expert-streaming): options={...} on
-        # ChatOpenAI.ainvoke fell straight through to AsyncCompletions.
-        # create(), which doesn't know that param — "unexpected keyword
-        # argument 'options'" (TypeError, caught below, so compaction just
-        # silently never worked rather than crashing the turn) — same class
-        # of bug already fixed in self_heal.py's _extract_ask_user_shape,
+        # expert_streaming_enabled it's a ChatOpenAI, not a ChatOllama.
+        # options={...} on ChatOpenAI.ainvoke falls straight through to
+        # AsyncCompletions.create(), which doesn't know that param —
+        # "unexpected keyword argument 'options'" (TypeError, caught below,
+        # so compaction just silently never worked rather than crashing
+        # the turn) — same class of bug already fixed in self_heal.py's
+        # _extract_ask_user_shape,
         # same fix here. ChatOpenAI uses max_tokens directly (not via
         # options{}) and has no per-call num_ctx equivalent — expert-
         # streaming's context is fixed at process start (-c, see
@@ -640,7 +638,7 @@ class _CompactResearchMiddleware(AgentMiddleware):
         if not _needs_compaction(messages, request.system_message, request.tools):
             # Below threshold — nothing to gain from summarizing yet, and
             # every digest is a chance to lose something the model still
-            # needs verbatim (see module docstring, live runs #1/#3). Skip
+            # needs verbatim (see module docstring). Skip
             # BOTH paths below, not just the write-triggered one — a short
             # pre-write exploration doesn't need periodic chunking either.
             return await handler(request)

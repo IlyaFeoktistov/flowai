@@ -197,32 +197,29 @@ JUDGE_NUM_PREDICT = int(os.getenv("JUDGE_NUM_PREDICT", "200"))
 # router.py:answer_casual — не тот же лимит, что OLLAMA_NUM_PREDICT (тот
 # тюнингован под задачи с тулами — целиком переписанный файл, разбор
 # многофайлового диффа, где реально нужны тысячи токенов связного текста).
-# Живой прогон (2026-08-14, glm-4.7-flash:q4_K_M/expert-streaming): простой
-# вопрос без единого тула ("напиши первые строки Анны Карениной") с
-# max_tokens=4096 свалился в несвязный бардак на несколько тысяч токенов —
-# рефлексия вслух, дублирующиеся абзацы, наконец finish_reason="length"
-# (съеден весь бюджет, ни разу не остановившись сама). Воспроизведено
-# сырым curl'ом прямо к backend'у, в обход всего приложения — с тем же
-# сэмплингом, но max_tokens=300-400, тот же вопрос давал чистый короткий
-# ответ каждый раз: модели просто не хватало длины добраться до точки
-# срыва. Короткий лимит здесь не лечит саму склонность к срыву (см. живой
-# прогон в _CASUAL_HISTORY_WINDOW/router.py:answer_casual для полного
-# разбора), а ограничивает урон — если она всё же сорвётся, это будет
-# несколько сотен токенов мусора, а не 4096.
+# Простой вопрос без единого тула (например "напиши первые строки Анны
+# Карениной") с max_tokens=4096 может свалиться в несвязный бардак на
+# несколько тысяч токенов — рефлексия вслух, дублирующиеся абзацы,
+# наконец finish_reason="length" (съеден весь бюджет, ни разу не
+# остановившись сама). Воспроизведено сырым curl'ом прямо к backend'у, в
+# обход всего приложения — с тем же сэмплингом, но max_tokens=300-400, тот
+# же вопрос давал чистый короткий ответ каждый раз: модели просто не
+# хватало длины добраться до точки срыва. Короткий лимит здесь не лечит
+# саму склонность к срыву (см. разбор в _CASUAL_HISTORY_WINDOW/
+# router.py:answer_casual), а ограничивает урон — если она всё же
+# сорвётся, это будет несколько сотен токенов мусора, а не 4096.
 CASUAL_NUM_PREDICT = int(os.getenv("CASUAL_NUM_PREDICT", "1024"))
 
 # ask_user_tool.py:_AskUserFinalizeNumPredictMiddleware — Planner's turn
 # right after ask_user returns must only RESTATE the plan it already put
 # in the ask_user question (prompts.py's planner prompt), never derive a
 # new one — it's plain text, not tool-call args, so it never needs
-# Coder-length output (full file rewrites). Live incident (2026-08-19,
-# glm-4.7-flash:q4_K_M/expert-streaming): instead of restating, Planner
-# re-derived a new plan from scratch and rambled for ~1900 tokens/~2min
-# with OLLAMA_NUM_PREDICT's full 4096 budget, until the user killed the
-# run thinking it had hung (same "small model + big budget = incoherent
-# runaway" failure CASUAL_NUM_PREDICT's docstring above already documents
-# for router.py:answer_casual, verified there via raw curl against the
-# backend). Same fix, same caveat: this limits the damage (worst case a
+# Coder-length output (full file rewrites). Instead of restating, Planner
+# can re-derive a new plan from scratch and ramble for close to
+# OLLAMA_NUM_PREDICT's full 4096-token (~2min) budget instead of stopping
+# — same "small model + big budget = incoherent runaway" failure
+# CASUAL_NUM_PREDICT's docstring above already documents for
+# router.py:answer_casual. Same fix, same caveat: this limits the damage (worst case a
 # few hundred tokens more, not 4096) — it does not cure the re-deriving
 # itself, see the middleware's own docstring for the mechanical guard
 # that targets that part.
@@ -234,12 +231,11 @@ ASK_USER_FINALIZE_NUM_PREDICT = int(os.getenv("ASK_USER_FINALIZE_NUM_PREDICT", "
 # десятки минут вместо честной быстрой ошибки. LangGraph сам считает
 # каждый шаг графа (не только tool-calls) — берём с запасом, но конечным.
 #
-# Живой прогон (mail-server, 20260707-185843-99d14cf5): 100 шагов графа
-# ушло всего на ~34 РЕАЛЬНЫХ вызова тулов (self_heal добавляет судью на
-# каждый круг, plus узлы мидлвари — каждый вызов тула стоит НЕСКОЛЬКО шагов
-# графа, не один) — и это не было зацикливанием: агент честно копал одну
-# цепочку (Job -> Service -> Repository -> Persister -> UnitStarter) и
-# остановился в шаге от, похоже, реального ответа. 150 — не решает саму
+# 100 шагов графа может уйти всего на ~34 РЕАЛЬНЫХ вызова тулов
+# (self_heal добавляет судью на каждый круг, plus узлы мидлвари — каждый
+# вызов тула стоит НЕСКОЛЬКО шагов графа, не один), и это не зацикливание:
+# агент может честно копать одну длинную цепочку зависимостей и
+# остановиться в шаге от реального ответа. 150 — не решает саму
 # причину (дорогие угадывающие search_code-паттерны, thinking-латентность у
 # Qwen3), но даёт немного больше воздуха на действительно многофайловые
 # расследования; см. lsp (быстрее находит нужное, чем угадывание regex) и
@@ -265,20 +261,20 @@ DELEGATE_RECURSION_LIMIT = 60
 # звать read/search параллельно много раз за раунд) — ближе к основному
 # RECURSION_LIMIT, чем к узкому DELEGATE_RECURSION_LIMIT.
 #
-# Живой прогон (mail-server, реальная многофайловая PHP-задача): 100 не
-# хватило дважды подряд — но с delegate, убранным из тулов Analyzer'а (см.
-# agent_builder.py:_build_role_agent), весь бюджет теперь тратится на
-# ОДИН прозрачный контекст вместо того, чтобы часть его пряталась в
-# непрозрачном вложенном вызове. Подняли до основного RECURSION_LIMIT.
+# На реальной многофайловой задаче 100 может не хватить — но с delegate,
+# убранным из тулов Analyzer'а (см. agent_builder.py:_build_role_agent),
+# весь бюджет тратится на ОДИН прозрачный контекст вместо того, чтобы
+# часть его пряталась в непрозрачном вложенном вызове. Поднято до
+# основного RECURSION_LIMIT.
 ANALYZER_RECURSION_LIMIT = 150
 # Planner не пишет код и не гоняет bash — только читает при необходимости
 # уточнить, строит план и должен закончиться ask_user.
 #
-# Живой прогон (mail-server, реальная многофайловая PHP-задача): при 60
-# Planner дважды подряд исчерпал бюджет — во ВТОРОЙ попытке перечитывал ТЕ
-# ЖЕ самые диапазоны строк, что и в первой (ретрай-дайджест не спас, см.
-# также фикс в agent.py:_summarize_round — там же теперь диапазоны строк, а
-# не только пути). Поднято до ANALYZER_RECURSION_LIMIT: если Analyzer
+# При 60 Planner может исчерпать бюджет и на РЕТРАЕ перечитывать те же
+# самые диапазоны строк, что и в первой попытке (ретрай-дайджест сам по
+# себе не спасает, см. также фикс в agent.py:_summarize_round — там же
+# теперь диапазоны строк, а не только пути). Поднято до
+# ANALYZER_RECURSION_LIMIT: если Analyzer
 # передаёт сниппеты кода (см. prompts.py:_analyzer_system_prompt), Planner
 # обычно не должен доходить до потолка вообще, но узкий 60 на реальной
 # задаче резал раньше, чем модель успевала свести план к ask_user.
@@ -318,18 +314,17 @@ CODER_VERIFIER_MAX_ROUNDS = 2
 
 
 # Максимальный размер ОДНОГО tool-результата, который отдаём модели.
-# Живой прогон: модель сама вызвала git_diff_unstaged(context_lines=500) на
-# файле в ~516 строк — это фактически весь файл целиком в обе стороны диффа.
-# При num_ctx=8192 результат забил контекст, и модель вместо ответа сорвалась
-# в повторяющуюся тарабарщину (зацикленные import-строки). Ни один тул нигде
-# не ограничен по объёму вывода — тот же сценарий с тем же исходом может дать
-# read_file на большом файле или find_files_by_name без лимита. Обрезаем
-# ЛЮБОЙ tool-результат на входе в модель, а не точечно один параметр одного
-# тула.
+# Например, git_diff_unstaged(context_lines=500) на файле в ~516 строк
+# фактически возвращает весь файл целиком в обе стороны диффа. При
+# num_ctx=8192 такой результат забивает контекст, и модель вместо ответа
+# может сорваться в повторяющуюся тарабарщину (зацикленные import-строки).
+# Ни один тул нигде не ограничен по объёму вывода — тот же сценарий с тем
+# же исходом может дать read_file на большом файле или
+# find_files_by_name без лимита. Обрезаем ЛЮБОЙ tool-результат на входе в
+# модель, а не точечно один параметр одного тула.
 #
-# Поднято с 6000 до 10000 после живого прогона на реальной многофайловой
-# правке (8 файлов): git_diff_staged/git_diff_unstaged/git_diff В ПРИНЦИПЕ не
-# умеют скоупиться на один файл (их args_schema — только repo_path и
+# Поднято с 6000 до 10000: git_diff_staged/git_diff_unstaged/git_diff В
+# ПРИНЦИПЕ не умеют скоупиться на один файл (их args_schema — только repo_path и
 # context_lines, см. проверку схемы) — единственный рычаг у модели это
 # context_lines, а увеличение context_lines делает вывод БОЛЬШЕ, а не меньше.
 # При дефолтном контексте даже один (не самый большой) изменённый файл давал

@@ -269,10 +269,10 @@ async def _get_casual_agent():
             model_tag=current_model,
             # CASUAL_NUM_PREDICT (not the general OLLAMA_NUM_PREDICT=4096, tuned
             # for tool-using roles that write whole files/diffs) — see its own
-            # docstring in model_config.py for the live run this bounds: given
-            # enough tokens, this model can spiral into incoherent rambling
-            # with no natural stop; a shorter cap doesn't fix the tendency, it
-            # just bounds how much garbage one bad turn can produce.
+            # docstring in model_config.py: given enough tokens, this model
+            # can spiral into incoherent rambling with no natural stop; a
+            # shorter cap doesn't fix the tendency, it just bounds how much
+            # garbage one bad turn can produce.
             num_predict=CASUAL_NUM_PREDICT,
             reasoning=settings.get("show_thinking"),
             num_keep=4,

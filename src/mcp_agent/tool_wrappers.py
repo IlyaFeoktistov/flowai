@@ -109,13 +109,12 @@ def _cap_tool_output(tool: BaseTool, max_chars: int) -> BaseTool:
 
 
 def _dedupe_read_tool(tool: BaseTool, read_history: dict) -> BaseTool:
-    """read_file's offset/limit window means the model can (and on live
-    runs, does) hunt for a spot in a large file with a series of
-    overlapping windows (offset=0/limit=50, offset=30/limit=50, ...) instead
+    """read_file's offset/limit window means the model can end up hunting
+    for a spot in a large file with a series of overlapping windows
+    (offset=0/limit=50, offset=30/limit=50, ...) instead
     of reading once with intent — each one re-drags already-seen content
-    into context. Live run (predecessor to this tool, same underlying
-    behavior): 5 such reads of one 1055-line file in a single turn ballooned
-    the final round to 531 394 input tokens. read_history — a plain
+    into context; 5 such reads of one 1055-line file in a single turn can
+    balloon the final round to 500k+ input tokens. read_history — a plain
     {path: [key, ...]} dict, created in _build_agent and cleared at the
     start of every stream_chat (a fresh thread — the model doesn't remember
     past turns, so dedup across a turn boundary would be wrong).
@@ -223,10 +222,10 @@ def _wrap_read_invalidation(tool: BaseTool, read_history: dict) -> BaseTool:
 
 # Дописывается к description write_file/edit_file, чтобы модель видела
 # требование проверки в момент, когда решает вызвать тул, а не только в
-# системном промпте (~3000 токенов, где такой же пункт регулярно терялся —
-# живой прогон: попытка 2/3 записала файл и ни разу не вызвала bash,
-# retry-цикл поймал это детерминированной проверкой (_wrote_code без
-# _has_execution_evidence) и сжёг на этом целую попытку).
+# системном промпте (~3000 токенов, где такой же пункт регулярно
+# терялся — модель могла записать файл и ни разу не вызвать bash;
+# retry-цикл ловит это детерминированной проверкой (_wrote_code без
+# _has_execution_evidence), сжигая на этом целую попытку).
 _VERIFY_REMINDER = (
     " After this succeeds, verifying it actually works (running it, its "
     "tests, or at minimum confirming it imports/parses) via bash is "
@@ -265,10 +264,9 @@ def _add_verify_reminder(tool: BaseTool) -> BaseTool:
 
 
 # Дописывается к description grep_search (file_ops_server.py): без
-# case_insensitive=True поиск матчит регистр буквально — живой опыт
-# search_code (его предшественника) показал, что модель иногда ожидает
-# case-insensitive по умолчанию и молча получает пустой результат вместо
-# ошибки, объясняющей почему.
+# case_insensitive=True поиск матчит регистр буквально — модель иногда
+# ожидает case-insensitive по умолчанию и молча получает пустой результат
+# вместо ошибки, объясняющей почему.
 _REGEX_WARNING = (
     " NOTE: matching is case-SENSITIVE by default — pass "
     "case_insensitive=true if the exact case isn't known/relevant. Pattern "
@@ -288,9 +286,9 @@ def _bind_constant_args(tool: BaseTool, constants: dict) -> BaseTool:
     значение которых известно коду заранее и не меняется в рамках сессии
     (например repo_path для тула, чей процесс уже запущен с этим путём).
     Модели незачем вообще его видеть — тогда ошибиться в нём физически
-    невозможно, а не просто "менее вероятно" (живой пример такого бага:
-    модель дважды подряд подставляла плейсхолдер вместо реального пути,
-    когда аргумент был виден в схеме). Не применяется ни к одному текущему
+    невозможно, а не просто "менее вероятно" (когда такой аргумент виден в
+    схеме, модель может по ошибке подставить плейсхолдер вместо реального
+    значения). Не применяется ни к одному текущему
     тулу — общая утилита, используемая при необходимости (см. dnd_tools.py
     про тот же принцип для game_id)."""
     schema = tool.args_schema
