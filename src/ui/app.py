@@ -112,19 +112,42 @@ _SCROLL_ACCEL_FACTOR = 1.6    # во сколько раз растёт множ
 _SCROLL_ACCEL_MAX = 8.0       # потолок множителя
 
 
+_FOLD_ARROW_COLLAPSED = " ▸"
+_FOLD_ARROW_EXPANDED = " ▾"
+
+
 class _ToolFold:
     """A togglable multi-line block of already-rendered ANSI text (a tool
     result's body, see ui/stream.py:StreamDisplay._print_foldable_body) —
     `collapsed`/`expanded` are both full renderings, `start` is the logical
     line index (into _OutputControl._lines) where the block begins. Only
     ONE of the two renderings is ever "live" in _lines at a time; toggling
-    swaps the whole range in place (see _OutputControl.toggle_fold)."""
+    swaps the whole range in place (see _OutputControl.toggle_fold).
 
-    def __init__(self, start: int, collapsed: list[str], expanded: list[str]) -> None:
+    `collapsed` is usually EMPTY — a tool's result is fully hidden until
+    clicked (matches the "click the tool's own line, its output appears"
+    interaction the user asked for directly, instead of a size-based
+    "only truncate the long ones" preview). When empty, `start == end`
+    while collapsed: nothing in the body range is clickable/hoverable, only
+    `trigger_line` is — that's the point, there's no body to click yet.
+
+    `trigger_line`/`trigger_text` (optional) name a SEPARATE, already-
+    printed line (the tool-call's own "● phrase" status line) that also
+    toggles this fold when clicked/hovered, in addition to (once expanded)
+    the body range itself — `trigger_text` is the line's rendered content
+    WITHOUT the collapsed/expanded arrow suffix, so toggling can redraw it
+    with the other arrow without needing to know its styling."""
+
+    def __init__(
+        self, start: int, collapsed: list[str], expanded: list[str],
+        trigger_line: int | None = None, trigger_text: str | None = None,
+    ) -> None:
         self.start = start
         self.collapsed = collapsed
         self.expanded = expanded
         self.is_expanded = False
+        self.trigger_line = trigger_line
+        self.trigger_text = trigger_text
 
     @property
     def lines(self) -> list[str]:
@@ -134,6 +157,11 @@ class _ToolFold:
     def end(self) -> int:
         """Exclusive — the range this fold currently occupies is [start, end)."""
         return self.start + len(self.lines)
+
+    def contains(self, logical_idx: int) -> bool:
+        if self.trigger_line is not None and logical_idx == self.trigger_line:
+            return True
+        return self.start <= logical_idx < self.end
 
 
 class _OutputControl(UIControl):
@@ -293,22 +321,36 @@ class _OutputControl(UIControl):
     # markup — written straight into _lines the same way the tool-call
     # status dot already does (see on_event's tool_end in stream.py).
 
-    def append_fold(self, collapsed: list[str], expanded: list[str]) -> None:
-        """Appends a togglable block, starting collapsed. Must be called
+    def append_fold(
+        self, collapsed: list[str], expanded: list[str],
+        trigger_line: int | None = None, trigger_text: str | None = None,
+    ) -> None:
+        """Appends a togglable block, starting collapsed — usually with
+        `collapsed=[]` (see _ToolFold's docstring for why). Must be called
         right after a newline (i.e. with the current last line empty) —
         every caller in this codebase already satisfies that (console.print
         always ends its own output in "\\n"), the check below is just a
-        defensive fallback, not the expected path."""
+        defensive fallback, not the expected path. When `collapsed` is
+        empty, no placeholder line is written at all — `start` simply
+        points at the position the first EXPANDED line will occupy once
+        toggled open (list slice-assignment with an empty old range is an
+        insert, so toggle_fold's generic logic already handles this without
+        a special case)."""
         if not self._lines:
             self._lines.append("")
         if self._lines[-1] != "":
             self._lines.append("")
-        start = len(self._lines) - 1
-        fold = _ToolFold(start, collapsed, expanded)
-        self._lines[start] = collapsed[0] if collapsed else ""
-        self._lines.extend(collapsed[1:])
-        self._lines.append("")  # reopen — subsequent append() calls continue here
+        if collapsed:
+            start = len(self._lines) - 1
+            self._lines[start] = collapsed[0]
+            self._lines.extend(collapsed[1:])
+            self._lines.append("")  # reopen — subsequent append() calls continue here
+        else:
+            start = len(self._lines) - 1
+        fold = _ToolFold(start, collapsed, expanded, trigger_line, trigger_text)
         self._folds.append(fold)
+        if trigger_line is not None and trigger_text is not None and 0 <= trigger_line < len(self._lines):
+            self._lines[trigger_line] = trigger_text + _FOLD_ARROW_COLLAPSED
         if self._invalidate_cb:
             self._invalidate_cb()
 
@@ -322,6 +364,11 @@ class _OutputControl(UIControl):
             for other in self._folds:
                 if other is not fold and other.start > fold.start:
                     other.start += delta
+                    if other.trigger_line is not None:
+                        other.trigger_line += delta
+        if fold.trigger_line is not None and fold.trigger_text is not None and 0 <= fold.trigger_line < len(self._lines):
+            arrow = _FOLD_ARROW_EXPANDED if fold.is_expanded else _FOLD_ARROW_COLLAPSED
+            self._lines[fold.trigger_line] = fold.trigger_text + arrow
         if self._invalidate_cb:
             self._invalidate_cb()
 
@@ -329,7 +376,7 @@ class _OutputControl(UIControl):
         if logical_idx is None:
             return None
         for fold in self._folds:
-            if fold.start <= logical_idx < fold.end:
+            if fold.contains(logical_idx):
                 return fold
         return None
 
@@ -413,7 +460,7 @@ class _OutputControl(UIControl):
                     fragments = _apply_selection(fragments, col_lo, col_hi)
             elif hover_fold is not None:
                 logical_idx = wrapped_to_logical[abs_i] if abs_i < len(wrapped_to_logical) else None
-                if logical_idx is not None and hover_fold.start <= logical_idx < hover_fold.end:
+                if logical_idx is not None and hover_fold.contains(logical_idx):
                     fragments = _apply_hover_highlight(fragments)
             return fragments
 

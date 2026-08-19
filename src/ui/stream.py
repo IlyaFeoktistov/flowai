@@ -339,35 +339,38 @@ class StreamDisplay:
 
     _TOOL_DOT_BLINK_S = 1.0
 
-    # How many result lines to show before offering a fold — matches the
-    # cap the static "... N more lines" rendering used before folds existed.
+    # Legacy-terminal fallback only (no mouse, no addressable lines — see
+    # _print_foldable_body) — how many result lines to show before a
+    # static "... N more lines" line instead of the full dump.
     _FOLD_PREVIEW = 20
 
-    def _print_foldable_body(self, markup_lines: list[str]) -> None:
-        """Prints a tool result's line-by-line body. Short enough to show
-        in full (<= _FOLD_PREVIEW lines) -> exactly the old behavior, plain
-        console.print per line, nothing to fold. Longer, in app-mode ->
-        registers a click/hover-togglable fold (ui/app.py:_OutputControl.
-        append_fold) instead of a static "... N more lines" line, so the
-        rest is one click away rather than gone. Longer, in legacy-terminal
-        mode (no mouse, no addressable lines) -> falls back to the old
-        static truncated print, since there is nothing to click there."""
+    def _print_foldable_body(
+        self, markup_lines: list[str],
+        trigger_line: int | None = None, trigger_text: str | None = None,
+    ) -> None:
+        """Registers a tool result's body as fully hidden until clicked —
+        NOT a size-based "only truncate the long ones" preview: even a
+        one-line result shows nothing until the user clicks the tool's own
+        "● phrase" line (trigger_line/trigger_text — see on_event's
+        tool_end, which passes the exact line/text it just wrote there).
+        Matches the interaction directly requested: click the tool, see
+        what it did; click again to hide it back. Falls back to the old
+        static, size-capped, always-visible print in legacy-terminal mode
+        (no mouse) or if the caller has no known trigger line (defensive —
+        a tool_end with no matching tool_start)."""
+        if self._app is not None and trigger_line is not None and trigger_text is not None:
+            expanded = [_render_markup(ln) for ln in markup_lines]
+            self._app._output.append_fold([], expanded, trigger_line=trigger_line, trigger_text=trigger_text)
+            return
         total = len(markup_lines)
         if total <= self._FOLD_PREVIEW:
             for ln in markup_lines:
                 console.print(ln)
             return
         hidden = total - self._FOLD_PREVIEW
-        if self._app is None:
-            for ln in markup_lines[:self._FOLD_PREVIEW]:
-                console.print(ln)
-            console.print(f"[bright_black]     … ещё {hidden} строк[/]")
-            return
-        collapsed = [_render_markup(ln) for ln in markup_lines[:self._FOLD_PREVIEW]]
-        collapsed.append(_render_markup(f"[bright_black]     ▸ ещё {hidden} строк — клик, чтобы показать[/]"))
-        expanded = [_render_markup(ln) for ln in markup_lines]
-        expanded.append(_render_markup(f"[bright_black]     ▾ свернуть ({hidden} строк)[/]"))
-        self._app._output.append_fold(collapsed, expanded)
+        for ln in markup_lines[:self._FOLD_PREVIEW]:
+            console.print(ln)
+        console.print(f"[bright_black]     … ещё {hidden} строк[/]")
 
     async def _blink_tool_dot(self, line_idx: int, header: str) -> None:
         """Toggles ONE pending tool's status dot between gray and white
@@ -687,15 +690,17 @@ class StreamDisplay:
             # wipe/shrink _output._lines mid-tool-call — indexing a stale
             # line_idx from before that would otherwise crash the whole turn
             # on an IndexError over a purely cosmetic status dot.
+            trigger_text = None
             if line_idx is not None and self._app is not None and 0 <= line_idx < len(self._app._output._lines):
-                self._app._output._lines[line_idx] = _render_markup(f"[bold white]  ●[/] {_escape_markup(header)}")
+                trigger_text = _render_markup(f"[bold white]  ●[/] {_escape_markup(header)}")
+                self._app._output._lines[line_idx] = trigger_text
                 self._app.invalidate()
 
             diffish = _format_file_edit_result(name, pending_args, result) if name in _FILE_EDIT_TOOL_NAMES and result else None
             if diffish:
                 diff_header, body = diffish
-                console.print(f"[bright_black]     └ {_escape_markup(diff_header)}[/]")
-                self._print_foldable_body(body)
+                lines = [f"[bright_black]     └ {_escape_markup(diff_header)}[/]", *body]
+                self._print_foldable_body(lines, trigger_line=line_idx, trigger_text=trigger_text)
             elif result:
                 lines = result.splitlines()
                 if len(lines) > 1:
@@ -707,10 +712,20 @@ class StreamDisplay:
                     # would color red as if removed, exactly like a git
                     # diff, even though this is plain command output with
                     # nothing to do with a diff at all.
-                    self._print_foldable_body([f"[bright_black]     {_escape_markup(ln)}[/]" for ln in lines])
+                    self._print_foldable_body(
+                        [f"[bright_black]     {_escape_markup(ln)}[/]" for ln in lines],
+                        trigger_line=line_idx, trigger_text=trigger_text,
+                    )
                 else:
-                    short = result if len(result) <= 200 else result[:200] + "…"
-                    console.print(f"[bright_black]     ↳ {_escape_markup(short)}[/]")
+                    # Legacy-terminal fallback (no click target) keeps the
+                    # old 200-char safety cap — nothing there can ever
+                    # reveal the rest on demand, unlike the interactive path.
+                    interactive = self._app is not None and line_idx is not None and trigger_text is not None
+                    shown = result if interactive or len(result) <= 200 else result[:200] + "…"
+                    self._print_foldable_body(
+                        [f"[bright_black]     ↳ {_escape_markup(shown)}[/]"],
+                        trigger_line=line_idx, trigger_text=trigger_text,
+                    )
             self._phase_label = f"{random.choice(_PROCESSING_PHRASES)}..."
 
         # ── MODEL SELECTED ───────────────────────────────

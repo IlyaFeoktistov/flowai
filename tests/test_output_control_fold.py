@@ -112,3 +112,59 @@ def test_clear_resets_folds_and_hover():
     ctrl.clear()
     assert ctrl._folds == []
     assert ctrl._hover_fold is None
+
+
+def test_triggered_fold_starts_fully_hidden():
+    """collapsed=[] (the default shape for a tool result, see
+    ui/stream.py:_print_foldable_body) — nothing is shown for the body at
+    all, and no placeholder line is inserted; the trigger line gets the
+    collapsed arrow appended."""
+    ctrl = _OutputControl()
+    ctrl.append("header line\n")
+    ctrl.append_fold([], ["e0", "e1", "e2"], trigger_line=0, trigger_text="header line")
+    assert ctrl._lines == ["header line ▸", ""]
+    fold = ctrl._folds[0]
+    assert fold.start == fold.end == 1  # zero-length body range while collapsed
+    assert fold.trigger_line == 0
+
+
+def test_click_on_trigger_line_expands_and_collapses_body():
+    ctrl = _OutputControl()
+    ctrl.append("header line\n")
+    ctrl.append_fold([], ["e0", "e1", "e2"], trigger_line=0, trigger_text="header line")
+    ctrl.create_content(width=80, height=10)
+
+    _click(ctrl, x=0, y=0)  # click the trigger line itself
+    fold = ctrl._folds[0]
+    assert fold.is_expanded is True
+    assert ctrl._lines == ["header line ▾", "e0", "e1", "e2", ""]
+
+    ctrl.create_content(width=80, height=10)
+    _click(ctrl, x=0, y=0)
+    assert fold.is_expanded is False
+    assert ctrl._lines == ["header line ▸", ""]
+
+
+def test_triggered_fold_shifts_later_content_on_expand():
+    ctrl = _OutputControl()
+    ctrl.append("header line\n")
+    ctrl.append_fold([], ["e0", "e1"], trigger_line=0, trigger_text="header line")
+    ctrl.append("after\n")
+    ctrl.create_content(width=80, height=10)
+
+    _click(ctrl, x=0, y=0)
+    assert ctrl._lines == ["header line ▾", "e0", "e1", "after", ""]
+
+
+def test_hover_on_trigger_line_highlights_fold():
+    ctrl = _OutputControl()
+    ctrl.append("header line\n")
+    ctrl.append_fold([], ["e0", "e1"], trigger_line=0, trigger_text="header line")
+    ctrl.create_content(width=80, height=10)
+    fold = ctrl._folds[0]
+
+    _hover(ctrl, x=0, y=0)  # row 0 == the trigger line
+    assert ctrl._hover_fold is fold
+
+    _hover(ctrl, x=0, y=1)  # row 1 == the still-empty reopened line, not the fold
+    assert ctrl._hover_fold is None
