@@ -120,6 +120,78 @@ _FILE_EDIT_TOOL_NAMES = ("write_file", "edit_file")
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+def _shorten(val, limit: int = 80) -> str:
+    s = str(val)
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
+# Human-readable phrase per tool call, replacing the raw "tool_name { args }"
+# dump that used to be the ONLY thing shown for a running tool — a
+# non-technical user reads "читаю файл X (50-100)" far faster than
+# "read_file { path: X, offset: 49, limit: 51 }". Falls back to a generic
+# "name(args)" one-liner for any tool not explicitly covered below, so a new
+# or uncommon tool still shows something reasonable instead of nothing.
+def _format_tool_call(name: str, args: dict) -> str:
+    if name == "read_file":
+        path = args.get("path", "?")
+        offset = args.get("offset") or 0
+        limit = args.get("limit")
+        if limit:
+            rng = f" ({offset + 1}-{offset + limit})"
+        elif offset:
+            rng = f" (с {offset + 1})"
+        else:
+            rng = ""
+        return f"читаю файл {path}{rng}"
+    if name in ("write_file", "edit_file"):
+        return f"обновляю файл {args.get('path', '?')}"
+    if name in ("bash", "bash_bg"):
+        suffix = " в фоне" if name == "bash_bg" else ""
+        return f"выполняю команду{suffix} $ {_shorten(args.get('command', ''), 150)}"
+    if name == "delete_path":
+        return f"удаляю {args.get('path', '?')}"
+    if name == "grep_search":
+        pattern = _shorten(args.get("pattern", "?"), 60)
+        path = args.get("path") or "."
+        return f"ищу «{pattern}» в {path}"
+    if name == "glob_search":
+        return f"ищу файлы {args.get('pattern', '?')} в {args.get('path') or '.'}"
+    if name == "web_search":
+        return f"ищу в интернете: {_shorten(args.get('query', ''))}"
+    if name == "analyze_image":
+        return f"смотрю на картинку {args.get('path', '?')}"
+    if name == "generate_image":
+        return f"рисую: {_shorten(args.get('prompt', ''))}"
+    if name == "edit_image":
+        return f"редактирую картинку {args.get('path', '?')}"
+    if name == "generate_music":
+        return f"генерирую музыку: {_shorten(args.get('prompt', ''))}"
+    if name == "generate_3d_model":
+        return "генерирую 3D-модель"
+    if name == "animate_3d_model":
+        return f"анимирую модель {args.get('model_path', '?')}"
+    if name == "generate_texture_for_model":
+        return f"перегенерирую текстуру {args.get('model_path', '?')}"
+    if name == "search_code_semantic":
+        return f"ищу по коду: {_shorten(args.get('query', ''))}"
+    if name == "search_dialog_history":
+        return f"ищу в истории диалогов: {_shorten(args.get('query', ''))}"
+    if name == "search_external_sources":
+        return f"ищу в сохранённых страницах: {_shorten(args.get('query', ''))}"
+    if name == "remember_url":
+        return f"читаю страницу {args.get('url', '?')}"
+    if name == "update_memory":
+        return "запоминаю"
+    if name == "update_knowledge":
+        return f"запоминаю про проект: {args.get('key', '?')}"
+    if name == "lsp":
+        return f"lsp {args.get('operation', '?')} · {args.get('filePath', '?')}"
+    if not args:
+        return name
+    preview = ", ".join(f"{k}={_shorten(v, 60)}" for k, v in args.items())
+    return f"{name}({preview})"
+
+
 def _format_file_edit_result(name: str, args: dict, result: str) -> tuple[str, list[str]] | None:
     """Compact "Update(path) · +N -M" summary + line-numbered diff body for
     file-edit tool results — write_file/edit_file (file_ops_server.py, via
@@ -239,8 +311,11 @@ class StreamDisplay:
         # уже проскроллившую строку небезопасно, см. комментарий там же).
         # FIFO, не одиночное значение — модель иногда зовёт несколько тулов
         # одним сообщением (несколько tool_start подряд до их tool_end).
-        # 4-й элемент — задача мигания этой конкретной точки (см. _blink_tool_dot).
-        self._pending_tool_calls: list[tuple[str, dict, int | None, asyncio.Task | None]] = []
+        # 4-й элемент — задача мигания этой конкретной точки (см. _blink_tool_dot);
+        # 5-й — форматированный заголовок (см. _format_tool_call), чтобы
+        # blink/tool_end переписывали ту же фразу, а не откатывались на
+        # голое имя тула.
+        self._pending_tool_calls: list[tuple[str, dict, int | None, asyncio.Task | None, str]] = []
         self._speech = None            # SpeechStreamer, создаётся лениво при первом voice_mode-ходе
         self._speech_buf: str = ""
         self._speech_notified: bool = False
@@ -264,7 +339,37 @@ class StreamDisplay:
 
     _TOOL_DOT_BLINK_S = 1.0
 
-    async def _blink_tool_dot(self, line_idx: int, name: str) -> None:
+    # How many result lines to show before offering a fold — matches the
+    # cap the static "... N more lines" rendering used before folds existed.
+    _FOLD_PREVIEW = 20
+
+    def _print_foldable_body(self, markup_lines: list[str]) -> None:
+        """Prints a tool result's line-by-line body. Short enough to show
+        in full (<= _FOLD_PREVIEW lines) -> exactly the old behavior, plain
+        console.print per line, nothing to fold. Longer, in app-mode ->
+        registers a click/hover-togglable fold (ui/app.py:_OutputControl.
+        append_fold) instead of a static "... N more lines" line, so the
+        rest is one click away rather than gone. Longer, in legacy-terminal
+        mode (no mouse, no addressable lines) -> falls back to the old
+        static truncated print, since there is nothing to click there."""
+        total = len(markup_lines)
+        if total <= self._FOLD_PREVIEW:
+            for ln in markup_lines:
+                console.print(ln)
+            return
+        hidden = total - self._FOLD_PREVIEW
+        if self._app is None:
+            for ln in markup_lines[:self._FOLD_PREVIEW]:
+                console.print(ln)
+            console.print(f"[bright_black]     … ещё {hidden} строк[/]")
+            return
+        collapsed = [_render_markup(ln) for ln in markup_lines[:self._FOLD_PREVIEW]]
+        collapsed.append(_render_markup(f"[bright_black]     ▸ ещё {hidden} строк — клик, чтобы показать[/]"))
+        expanded = [_render_markup(ln) for ln in markup_lines]
+        expanded.append(_render_markup(f"[bright_black]     ▾ свернуть ({hidden} строк)[/]"))
+        self._app._output.append_fold(collapsed, expanded)
+
+    async def _blink_tool_dot(self, line_idx: int, header: str) -> None:
         """Toggles ONE pending tool's status dot between gray and white
         every _TOOL_DOT_BLINK_S seconds. Real ANSI blink (SGR 5) is avoided
         because whether it actually blinks depends on the terminal/font and
@@ -281,7 +386,7 @@ class StreamDisplay:
                     return
                 on = not on
                 style = "bold white" if on else "bright_black"
-                self._app._output._lines[line_idx] = _render_markup(f"[{style}]  ●[/][bright_black] {name}[/]")
+                self._app._output._lines[line_idx] = _render_markup(f"[{style}]  ●[/][bright_black] {_escape_markup(header)}[/]")
                 self._app.invalidate()
         except asyncio.CancelledError:
             pass
@@ -477,19 +582,13 @@ class StreamDisplay:
             line_idx = None
             if self._app is not None:
                 line_idx = len(self._app._output._lines) - 1
-            console.print(f"[bright_black]  ● {name}[/]")
+            header = _format_tool_call(name, args)
+            console.print(f"[bright_black]  ● {_escape_markup(header)}[/]")
             blink_task = (
-                asyncio.create_task(self._blink_tool_dot(line_idx, name))
+                asyncio.create_task(self._blink_tool_dot(line_idx, header))
                 if line_idx is not None else None
             )
-            self._pending_tool_calls.append((name, args, line_idx, blink_task))
-            console.print(f"[dim]     {{")
-            for key, val in args.items():
-                val_str = str(val)
-                if len(val_str) > 100:
-                    val_str = val_str[:100] + "…"
-                console.print(f"[dim]       {key}: {val_str},")
-            console.print(f"[dim]     }}")
+            self._pending_tool_calls.append((name, args, line_idx, blink_task, header))
             self._stats["tools_called"] += 1
             self._phase_label = f"{random.choice(_TOOL_RUNNING_PHRASES)}..."
 
@@ -578,8 +677,9 @@ class StreamDisplay:
             pending_args: dict = {}
             line_idx = None
             blink_task = None
+            header = name
             if self._pending_tool_calls:
-                _, pending_args, line_idx, blink_task = self._pending_tool_calls.pop(0)
+                _, pending_args, line_idx, blink_task, header = self._pending_tool_calls.pop(0)
             if blink_task is not None:
                 blink_task.cancel()
             # Bounds-check: /clear (or any other command) can run concurrently
@@ -588,18 +688,14 @@ class StreamDisplay:
             # line_idx from before that would otherwise crash the whole turn
             # on an IndexError over a purely cosmetic status dot.
             if line_idx is not None and self._app is not None and 0 <= line_idx < len(self._app._output._lines):
-                self._app._output._lines[line_idx] = _render_markup(f"[bold white]  ●[/][bright_black] {name}[/]")
+                self._app._output._lines[line_idx] = _render_markup(f"[bold white]  ●[/][bright_black] {_escape_markup(header)}[/]")
                 self._app.invalidate()
 
             diffish = _format_file_edit_result(name, pending_args, result) if name in _FILE_EDIT_TOOL_NAMES and result else None
             if diffish:
-                header, body = diffish
-                console.print(f"[bright_black]     └ {_escape_markup(header)}[/]")
-                show = body[:20]
-                for ln in show:
-                    console.print(ln)
-                if len(body) > 20:
-                    console.print(f"[bright_black]     … ещё {len(body) - 20} строк[/]")
+                diff_header, body = diffish
+                console.print(f"[bright_black]     └ {_escape_markup(diff_header)}[/]")
+                self._print_foldable_body(body)
             elif result:
                 lines = result.splitlines()
                 if len(lines) > 1:
@@ -611,11 +707,7 @@ class StreamDisplay:
                     # would color red as if removed, exactly like a git
                     # diff, even though this is plain command output with
                     # nothing to do with a diff at all.
-                    show = lines[:20]
-                    for ln in show:
-                        console.print(f"[bright_black]     {_escape_markup(ln)}[/]")
-                    if len(lines) > 20:
-                        console.print(f"[bright_black]     … ещё {len(lines) - 20} строк[/]")
+                    self._print_foldable_body([f"[bright_black]     {_escape_markup(ln)}[/]" for ln in lines])
                 else:
                     short = result if len(result) <= 200 else result[:200] + "…"
                     console.print(f"[bright_black]     ↳ {_escape_markup(short)}[/]")
@@ -704,7 +796,7 @@ class StreamDisplay:
         totally different turn. Called from finish() (this turn ending) and
         start() (defensive — in case a previous turn's cleanup was itself
         interrupted before reaching finish())."""
-        for _, _, _, blink_task in self._pending_tool_calls:
+        for _, _, _, blink_task, _ in self._pending_tool_calls:
             if blink_task is not None:
                 blink_task.cancel()
         self._pending_tool_calls = []

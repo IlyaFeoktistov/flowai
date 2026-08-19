@@ -112,6 +112,30 @@ _SCROLL_ACCEL_FACTOR = 1.6    # во сколько раз растёт множ
 _SCROLL_ACCEL_MAX = 8.0       # потолок множителя
 
 
+class _ToolFold:
+    """A togglable multi-line block of already-rendered ANSI text (a tool
+    result's body, see ui/stream.py:StreamDisplay._print_foldable_body) —
+    `collapsed`/`expanded` are both full renderings, `start` is the logical
+    line index (into _OutputControl._lines) where the block begins. Only
+    ONE of the two renderings is ever "live" in _lines at a time; toggling
+    swaps the whole range in place (see _OutputControl.toggle_fold)."""
+
+    def __init__(self, start: int, collapsed: list[str], expanded: list[str]) -> None:
+        self.start = start
+        self.collapsed = collapsed
+        self.expanded = expanded
+        self.is_expanded = False
+
+    @property
+    def lines(self) -> list[str]:
+        return self.expanded if self.is_expanded else self.collapsed
+
+    @property
+    def end(self) -> int:
+        """Exclusive — the range this fold currently occupies is [start, end)."""
+        return self.start + len(self.lines)
+
+
 class _OutputControl(UIControl):
     """Accumulates ANSI text as logical lines; wraps to width; auto-scrolls."""
 
@@ -135,8 +159,17 @@ class _OutputControl(UIControl):
         self._drag_moved: bool = False        # true once the mouse actually moved mid-drag
         self._render_wrapped: list[str] = []
         self._render_continuation: list[bool] = []
+        self._render_wrapped_to_logical: list[int] = []
         self._render_start: int = 0
         self._render_height: int = 0
+
+        # Collapsible tool-output blocks (see append_fold/toggle_fold below,
+        # and ui/stream.py:StreamDisplay._print_foldable_body) — a list, not
+        # a dict, because hit-testing walks it to find "which fold (if any)
+        # contains logical line N" and toggling one shifts every LATER
+        # fold's start by the resulting line-count delta.
+        self._folds: list[_ToolFold] = []
+        self._hover_fold: _ToolFold | None = None
 
     def connect_app(self, app: "FlowAIApp") -> None:
         self._invalidate_cb = app.invalidate
@@ -209,6 +242,8 @@ class _OutputControl(UIControl):
         self._sel_start = None
         self._sel_end = None
         self._selecting = False
+        self._folds = []
+        self._hover_fold = None
         if self._invalidate_cb:
             self._invalidate_cb()
 
@@ -249,6 +284,55 @@ class _OutputControl(UIControl):
         if self._invalidate_cb:
             self._invalidate_cb()
 
+    # ── Collapsible tool-output blocks ──────────────────────────────────────
+    # See ui/stream.py:StreamDisplay._print_foldable_body — a tool result
+    # long enough to be truncated registers one of these instead of just
+    # statically printing "... N more lines", so the user can click to see
+    # the rest (and click again to re-collapse). Both renderings are
+    # pre-rendered ANSI text (via ui/stream.py:_render_markup), not Rich
+    # markup — written straight into _lines the same way the tool-call
+    # status dot already does (see on_event's tool_end in stream.py).
+
+    def append_fold(self, collapsed: list[str], expanded: list[str]) -> None:
+        """Appends a togglable block, starting collapsed. Must be called
+        right after a newline (i.e. with the current last line empty) —
+        every caller in this codebase already satisfies that (console.print
+        always ends its own output in "\\n"), the check below is just a
+        defensive fallback, not the expected path."""
+        if not self._lines:
+            self._lines.append("")
+        if self._lines[-1] != "":
+            self._lines.append("")
+        start = len(self._lines) - 1
+        fold = _ToolFold(start, collapsed, expanded)
+        self._lines[start] = collapsed[0] if collapsed else ""
+        self._lines.extend(collapsed[1:])
+        self._lines.append("")  # reopen — subsequent append() calls continue here
+        self._folds.append(fold)
+        if self._invalidate_cb:
+            self._invalidate_cb()
+
+    def toggle_fold(self, fold: "_ToolFold") -> None:
+        old_len = len(fold.lines)
+        fold.is_expanded = not fold.is_expanded
+        new_lines = fold.lines
+        self._lines[fold.start:fold.start + old_len] = new_lines
+        delta = len(new_lines) - old_len
+        if delta:
+            for other in self._folds:
+                if other is not fold and other.start > fold.start:
+                    other.start += delta
+        if self._invalidate_cb:
+            self._invalidate_cb()
+
+    def _fold_at_logical(self, logical_idx: int | None) -> "_ToolFold | None":
+        if logical_idx is None:
+            return None
+        for fold in self._folds:
+            if fold.start <= logical_idx < fold.end:
+                return fold
+        return None
+
     # ── UIControl protocol ────────────────────────────────────────────────────
 
     def create_content(self, width: int, height: int) -> UIContent:
@@ -259,15 +343,21 @@ class _OutputControl(UIControl):
         # spurious newlines at wrap points).
         wrapped: list[str] = []
         continuation: list[bool] = []
-        for logical in self._lines:
+        # Maps a wrapped-line index back to the logical line it came from —
+        # needed to hit-test a mouse position (which lands on a WRAPPED row,
+        # see mouse_handler) against a fold's logical [start, end) range.
+        wrapped_to_logical: list[int] = []
+        for logical_idx, logical in enumerate(self._lines):
             sub = _wrap_ansi_line(logical, max(width, 1))
             for j, s in enumerate(sub):
                 wrapped.append(s)
                 continuation.append(j > 0)
+                wrapped_to_logical.append(logical_idx)
 
         if not wrapped:
             wrapped = [""]
             continuation = [False]
+            wrapped_to_logical = [0]
 
         # Scroll-aware windowing: offset=0 → auto-scroll to bottom
         total = len(wrapped)
@@ -280,10 +370,12 @@ class _OutputControl(UIControl):
 
         self._render_wrapped = wrapped
         self._render_continuation = continuation
+        self._render_wrapped_to_logical = wrapped_to_logical
         self._render_start = start
         self._render_height = height
 
         span = self._selection_span()
+        hover_fold = self._hover_fold if not self._selecting else None
 
         def get_line(i: int):
             # A genuinely empty row (blank separator line, or padding below
@@ -312,14 +404,17 @@ class _OutputControl(UIControl):
                     fragments = list(to_formatted_text(ANSI(line)))
                 except Exception:
                     fragments = [("", _strip_ansi(line))]
-            if span is None:
-                return fragments
             abs_i = start + i
-            (lo_line, lo_col), (hi_line, hi_col) = span
-            if lo_line <= abs_i <= hi_line:
-                col_lo = lo_col if abs_i == lo_line else 0
-                col_hi = hi_col + 1 if abs_i == hi_line else None
-                fragments = _apply_selection(fragments, col_lo, col_hi)
+            if span is not None:
+                (lo_line, lo_col), (hi_line, hi_col) = span
+                if lo_line <= abs_i <= hi_line:
+                    col_lo = lo_col if abs_i == lo_line else 0
+                    col_hi = hi_col + 1 if abs_i == hi_line else None
+                    fragments = _apply_selection(fragments, col_lo, col_hi)
+            elif hover_fold is not None:
+                logical_idx = wrapped_to_logical[abs_i] if abs_i < len(wrapped_to_logical) else None
+                if logical_idx is not None and hover_fold.start <= logical_idx < hover_fold.end:
+                    fragments = _apply_selection(fragments, 0, None)
             return fragments
 
         return UIContent(
@@ -384,31 +479,61 @@ class _OutputControl(UIControl):
             if self._invalidate_cb:
                 self._invalidate_cb()
         elif et == MouseEventType.MOUSE_MOVE:
-            if not self._selecting:
+            if self._selecting:
+                y = mouse_event.position.y
+                if y <= 0:
+                    self.scroll_up(1)
+                elif y >= self._render_height - 1:
+                    self.scroll_down(1)
+                y = max(0, min(y, self._render_height - 1))
+                new_end = (self._render_start + y, mouse_event.position.x)
+                if new_end != self._sel_start:
+                    self._drag_moved = True
+                self._sel_end = new_end
+                if self._invalidate_cb:
+                    self._invalidate_cb()
                 return
-            y = mouse_event.position.y
-            if y <= 0:
-                self.scroll_up(1)
-            elif y >= self._render_height - 1:
-                self.scroll_down(1)
-            y = max(0, min(y, self._render_height - 1))
-            new_end = (self._render_start + y, mouse_event.position.x)
-            if new_end != self._sel_start:
-                self._drag_moved = True
-            self._sel_end = new_end
-            if self._invalidate_cb:
-                self._invalidate_cb()
+            # Not dragging a selection — hover-highlight a collapsible
+            # tool-output block under the cursor (see append_fold), so it
+            # reads as clickable before the user actually clicks it.
+            fold = self._fold_at_logical(self._logical_at(mouse_event.position.y))
+            if fold is not self._hover_fold:
+                self._hover_fold = fold
+                if self._invalidate_cb:
+                    self._invalidate_cb()
         elif et == MouseEventType.MOUSE_UP:
             if self._selecting:
                 self._selecting = False
                 if self._drag_moved:
                     self._copy_selection()
                 else:
-                    # Plain click, no drag — don't leave a 1-char selection behind.
+                    # Plain click, no drag — don't leave a 1-char selection
+                    # behind; toggle a collapsible tool-output block instead,
+                    # if the click landed on one (see append_fold/toggle_fold).
+                    clicked_wrapped_idx = self._sel_start[0] if self._sel_start else None
                     self._sel_start = None
                     self._sel_end = None
+                    logical_idx = (
+                        self._render_wrapped_to_logical[clicked_wrapped_idx]
+                        if clicked_wrapped_idx is not None
+                        and 0 <= clicked_wrapped_idx < len(self._render_wrapped_to_logical)
+                        else None
+                    )
+                    fold = self._fold_at_logical(logical_idx)
+                    if fold is not None:
+                        self.toggle_fold(fold)
                     if self._invalidate_cb:
                         self._invalidate_cb()
+
+    def _logical_at(self, screen_y: int) -> int | None:
+        """Logical line index under a screen row *within the current
+        viewport* — same (render_start + y) convention MOUSE_DOWN/MOUSE_MOVE
+        already use for selection, just resolved one step further via
+        _render_wrapped_to_logical."""
+        abs_i = self._render_start + screen_y
+        if 0 <= abs_i < len(self._render_wrapped_to_logical):
+            return self._render_wrapped_to_logical[abs_i]
+        return None
 
 
 def _apply_selection(fragments, col_lo: int, col_hi: int | None):
