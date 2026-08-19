@@ -42,6 +42,13 @@ dependencies = [
 [project.scripts]
 flowai = "cli:run"
 
+[tool.pytest.ini_options]
+# Без этого голый `pytest` из корня репозитория пытается собрать и
+# vendor/llama-expert-streaming/tools/server/tests/ (сторонний форк
+# llama.cpp, свои конфликтующие фикстуры/зависимости) — падает на
+# коллекции, а не на самих тестах flowAI.
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
 # Плоский layout, но физически под src/ (src/cli.py, src/mcp_agent/...), не
 # src/flowai/... — sources ниже strip'ает "src/" при сборке колеса/editable-
