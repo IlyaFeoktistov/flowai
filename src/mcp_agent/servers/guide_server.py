@@ -59,6 +59,27 @@ image generation/editing (Stable Diffusion/FLUX), local music generation \
 - /dnd starts a separate solo tabletop-RPG chat mode, unrelated to the \
 coding pipeline.
 
+flowAI's own extension mechanism (unrelated to whatever the currently open \
+project's code does) — use this when the user asks to add a plugin/skill/ \
+hook FOR flowAI itself, whether that's global or scoped to the project \
+they have open right now:
+- Global plugin — a folder at `<flowAI repo root>/plugins/<name>/` with a \
+`plugin.json` manifest (commands/mcp_servers/hooks, all optional), shared \
+across every project. Heavier format, meant to be reused/distributed.
+- Per-project skill — `.flowai/skills/<name>.py` inside the project \
+CURRENTLY OPEN (not flowAI's own repo), a module-level `run(args: str, \
+console) -> None` (may be async); the filename minus `.py` becomes the \
+slash-command name. No manifest.
+- Per-project hook — `.flowai/hooks/<name>.py` in the same place, a \
+module-level `post_file_edit(path, repo_path)` (runs after a successful \
+write_file/edit_file, return value ignored) and/or `pre_commit(command, \
+repo_path) -> str | None` (runs before a `git commit` bash call; a \
+non-empty return BLOCKS the commit with that string as the reason). \
+Either or both in one file; both may be async. No manifest.
+- Create the `.flowai/skills`/`.flowai/hooks` directory in the project if \
+it doesn't exist yet — nothing needs registering elsewhere, the files are \
+discovered by scanning that directory on the next turn/restart.
+
 Persistence: everything (long-term memory, per-project knowledge, usage \
 stats, settings) lives in one SQLite database under the user's own data \
 directory (~/.local/share/flowai/ or $XDG_DATA_HOME, overridable via \
@@ -75,9 +96,11 @@ async def flowai_guide() -> str:
     (the Analyzer/Planner/Coder/Verifier pipeline for project work vs. the
     direct-answer fast path for casual chat/snippets), what categories of
     tools exist and when they're available, the optional generative
-    features, and where persistent data lives. Call this when the user
-    asks what you are, what you can do, or how you work — don't guess or
-    make up capabilities."""
+    features, where persistent data lives, and how to add a flowAI
+    plugin/skill/hook (global plugins/ vs. per-project .flowai/skills or
+    .flowai/hooks, exact file/function shapes). Call this when the user
+    asks what you are, what you can do, how you work, or asks you to add
+    one of these extensions — don't guess or make up capabilities/formats."""
     return _GUIDE
 
 

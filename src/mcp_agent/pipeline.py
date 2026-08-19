@@ -1,6 +1,6 @@
 """
-Точка входа нового пайплайна Router->Analyzer->Planner->Coder->Verifier
-(.claude/plans/, реализация по фазам). ТОТ ЖЕ контракт stream_chat(messages,
+Точка входа нового пайплайна Router->Analyzer->Planner->Coder->Verifier.
+ТОТ ЖЕ контракт stream_chat(messages,
 on_event=None), что у mcp_agent/agent.py — async-generator, on_event
 получает тот же набор типов событий — чтобы при решении о cutover cli.py
 было достаточно поменять один импорт (см. agent.py:1-51 про то, как оно
