@@ -21,40 +21,39 @@ hot/cold кэш экспертов — heatmap с decay, кто "горячий"
 RFC-issue, см. github.com/ggml-org/llama.cpp/discussions/24528) — просто
 альтернативная реализация той же идеи, которая уже обсуждалась отдельно.
 
-Живой отзыв прямо в треде PR (miltos22, 2026-08-10T18:27:13Z, MoE-модель
-того же класса, A3B, на 16GB карте): "PP is very low, around a third of
-usual. TG seems faster... I estimate TG to be about 33% faster" — то есть
+На похожей MoE-модели того же класса (A3B) на 16GB карте: PP падает
+примерно втрое от обычного, TG ускоряется — оценочно на треть. То есть
 это НЕ чистый выигрыш, а обмен: prompt-processing проседает в разы, зато
 генерация ускоряется. На 6GB карте, где и без того почти всё уходит на
 CPU, соотношение может отличаться в любую сторону — отсюда сам смысл этого
 модуля: дать реальный, воспроизводимый способ включить и измерить это на
 СВОЁМ железе и модели, а не поверить на слово чужому бенчмарку.
 
-Живые замеры на этой машине (2026-08-11, короткий тестовый промпт, НЕ
-полноценный бенчмарк) — эффект сильно зависит от num_ctx: при num_ctx=8192
-(меньше KV-cache, больше VRAM остаётся под hot-store экспертов) PP=4.85
-tok/s (не хуже Ollama), TG=8.84 tok/s (+105% к Ollama). При РЕАЛЬНОМ
-проектном num_ctx=65536 (mcp_agent/model_config.py:OLLAMA_NUM_CTX) —
-PP=1.96, TG=3.95 tok/s, то есть выигрыш заметно меньше (KV-cache отъедает
-VRAM, которая иначе пошла бы в hot-store, autofit находит меньше горячих
-слотов). Не считать цифры на маленьком num_ctx репрезентативными для
-реальной работы агента — мерить нужно именно на своём num_ctx.
+На коротком тестовом промпте (не полноценный бенчмарк) эффект сильно
+зависит от num_ctx: при num_ctx=8192 (меньше KV-cache, больше VRAM
+остаётся под hot-store экспертов) PP=4.85 tok/s (не хуже Ollama),
+TG=8.84 tok/s (+105% к Ollama). При РЕАЛЬНОМ проектном num_ctx=65536
+(mcp_agent/model_config.py:OLLAMA_NUM_CTX) — PP=1.96, TG=3.95 tok/s, то
+есть выигрыш заметно меньше (KV-cache отъедает VRAM, которая иначе пошла
+бы в hot-store, autofit находит меньше горячих слотов). Цифры на
+маленьком num_ctx не репрезентативны для реальной работы агента — мерить
+нужно именно на своём num_ctx.
 
-Повторный живой замер (2026-08-13, эта же машина, РЕАЛЬНЫЙ системный промпт
-Analyzer'а из prompts.py, 2686 токенов, не игрушечный) — на num_ctx=65536
-autofit находил 0 hot-slots ВООБЩЕ независимо от типа KV-cache (проверено и
-на f16, и на -ctk/-ctv q8_0): fit.cpp жадно отдаёт освободившуюся от
-квантования KV-cache память под ДОПОЛНИТЕЛЬНЫЕ dense-слои на GPU (шаг,
-идущий ДО расчёта hot-store), а не резервирует её под экспертов. На
-num_ctx=30000 с явным -ctk/-ctv q8_0 autofit нашёл **10 hot-slots** (1438
-МиБ) — но решающий контрольный замер (тот же промпт, тот же num_ctx=30000,
-тот же -ctk/-ctv q8_0, но -ehs 0 — кэш экспертов выключен ВООБЩЕ) дал
-РЕЗУЛЬТАТ ЛУЧШЕ, а не хуже: PP 203 tok/s против 59 tok/s с 10 слотами, TG
-16-20 tok/s против 13-21 (то есть не хуже, часто лучше). common_memory_
-breakdown_print объясняет почему: без hot-store резервации fit отдаёт под
-саму модель на GPU 2277 МиБ вместо 1055-737 МиБ с hot-cache — сама фича
-dynamic per-token expert caching, ради которой этот форк вообще существует,
-на ЭТОЙ карте (6 GB) и ЭТОЙ модели (30B MoE) оказалась ЧИСТЫМ МИНУСОМ:
+С РЕАЛЬНЫМ системным промптом Analyzer'а из prompts.py (2686 токенов, не
+игрушечный) на num_ctx=65536 autofit находит 0 hot-slots ВООБЩЕ независимо
+от типа KV-cache (проверено и на f16, и на -ctk/-ctv q8_0): fit.cpp жадно
+отдаёт освободившуюся от квантования KV-cache память под ДОПОЛНИТЕЛЬНЫЕ
+dense-слои на GPU (шаг, идущий ДО расчёта hot-store), а не резервирует её
+под экспертов. На num_ctx=30000 с явным -ctk/-ctv q8_0 autofit находит
+**10 hot-slots** (1438 МиБ) — но контрольный запуск (тот же промпт, тот
+же num_ctx=30000, тот же -ctk/-ctv q8_0, но -ehs 0 — кэш экспертов
+выключен ВООБЩЕ) даёт РЕЗУЛЬТАТ ЛУЧШЕ, а не хуже: PP 203 tok/s против 59
+tok/s с 10 слотами, TG 16-20 tok/s против 13-21 (то есть не хуже, часто
+лучше). common_memory_breakdown_print объясняет почему: без hot-store
+резервации fit отдаёт под саму модель на GPU 2277 МиБ вместо 1055-737 МиБ
+с hot-cache — сама фича dynamic per-token expert caching, ради которой
+этот форк вообще существует, на ЭТОЙ карте (6 GB) и ЭТОЙ модели (30B MoE)
+оказывается ЧИСТЫМ МИНУСОМ:
 накладные расходы на подкачку экспертов в реальном времени дороже, чем
 просто отдать fit'у больше GPU под статичные слои без всякого кэша. Реальный
 выигрыш этого бэкенда над Ollama на данном железе — не в dynamic caching, а
@@ -140,13 +139,13 @@ import storage
 
 # llama-server's own stdout/stderr — captured to a file (not DEVNULL, not a
 # subprocess.PIPE we never read) so a startup failure can show the model's
-# OWN error line instead of a guess. Live bug (user report): the fallback
-# message used to be "процесс завершился сам (код 1) до готовности — модель
-# большая, загрузка с диска не быстрая, но не столько" — meaningless filler
-# text for EVERY failure, whatever the real cause (that specific live
-# failure was a stale process from manual testing still holding the port —
-# "couldn't bind HTTP server socket" — a one-line, instantly diagnosable
-# reason that text hid entirely). One shared file, reused every run — this
+# OWN error line instead of a guess. A generic fallback message like
+# "процесс завершился сам (код 1) до готовности — модель
+# большая, загрузка с диска не быстрая, но не столько" is meaningless filler
+# text for EVERY failure, whatever the real cause — e.g. a stale process
+# from manual testing still holding the port fails with
+# "couldn't bind HTTP server socket", a one-line, instantly diagnosable
+# reason that generic text would hide entirely. One shared file, reused every run — this
 # is a debug aid, not a durable log a user would want to keep across runs.
 _LOG_PATH = storage.data_dir() / "expert_streaming_server.log"
 

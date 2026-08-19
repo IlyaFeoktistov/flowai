@@ -18,13 +18,11 @@ import storage
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
     """CREATE TABLE IF NOT EXISTS only covers a table that doesn't exist
     AT ALL yet — it does nothing once the table already exists with an
-    older column set, which is exactly what happened to this project's
-    own real flowai.db: gold/level/xp/current_threat/... were all added
-    to the CREATE statement above LONG after a real dnd_games table had
-    already been created (mid-development) with far fewer columns. Every
-    later addition silently never appeared in that real database at all
-    until this migration existed — live bug: "no such column: xp" on a
-    real, already-in-progress game. Adds whatever's missing from
+    older column set. Columns like gold/level/xp/current_threat/... added
+    to the CREATE statement above after a table already exists (with far
+    fewer columns) would otherwise silently never appear in that
+    already-created database, causing "no such column: xp" on an
+    already-in-progress game. Adds whatever's missing from
     `columns` ({name: "TYPE DEFAULT ..."}) — safe to call every time,
     every column added here should also exist in the CREATE TABLE above
     (this only helps an ALREADY-existing table catch up; a table created
@@ -246,15 +244,13 @@ def set_level(game_id: int, level: int) -> None:
     conn.commit()
 
 
-# Живой запрос пользователя: нужна НАСТОЯЩАЯ система опыта, а не "мастер
-# сам решает, когда повысить уровень" (та же ненадёжность на живых
-# прогонах, что раньше была с созданием персонажа/закрытием глав — то, что
-# отдано на голое суждение модели без механического триггера, происходит
-# редко или никогда). Треугольная формула — стоимость КАЖДОГО следующего
-# уровня растёт линейно (100, 200, 300, ...), а не по фиксированной
-# ставке: ранние уровни доступны быстро, но 1000-й требует ~50 млн xp —
-# честно вычислимо, но действительно огромный объём игры, не "мастер
-# рано или поздно решит".
+# Нужна НАСТОЯЩАЯ система опыта, а не "мастер сам решает, когда повысить
+# уровень" — то, что отдано на голое суждение модели без механического
+# триггера, происходит редко или никогда. Треугольная формула — стоимость
+# КАЖДОГО следующего уровня растёт линейно (100, 200, 300, ...), а не по
+# фиксированной ставке: ранние уровни доступны быстро, но 1000-й требует
+# ~50 млн xp — честно вычислимо, но действительно огромный объём игры, не
+# "мастер рано или поздно решит".
 XP_PER_LEVEL_STEP = 100
 
 
@@ -303,10 +299,10 @@ def add_xp(game_id: int, amount: int) -> dict:
 
 
 def set_current_threat(game_id: int, description: str, level: int) -> None:
-    """Что игрок противостоит ПРЯМО СЕЙЧАС, со своим уровнем — живой запрос
-    пользователя: агент не должен верить заявлению игрока об исходе спорной
-    схватки на слово, а сверяться с зафиксированным здесь разрывом уровней
-    (dnd_agent.py:_context_note явно показывает оба числа рядом)."""
+    """Что игрок противостоит ПРЯМО СЕЙЧАС, со своим уровнем — агент не
+    должен верить заявлению игрока об исходе спорной схватки на слово, а
+    сверяться с зафиксированным здесь разрывом уровней (dnd_agent.py:
+    _context_note явно показывает оба числа рядом)."""
     conn = _conn()
     conn.execute(
         "UPDATE dnd_games SET current_threat = ?, current_threat_level = ?, "

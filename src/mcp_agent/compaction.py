@@ -5,25 +5,22 @@ _CompactResearchMiddleware — сжимает всё до ПОСЛЕДНЕГО �
 (верификация, исправление ошибки после неё, финальный ответ) тащил весь
 сырой трафик заново.
 
-Живой прогон (mail-server, сессия 20260707-135011-31723e6e): после ask_user
-и первой правки в ОДНОМ и том же ходе накопились ещё чтение + вторая правка
-+ несколько bash поверх уже большой исследовательской части — общий
-объём перевалил за num_ctx=32768, и llama.cpp дважды сделал "context shift"
-(см. agent_builder.py:_ChatOllamaWithNumKeep), один раз прямо посреди
-генерации финального ответа, оборвав его на полуслове. num_keep защищает
-системный промпт при таком переполнении, но само переполнение всё равно
-происходит и всё равно режет историю (просто менее катастрофично). Эта
-мидлварь не даёт истории вообще так разрастись.
+Без этого длинный ход (исследование, несколько правок и bash-вызовы поверх
+уже большой исследовательской части) может перевалить за num_ctx, и
+llama.cpp сделает "context shift" (см. agent_builder.py:
+_ChatOllamaWithNumKeep) посреди генерации ответа, оборвав его на
+полуслове. num_keep защищает системный промпт при таком переполнении, но
+само переполнение всё равно происходит и всё равно режет историю (просто
+менее катастрофично). Эта мидлварь не даёт истории вообще так разрастись.
 
-Живой прогон #2 (mail-server, 20260707-163337-11afd268): первая версия этой
-мидлвари сжимала ТОЛЬКО до ПЕРВОГО успешного write — весь дальнейший трафик
-одного хода (в этом прогоне: сообщения 109-282, повторные правки одного и
-того же метода после несколько раз промазанных replace_lines, туда-сюда
-верификация) остался несжатым и разросся до 1.7М входных токенов за один
-ход. Теперь режем до ПОСЛЕДНЕГО успешного write на момент каждого вызова
-модели — по мере того как появляются новые успешные правки, точка среза
-сама сдвигается вперёд (новый префикс — новый кэш-ключ, старый дайджест
-просто становится неактуальным и не используется).
+Сжатие только до ПЕРВОГО успешного write оставляет весь дальнейший трафик
+хода (повторные правки одного и того же метода после нескольких
+промазанных replace_lines, туда-сюда верификация) несжатым — объём может
+разрастись до 1.7М входных токенов за один ход. Поэтому режем до
+ПОСЛЕДНЕГО успешного write на момент каждого вызова модели — по мере того
+как появляются новые успешные правки, точка среза сама сдвигается вперёд
+(новый префикс — новый кэш-ключ, старый дайджест просто становится
+неактуальным и не используется).
 
 Точность самой правки не страдает: сжатие происходит только ПОСЛЕ того, как
 write-тул уже вызван и его результат подтверждён успешным — сама правка была
@@ -37,97 +34,95 @@ write-тул уже вызван и его результат подтвержд
 _DedupeToolResultsMiddleware в message_utils.py: request.override(messages=...)
 меняет только то, что физически уйдёт В ЭТОТ КОНКРЕТНЫЙ запрос к Ollama.
 
-Живой прогон #3 (mail-server, 20260708-2038): _compact_periodic_research (ниже,
-до-write разведка) один раз сжала в дайджест тот самый read_file, который
-только что вернул полное содержимое MailboxConvertTask.php. Модель на
-следующем шаге больше не видела код и попыталась перечитать файл —
-tool_wrappers.py:_dedupe_read_tool не знает о сжатии (свой отдельный
-read_history, не сообщение в истории) и ответил "вы уже читали этот файл,
-переиспользуйте тот результат" — а переиспользовать было нечего, дайджест
-прозы не содержал кода. Модель потратила 3 тул-вызова (read_file,
-read_text_file, read_file_range с другим диапазоном — только это случайно
-обошло дедуп), гоняясь за собственным же прочитанным файлом. Раздел ниже
-теперь никогда не упаковывает результаты read_file/read_text_file/
-read_file_range/read_multiple_files/lsp/project_tree — только настоящий
-разведочный шум (search_files, list_directory, get_knowledge и т.п.), см.
-STICKY_TOOL_NAMES и _group_is_sticky. project_tree добавлен отдельно от
-остальных read-тулов: это не содержимое файла, а карта проекта, которая и
-дальше нужна модели для ориентации, а сам объём у неё и так ограничен
-(max_entries в mcp_agent/servers/code_search_server.py).
+_compact_periodic_research (ниже, до-write разведка) никогда не упаковывает
+результаты read_file/read_text_file/read_file_range/read_multiple_files/
+lsp/project_tree в дайджест — только настоящий разведочный шум
+(search_files, list_directory, get_knowledge и т.п.), см. STICKY_TOOL_NAMES
+и _group_is_sticky. Если свернуть уже вернувшийся read_file в прозу
+дайджеста, модель на следующем шаге больше не видит код файла и пытается
+перечитать его — а tool_wrappers.py:_dedupe_read_tool не знает о сжатии
+(свой отдельный read_history, не сообщение в истории) и отвечает "вы уже
+читали этот файл, переиспользуйте тот результат", хотя переиспользовать
+нечего: дайджест прозы код не содержит. В итоге модель тратит лишние
+тул-вызовы (read_text_file, read_file_range с другим диапазоном), гоняясь
+за уже прочитанным файлом другими путями, которые случайно обходят дедуп.
+project_tree добавлен отдельно от остальных read-тулов: это не содержимое
+файла, а карта проекта, которая и дальше нужна модели для ориентации, а
+сам объём у неё и так ограничен (max_entries в
+mcp_agent/servers/code_search_server.py).
 
-Живой прогон #4 (mail-server, 20260708-2109): search_code изначально считался
-"шумом" наравне с project_tree/list_directory — но на задаче-расследовании
-(поиск бага через прицельные грепы по константам/методам) это ОСНОВНОЙ канал
-информации, а не шум: 16 из 38 тул-вызовов за прогон — search_code, и его
-результат — это как раз "путь+строка", которые нужны дословно. Конкретный
-случай: search_code(handleFinalFailure) вернул точные номера строк (123, 132,
-153); через один шаг после упаковки эта информация ушла в прозу дайджеста, и
-модель дословно повторила тот же самый search_code, чтобы получить обратно те
-же номера строк для последующего read_file_range. search_code/search_symbols/
-find_files_by_name — тоже sticky теперь: их вывод и так компактный (см. лимиты
+search_code изначально считался "шумом" наравне с project_tree/
+list_directory, но в расследовании через прицельные грепы по константам/
+методам это основной канал информации, а не шум: его результат — это
+"путь+строка", которые нужны дословно. Если такой результат свернуть в
+прозу дайджеста, точные номера строк теряются, и модель вынуждена
+повторить тот же search_code заново, чтобы получить их обратно для
+последующего read_file_range. Поэтому search_code/search_symbols/
+find_files_by_name тоже sticky: их вывод и так компактный (см. лимиты
 MAX_RESULTS/max_results в code_search_server.py), терять из компрессии
 там особо нечего, а грепами держится расследование целиком.
 
-Живой прогон #5 (XOR-на-Go задача, 20260810): триггер компакта раньше был
-"в истории есть УСПЕШНЫЙ write" (см. _last_write_result_index), а не "история
-реально приближается к num_ctx" — на этом прогоне сработал уже на 3-message
-префиксе (один mkdir), дав дайджест в 108 символов при контексте в 65536
-токенов: ноль пользы (сэкономлена пара сотен символов) за не-нулевой риск
-(любой пересказ — это шанс потерять деталь, см. live-run #3 выше). Теперь
-awrap_model_call сначала проверяет _needs_compaction (грубая chars//4 оценка
+Раньше триггером компакта было наличие УСПЕШНОГО write в истории (см.
+_last_write_result_index), а не то, что история реально приближается к
+num_ctx — такой триггер может сработать уже на 3-message префиксе (один
+mkdir), дав дайджест в 108 символов при контексте в 65536 токенов: ноль
+пользы (сэкономлена пара сотен символов) за не-нулевой риск (любой
+пересказ — это шанс потерять деталь, см. заметку про read_file выше).
+Поэтому awrap_model_call сначала проверяет _needs_compaction (грубая chars//4 оценка
 всей истории против OLLAMA_NUM_CTX * COMPACT_HISTORY_CTX_RATIO, см.
 model_config.py) и пропускает ОБА пути (write-triggered и periodic) целиком,
 если контекст ещё далеко не заполнен. settings.compact_history_enabled — общий
 выключатель поверх этого (/settings), на случай если даже гейтед-по-размеру
 компакт где-то потеряет для конкретной задачи что-то важное.
 
-Живой прогон #6 (XOR-на-Go задача, 20260812): _needs_compaction сравнивал
-объём истории с OLLAMA_NUM_CTX*COMPACT_HISTORY_CTX_RATIO — той же
-захардкоженной-на-импорте константой (65536 по умолчанию), а не с
-settings.get("num_ctx"), реально переданным в ChatOllama для этой чат/
-judge-модели (agent_builder.py:_build_chat_model). num_ctx на этом прогоне
-был занижен до 16384 (см. settings.py, тестировали expert_streaming_enabled)
-— порог компакта получился 32768, вдвое больше реального окна модели.
-Компакт не сработал НИ РАЗУ за весь ~14-минутный ход (3393 сообщения),
-модель потеряла ориентацию в файле и один раз выдумала expected_first_hash,
-которого не было ни в одном её собственном read_file_range. _needs_
-compaction и num_ctx в options _summarize_research теперь читают
+_needs_compaction сравнивал объём истории с
+OLLAMA_NUM_CTX*COMPACT_HISTORY_CTX_RATIO — захардкоженной-на-импорте
+константой (65536 по умолчанию), а не с settings.get("num_ctx"), реально
+переданным в ChatOllama для этой чат/judge-модели (agent_builder.py:
+_build_chat_model). Если num_ctx занижен в рантайме (например, до 16384
+при тестировании expert_streaming_enabled, см. settings.py), порог
+компакта всё равно считается от захардкоженной константы — получается
+вдвое больше реального окна модели (32768 против 16384), и компакт не
+срабатывает вообще, пока история не разрастётся далеко за пределы того,
+что модель реально видит: она теряет ориентацию в файле и может начать
+домысливать содержимое, которого нет ни в одном её собственном read.
+_needs_compaction и num_ctx в options _summarize_research теперь читают
 settings.get("num_ctx") — тот же параметр, что реально уходит в Ollama для
 этого вызова, а не отдельную, независимо выставленную константу.
 
-Живой прогон #7 (glm-4.7-flash/expert-streaming, 20260814): реальный 400 —
-"request (30739 tokens) exceeds the available context size (30208
-tokens)" — при том что _needs_compaction's собственная оценка утверждала,
-что история далеко не дотягивает до порога. Причина: `messages`, которые
-эта функция получала (request.messages) — это LangChain ModelRequest,
-который явно ИСКЛЮЧАЕТ системное сообщение ("# excluding system message"),
-а схемы тулов (request.tools) вообще никогда не входили в оценку.
-Analyzer/Planner с их ~2.7k-токенным системным промптом (prompts.py) и
-~20+ забинженными тулами (у каждого реальные description+parameters)
-реально стоили несколько тысяч токенов, которые эта проверка попросту
-никогда не видела — доля от num_ctx (0.5) держалась только потому, что
-щедрый запас случайно перекрывал эту неучтённую дыру, пока список тулов не
-разросся достаточно, чтобы перекрыть и его. _needs_compaction теперь
+_needs_compaction's собственная оценка может сильно недооценивать реальный
+размер запроса и не поймать переполнение до настоящего 400 от бэкенда,
+например "request (30739 tokens) exceeds the available context size
+(30208 tokens)". Причина: `messages`, которые эта функция получала
+(request.messages) — это LangChain ModelRequest, который явно ИСКЛЮЧАЕТ
+системное сообщение ("# excluding system message"), а схемы тулов
+(request.tools) вообще не входили в оценку. Analyzer/Planner с их
+~2.7k-токенным системным промптом (prompts.py) и ~20+ забинженными тулами
+(у каждого реальные description+parameters) стоят несколько тысяч токенов,
+которые эта проверка не видела вовсе — доля от num_ctx (0.5) держалась
+только потому, что щедрый запас случайно перекрывал эту неучтённую дыру,
+пока список тулов не разросся достаточно, чтобы перекрыть и его.
+_needs_compaction теперь
 принимает system_message/tools и учитывает их тем же chars//4; порог
 сменился с доли от num_ctx на num_ctx минус фиксированный резерв под
 генерацию (OLLAMA_NUM_PREDICT) и под неточность самой оценки — см. её
 собственный докстринг.
 
-Живой прогон #8 (glm-4.7-flash/expert-streaming, analyzer-роль, 20260814,
-сессия 20260814-133743-866a5186): та же ошибка ("request (31564 tokens)
-exceeds the available context size (30208 tokens)"), но на этот раз
+Та же по форме ошибка ("request (31564 tokens) exceeds the available
+context size (30208 tokens)") может пройти и мимо фикса выше:
 _needs_compaction's own оценка (chars//4 + запас в OLLAMA_NUM_PREDICT+3000
-из фикса #7) НИ РАЗУ не сработала за весь ~7-минутный ход — 61 вызов
-bash, ни одной правки (расследование через journalctl/dmesg/docker
-logs). Разница между реальными 31564 токенами и порогом в 22904
-(num_ctx=30000 минус запас 7096) — минимум 8660 токенов, т.е. запас
-"+3000" перекрывал разрыв из прогона #7 (~20+ тулов, английская проза), но
-не этот: содержимое здесь — дампы journalctl/docker logs, плотные
-таймстемпы/hex ID контейнеров/экранированный вложенный JSON, которые
-токенизируются заметно хуже даже кода (близко к 1 токену на 2 символа, а
-не на 4) — ровно тот случай, о котором предупреждал докстринг
-_needs_compaction ("code/JSON-shaped content tokenizes less efficiently"),
-просто в ещё более выраженной форме. Запас поднят с 3000 до 9000 (см. его
+из предыдущего фикса) не срабатывает вовсе на длинном ходе без единой
+правки, состоящем из одних bash-вызовов (расследование через
+journalctl/dmesg/docker logs). Разница между реальными 31564 токенами и
+порогом в 22904 (num_ctx=30000 минус запас 7096) — минимум 8660 токенов,
+т.е. запас "+3000" перекрывал разрыв из предыдущего случая (~20+ тулов,
+английская проза), но не этот: содержимое здесь — дампы
+journalctl/docker logs, плотные таймстемпы/hex ID контейнеров/
+экранированный вложенный JSON, которые токенизируются заметно хуже даже
+кода (близко к 1 токену на 2 символа, а не на 4) — ровно тот случай, о
+котором предупреждал докстринг _needs_compaction ("code/JSON-shaped
+content tokenizes less efficiently"), просто в ещё более выраженной
+форме. Запас поднят с 3000 до 9000 (см. его
 докстринг) — но это ПОДГОНКА КОНСТАНТЫ под конкретный измеренный разрыв,
 не гарантия на будущее для ещё более плотного контента, поэтому вторая,
 структурная часть фикса — is_context_overflow_error ниже (детектор) плюс
@@ -171,18 +166,18 @@ PERIODIC_CHUNK_TOOL_CALLS = 8
 # Tool calls whose result the model may still need verbatim later: actual
 # file/code content (read_file, lsp) or exact grep/glob hits (grep_search/
 # glob_search — "path:line: match"/file paths, the precise locations an
-# investigation is actually built on, not noise; see live-run-#4 in the
-# module docstring). Orientation noise that's genuinely safe to paraphrase
-# away — get_knowledge, dead-end greps that found nothing — is NOT in this
-# set. A group containing any of these names is "sticky" —
+# investigation is actually built on, not noise; see the search_code note in
+# the module docstring). Orientation noise that's genuinely safe to
+# paraphrase away — get_knowledge, dead-end greps that found nothing — is
+# NOT in this set. A group containing any of these names is "sticky" —
 # _compact_periodic_research always keeps it raw, never folds it into a
-# digest. See the live-run-#3 note in the module docstring: folding an
-# already-returned read_file result into prose left the model unable to see
-# that file's actual code on the next turn, and
+# digest. Folding an already-returned read_file result into prose leaves the
+# model unable to see that file's actual code on the next turn, and
 # tool_wrappers.py:_dedupe_read_tool (a separate mechanism, with its own
-# history, unaware of compaction) then refused to let it re-read the same
+# history, unaware of compaction) then refuses to let it re-read the same
 # path+params, telling it to "reuse that earlier result" — which no longer
-# existed anywhere in what the model could see.
+# exists anywhere in what the model can see (see the read_file note in the
+# module docstring).
 STICKY_TOOL_NAMES = {"read_file", "lsp", "grep_search", "glob_search"}
 
 _COMPACT_SYSTEM_PROMPT = (
@@ -220,17 +215,18 @@ _MISSING = object()
 
 def _task_frame_len(messages: list) -> int:
     """Число ВЕДУЩИХ HumanMessage подряд в начале истории — неприкосновенная
-    рамка задачи, а не история для сжатия. Раньше неприкосновенным считался
-    только messages[0] — верно для старой архитектуры с одним seed-
-    сообщением, но в пайплайне Coder/Verifier получает ДВА ведущих
-    HumanMessage подряд (mcp_agent/pipeline.py:_seed_stage_payload —
-    исходный диалог + дайджест с Планом Planner'а, приклеенный последним
-    HumanMessage перед тем, как модель начинает действовать). Второй молча
-    резался при сжатии и не попадал ни в task_text, ни в transcript (оба
-    ниже раньше видели только AIMessage/ToolMessage) — План вместе с
-    точными путями к файлам исчезал из контекста после первого же успешного
-    write (живой прогон 67fac007f4c34ba88d899fbb175f7313: Coder после этого
-    перепутал путь к контроллеру и потратил 6 тулов на его повторный поиск)."""
+    рамка задачи, а не история для сжатия. Считать неприкосновенным только
+    messages[0] верно для старой архитектуры с одним seed-сообщением, но в
+    пайплайне Coder/Verifier получает ДВА ведущих HumanMessage подряд
+    (mcp_agent/pipeline.py:_seed_stage_payload — исходный диалог + дайджест
+    с Планом Planner'а, приклеенный последним HumanMessage перед тем, как
+    модель начинает действовать). Если считать неприкосновенным только
+    messages[0], второй молча режется при сжатии и не попадает ни в
+    task_text, ни в transcript (оба ниже иначе видят только
+    AIMessage/ToolMessage) — План вместе с точными путями к файлам исчезает
+    из контекста после первого же успешного write, и модель может
+    перепутать путь к нужному файлу и потратить лишние тул-вызовы на его
+    повторный поиск."""
     n = 0
     for m in messages:
         if isinstance(m, HumanMessage):
@@ -459,7 +455,7 @@ def _last_write_result_index(messages: list) -> int | None:
     match) so the cut point keeps moving forward as more edits succeed
     later in a long round, instead of freezing at the first one and
     leaving everything after it — often most of a long debugging round —
-    to grow unbounded (see module docstring, live run #2).
+    to grow unbounded (see module docstring).
 
     A write that's still pending (its ToolMessage hasn't arrived yet) or
     FAILED does not move the cut point — that exchange, and everything
@@ -484,10 +480,10 @@ def _last_write_result_index(messages: list) -> int | None:
         # "success" even when nothing was written. Reuses
         # the same check as coder_verdict (self_heal.py:_failed_write_
         # messages) so "counts as a successful write" means the same
-        # thing everywhere — see that function's docstring for the live
-        # run this fixes (a failed write kept getting treated as done,
-        # erasing the exact mismatch the model needed to see to retry
-        # correctly, so it just resent the identical broken call forever).
+        # thing everywhere — without it, a failed write gets treated as
+        # done, erasing the exact mismatch the model needed to see to retry
+        # correctly, so it just resends the identical broken call forever
+        # (see that function's docstring).
         if results and not _failed_write_messages(results):
             last_ok = i
     return last_ok

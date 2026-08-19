@@ -1,8 +1,8 @@
 """_AskUserFinalizeNumPredictMiddleware (mcp_agent/ask_user_tool.py) — caps
 the model's budget for the ONE turn right after a real ask_user answer, so
-a model that re-derives instead of restating its plan (live incident,
-2026-08-19: ~1900 tokens/~2min against the full OLLAMA_NUM_PREDICT budget)
-gets cut off far sooner. No real LangChain agent/model involved — a fake
+a model that re-derives instead of restating its plan (which can burn
+~1900 tokens/~2min against the full OLLAMA_NUM_PREDICT budget) gets cut
+off far sooner. No real LangChain agent/model involved — a fake
 request/handler is enough to exercise the branching logic."""
 from types import SimpleNamespace
 

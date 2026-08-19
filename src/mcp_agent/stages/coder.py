@@ -36,16 +36,15 @@ def coder_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_f
     failed = _failed_write_messages(new_tool_msgs)
     if failed:
         errors = "\n".join(f"- {m.name}: {str(m.content)[:500]}" for m in failed)
-        # Live run (mail-server, ee810cad03a24f33beb9b21b9d2b25c0): this
-        # guidance used to just say "read the error and fix your
-        # arguments" — technically correct, but vague enough that the next
-        # attempt spent its ENTIRE round re-reading files and never
-        # retried the write at all (coder_verdict then failed it a SECOND
-        # time for "no write/edit tool was called this round"). edit_file's
-        # own error already says exactly what's wrong (old_string not
-        # found, or found more than once and needs more context/
-        # replace_all) — that's normally enough to fix the call directly
-        # without a fresh read.
+        # A vaguer guidance like "read the error and fix your arguments" is
+        # technically correct but vague enough that the next attempt can
+        # spend its ENTIRE round re-reading files and never retry the
+        # write at all (coder_verdict then fails it a SECOND time for "no
+        # write/edit tool was called this round"). edit_file's own error
+        # already says exactly what's wrong (old_string not found, or
+        # found more than once and needs more context/replace_all) —
+        # that's normally enough to fix the call directly without a fresh
+        # read.
         return (
             "Your write/edit call failed — nothing was written, don't treat it "
             "as done. The error below already tells you exactly what's wrong "

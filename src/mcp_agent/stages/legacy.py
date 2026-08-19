@@ -220,7 +220,7 @@ def legacy_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_
     # Собираем корректирующую подсказку из ПРИМЕНИМЫХ частей вместо одного
     # жёстко зашитого текста — иначе сценарий "записан код" получал бы совет
     # про bash даже когда провал был из-за непрочитанного диффа, и наоборот
-    # (живой прогон, см. оригинальный комментарий в agent.py).
+    # (см. оригинальный комментарий в agent.py).
     guidance_parts = []
     if failed_writes:
         errors = "\n".join(f"- {m.name}: {_tool_text(m.content)[:500]}" for m in failed_writes)

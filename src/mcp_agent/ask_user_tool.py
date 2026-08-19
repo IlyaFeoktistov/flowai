@@ -91,12 +91,11 @@ async def ask_user(
     text. Call it ALONE — no other tool calls in the same turn — and wait
     for its result before doing anything else; never guess ahead or start
     implementing while this is pending."""
-    # Живой прогон: модель не всегда следует схеме {label, description} и
-    # иногда подставляет options как голые строки (как раньше, до этой
-    # правки) — `AskUserOption | str` в аннотации принимает оба варианта
-    # без ошибки валидации, здесь просто нормализуем к одному виду вместо
-    # того, чтобы ронять весь вызов из-за одного "неправильно" оформленного
-    # варианта.
+    # Модель не всегда следует схеме {label, description} и иногда
+    # подставляет options как голые строки — `AskUserOption | str` в
+    # аннотации принимает оба варианта без ошибки валидации, здесь просто
+    # нормализуем к одному виду вместо того, чтобы ронять весь вызов из-за
+    # одного "неправильно" оформленного варианта.
     option_dicts = [
         o.model_dump() if isinstance(o, AskUserOption) else {"label": str(o), "description": ""}
         for o in (options or [])
@@ -139,13 +138,14 @@ class _ToolErrorGuardMiddleware(AgentMiddleware):
     (see langgraph.prebuilt.tool_node._default_handle_tool_errors) and blows
     up the entire stream_chat call, skipping the retry/guidance logic below
     that expects tool failures to show up as ToolMessages (see the
-    `failed_writes` handling). Живой прогон: edit_file получил `edits` как
+    `failed_writes` handling). Например, если edit_file получает `edits` как
     голую строку "oldText, newText" вместо массива — _normalize_edit_file_args
     намеренно не трогает не-JSON значения (пусть падает с исходной ошибкой),
-    но эта "исходная ошибка" оказалась обычным исключением, а не
-    ToolInvocationError/ToolException, и снесла весь ход целиком вместо того
-    чтобы стать retryable ToolMessage. Ловим здесь, до ToolNode-обработчика —
-    так любой сбой тула (не только этот) становится обычным провалом раунда."""
+    а эта "исходная ошибка" — обычное исключение, а не
+    ToolInvocationError/ToolException, и без перехвата сносит весь ход
+    целиком вместо того чтобы стать retryable ToolMessage. Ловим здесь, до
+    ToolNode-обработчика — так любой сбой тула (не только этот) становится
+    обычным провалом раунда."""
 
     async def awrap_tool_call(self, request, handler):
         try:
@@ -162,8 +162,8 @@ class _ToolErrorGuardMiddleware(AgentMiddleware):
 class _AskUserGuardMiddleware(AgentMiddleware):
     """ask_user должен быть ЕДИНСТВЕННЫМ tool_call в своём AIMessage —
     иначе модель успевает выполнить другие действия, так и не дождавшись
-    ответа на СВОЙ ЖЕ вопрос (живой баг: модель спросила "какой из способов
-    вам больше подходит?" и в том же ходе уже вызвала другой тул с одним из
+    ответа на СВОЙ ЖЕ вопрос (например, спросить "какой из способов вам
+    больше подходит?" и в том же ходе уже вызвать другой тул с одним из
     вариантов, не дожидаясь реального ответа). Системный промпт просит
     модель не смешивать их, но текстовая инструкция — не гарантия;
     подстраховываемся на уровне выполнения тулов, а не только промптом."""
@@ -186,13 +186,12 @@ class _AskUserGuardMiddleware(AgentMiddleware):
 
 
 class _AskUserFinalizeMiddleware(AgentMiddleware):
-    """Planner-only backstop. Live incident: qwen3-coder:30b, as Planner,
-    called ask_user 8 times over ~11 minutes with near-duplicate "готов ли
-    я...?" confirmations — the user answered "Да"/"Продолжить"/"Выполнить"
-    every single time, but the model kept reading a few more lines and
-    asking again instead of finalizing, until the user killed the run by
-    hand. planner_verdict (mcp_agent/stages/planner.py) already treats "an
-    ask_user call happened this round" as done, and
+    """Planner-only backstop. Without it, the model can call ask_user
+    repeatedly with near-duplicate confirmation questions — even after the
+    user answers affirmatively every single time, it can keep reading a
+    few more lines and asking again instead of finalizing, with nothing to
+    make it stop on its own. planner_verdict (mcp_agent/stages/planner.py)
+    already treats "an ask_user call happened this round" as done, and
     _planner_system_prompt (mcp_agent/prompts.py) already tells the model
     to restate its final plan right after ask_user returns and stop — but
     both only take effect once the underlying agent graph run actually
@@ -207,15 +206,15 @@ class _AskUserFinalizeMiddleware(AgentMiddleware):
     end immediately after the first confirmation, handing off to Coder.
 
     MUST only count a SUCCESSFUL ask_user call as "the user answered" —
-    live bug: the model's first ask_user call had `options` as a bare dict
-    instead of a list, which create_agent's ToolNode turns into a
+    if the model's ask_user call has `options` as a bare dict instead of a
+    list, create_agent's ToolNode turns that into a
     ToolInvocationError -> ToolMessage(name="ask_user", status="error")
     (see _ToolErrorGuardMiddleware above) WITHOUT ever reaching the user.
-    This check used to match on name alone, so it saw that error message,
-    believed the user had already confirmed a plan they never saw, and
-    blocked the model's very next (correctly-formed) ask_user call from
-    ever running — the model then dutifully "restated the confirmed plan"
-    that had, in fact, never been shown to anyone. Filtering to
+    Matching on name alone would treat that error message as a real answer,
+    believe the user had already confirmed a plan they never saw, and
+    block the model's very next (correctly-formed) ask_user call from
+    ever running — the model would then dutifully "restate the confirmed
+    plan" that had, in fact, never been shown to anyone. Filtering to
     status != "error" makes only a real, delivered answer count."""
 
     async def awrap_tool_call(self, request, handler):
@@ -243,14 +242,13 @@ class _AskUserFinalizeNumPredictMiddleware(AgentMiddleware):
     """Planner-only. _AskUserFinalizeMiddleware above stops the model from
     calling MORE TOOLS once ask_user has answered, but says nothing about
     how much plain TEXT it's allowed to generate for that final restate —
-    live incident (2026-08-19): forced into text-only mode, the model
-    still re-derived a brand-new plan from scratch instead of restating the
-    one it already put in the ask_user question, and rambled for ~1900
-    tokens/~2min against OLLAMA_NUM_PREDICT's full 4096 budget before the
-    user killed the run thinking it had hung. See
-    model_config.ASK_USER_FINALIZE_NUM_PREDICT's docstring for the same
-    "small model + big budget = incoherent runaway" pattern already
-    documented for router.py:answer_casual.
+    without a cap, forced into text-only mode the model can still re-derive
+    a brand-new plan from scratch instead of restating the one it already
+    put in the ask_user question, and ramble for close to
+    OLLAMA_NUM_PREDICT's full 4096-token (~2min) budget instead of
+    stopping. See model_config.ASK_USER_FINALIZE_NUM_PREDICT's docstring
+    for the same "small model + big budget = incoherent runaway" pattern
+    already documented for router.py:answer_casual.
 
     Only swaps the budget for the ONE model call right after a real
     (status != "error") ask_user answer exists — every other Planner call
@@ -259,7 +257,7 @@ class _AskUserFinalizeNumPredictMiddleware(AgentMiddleware):
     ask_user call's own `options` argument can be long).
 
     Per-backend kwarg shape copied from self_heal.py:_extract_ask_user_shape
-    (its docstring has the two live bugs that shaped it): ChatOllama needs
+    (see its docstring for the two failure modes that shaped it): ChatOllama needs
     num_predict inside options{} (bind()'ing it at the top level makes
     AsyncClient.chat() reject it as an unknown kwarg) and options{} must
     repeat num_ctx (it REPLACES, not merges, Ollama's per-call params) —
@@ -300,11 +298,11 @@ class _OutOfProjectWriteApprovalMiddleware(AgentMiddleware):
     write_file внутри проекта (tools/confirm.py:ask_permission), просто
     условие срабатывания — путь ВНЕ repo_path, а не имя тула статично.
 
-    Живой инцидент, который стал поводом для всей этой развилки: model
-    попыталась выйти в соседний проект, получила жёсткий "Access denied" (в
-    старой, узкой конфигурации сервера) и 30 минут бесцельно копалась в
-    НЕПРАВИЛЬНОМ репозитории вместо честного "не могу"/вопроса
-    пользователю. Отказ approval здесь — обычный ToolMessage с понятной
+    Без approval-развилки модель, наткнувшись на жёсткий "Access denied" (в
+    старой, узкой конфигурации сервера) при попытке выйти в соседний
+    проект, не может отличить отказ от сбоя и рискует надолго зависнуть,
+    бесцельно копаясь не в том репозитории, вместо честного "не могу"/
+    вопроса пользователю. Отказ approval здесь — обычный ToolMessage с понятной
     причиной, не exception — модель должна его увидеть и остановиться, не
     считать сбоем тула и ретраить тот же путь."""
 

@@ -15,8 +15,8 @@ _get_tools() (никаких MCP-подпроцессов не поднимае�
   investigator_tools/planner_tools/executor_tools/...) — раньше здесь была
   фиксированная категория (casual/snippet/quick_fix/explain/project_task),
   и каждый новый несовпадающий с существующими случай требовал новой
-  категории + нового захардкоженного маршрута в pipeline.py. Живой пример:
-  вопрос "какая квантизация у локальной модели" не подходил ни под "casual"
+  категории + нового захардкоженного маршрута в pipeline.py. Например,
+  вопрос "какая квантизация у локальной модели" не подходит ни под "casual"
   (нужна настоящая команда, не то, что модель просто знает), ни под
   "explain" по-хорошему (речь не про ЭТОТ проект вообще) — набор флагов
   (needs_project=false, needs_shell=true, needs_change=false) описывает
@@ -33,9 +33,10 @@ _get_tools() (никаких MCP-подпроцессов не поднимае�
 change_is_ambiguous (только когда needs_change=true) — узкая, однозначная
 правка не нуждается в отдельном согласовании плана (старое kind="quick_fix"):
 pipeline.py заходит прямо в объединённую investigate+write стадию, минуя
-Planner целиком — живой инцидент, который это обходит: Planner застрял на
-8 циклах "готов ли я...?" при правке в проекте из 3 файлов, где само
-согласование плана было накладными расходами, не страховкой.
+Planner целиком — без этого Planner может застрять в цикле повторных
+"готов ли я...?" подтверждений (например 8 циклов) при правке в проекте
+из нескольких файлов, где само согласование плана было накладными
+расходами, не страховкой.
 classify_intent остаётся fail-open в сторону true при любой неуверенности —
 change_is_ambiguous=false должно ловить только случаи, где риск неверной
 трактовки объёма/подхода реально низкий.
@@ -43,13 +44,13 @@ change_is_ambiguous=false должно ловить только случаи, �
 needs_change=false с needs_project/needs_shell=true (старое kind="explain")
 — read-only вопрос о проекте/окружении: идёт только в investigator-стадию,
 а её саммари сразу становится финальным ответом, Planner/Coder/Verifier не
-запускаются вообще (см. stream_chat в pipeline.py). Живой инцидент, который
-это обходит: вопрос вида "посмотри незакоммиченные правки и объясни"
-раньше не имел отдельной категории — Planner, получив чисто информационный
-запрос без реального "что поправить", попытался прочитать файл по
-неверному пути, застрял на бессмысленном уточняющем вопросе и не
-остановился, даже когда пользователь явно попросил (см. tools/confirm.py:
-_is_stop_intent — отдельный, независимый фикс той же сессии).
+запускаются вообще (см. stream_chat в pipeline.py). Без отдельной категории
+для этого случая вопрос вида "посмотри незакоммиченные правки и объясни"
+рискует уйти в Planner, который, получив чисто информационный запрос без
+реального "что поправить", пытается прочитать файл по неверному пути,
+застревает на бессмысленном уточняющем вопросе и не останавливается, даже
+когда пользователь явно просит (см. tools/confirm.py:_is_stop_intent —
+отдельный, независимый фикс той же проблемы).
 classify_intent просит fail-open в сторону needs_change=true при любой
 неуверенности — ошибочное false тише проглатывает реально нужную правку
 (Coder до неё вообще не доходит), чем ошибочное true на чистом вопросе
@@ -68,8 +69,8 @@ from utils.parsing import parse_json_loose
 
 _FLAG_KEYS = ("needs_project", "needs_shell", "needs_change", "change_is_ambiguous")
 
-# See answer_casual's own docstring for the live run this bounds — casual
-# has no compaction middleware at all (unlike every pipeline role), so an
+# See answer_casual's own docstring for the failure mode this bounds —
+# casual has no compaction middleware at all (unlike every pipeline role), so an
 # unbounded history here is pure, ever-growing raw context with nothing
 # trimming it. A bit larger than classify_intent's own messages[-2:] (that
 # one only needs enough to not misread a short follow-up in isolation) —
@@ -178,14 +179,13 @@ async def _get_classify_model():
     для classify_intent, ответ всегда обязан быть чистым JSON.
 
     Через _build_chat_model (не голый _ChatOllamaWithNumKeep с зашитым
-    base_url на дефолтный Ollama-хост) — живой баг (2026-08-13): пока
-    основная чат-модель шла через expert-streaming backend (порт 8090,
-    settings.expert_streaming_enabled), classify_intent на каждый ход всё
-    равно стучался в обычный Ollama API, который тихо поднимал СВОЙ,
-    отдельный полный процесс модели (~20 ГБ весов) с другим num_ctx —
-    VRAM ушла с ~4 ГБ занятых до 29 МиБ свободных, два резидентных
-    инстанса одной и той же модели одновременно. _build_chat_model — единая
-    точка сборки, которая уже умеет выбирать backend правильно."""
+    base_url на дефолтный Ollama-хост): если основная чат-модель идёт через
+    expert-streaming backend (порт 8090, settings.expert_streaming_enabled),
+    а classify_intent при этом стучится в обычный Ollama API напрямую, тот
+    тихо поднимает СВОЙ, отдельный полный процесс модели (~20 ГБ весов) с
+    другим num_ctx — VRAM уходит с ~4 ГБ занятых до 29 МиБ свободных, два
+    резидентных инстанса одной и той же модели одновременно. _build_chat_model
+    — единая точка сборки, которая уже умеет выбирать backend правильно."""
     current_model = settings.get("chat_model")
 
     async def _build():
@@ -243,9 +243,9 @@ async def classify_intent(messages: list[dict]) -> dict:
         # to {} (parse_json_loose returned None or an empty/malformed
         # dict) — every invalid case then logs the same "{}" regardless of
         # what the model actually said, hiding the real diagnostic signal.
-        # resp.content is the model's actual raw text (live-run 2026-08-14:
-        # needed this to even notice the regression the has_tools change
-        # caused — see agent_builder.py:_build_chat_model's docstring).
+        # resp.content is the model's actual raw text — needed to notice
+        # regressions like the has_tools change (see agent_builder.py:
+        # _build_chat_model's docstring).
         log_event("router_classify_invalid", raw=str(resp.content))
     except Exception as e:
         log_event("router_classify_failed", error=str(e))
@@ -259,9 +259,9 @@ async def _get_casual_agent():
     agent_builder.py:_build_agent уже применяет для voice_mode
     (agent_tools=[] означает отсутствие 60-тульного оверхеда в промпте).
 
-    Через _build_chat_model — см. docstring _get_classify_model выше про
-    живой баг с двумя одновременными полными процессами модели, если
-    строить ChatOllama здесь напрямую вместо единой точки сборки."""
+    Через _build_chat_model — см. docstring _get_classify_model выше: строить
+    ChatOllama здесь напрямую вместо единой точки сборки рискует поднять два
+    одновременных полных процесса модели, как описано там."""
     current_model = settings.get("chat_model")
 
     async def _build():
@@ -307,27 +307,25 @@ async def answer_casual(messages: list[dict], on_event=None) -> str:
     UI (answer_start/answer_chunk/answer_end) — иначе пользователь увидел
     бы финальный текст одним куском вместо привычного стриминга.
 
-    messages режется до последних _CASUAL_HISTORY_WINDOW — раньше сюда шла
-    ВСЯ история хода целиком (_get_casual_agent строит агента с
-    middleware=[], в отличие от ролей пайплайна — никакого
-    _CompactResearchMiddleware, никакого сжатия вообще). Живой прогон
-    (2026-08-14, GLM-4.7-Flash/expert-streaming, сессия из ~2 часов вперемешку
-    debugging Go-проекта/git/восстановления файлов): простой вопрос "напиши
-    первые строки Анны Карениной" в конце этой длинной разнородной истории
-    получил ПОЛНЫЙ распад связности — модель вперемешку с ответом стала вслух
-    рассуждать про собственный системный промпт ("Does this count as writing
-    CODE according to rule?"), путать его с промптами других ролей, которые
-    видела раньше в этом же ходе, и генерировать случайный код/мешанину
-    языков. Два прямых теста тем же прыжком в backend (curl, в обход
-    приложения) — тот же вопрос без истории и тот же вопрос с системным
-    промптом casual, но без остальной истории — оба дали чистый корректный
-    ответ: не бэкенд и не промпт сами по себе, а именно объём/разнородность
-    истории, которую casual (в отличие от РОЛЕЙ ПАЙПЛАЙНА, все с компакцией)
-    получал целиком, без единой попытки сжатия. classify_intent (выше в этом
-    же файле) уже режет историю до последних 2 сообщений для классификации
-    по той же причине (короткий ответ не должен теряться без контекста, но и
-    не должен тащить всё); ответ casual — то же самое, только с чуть большим
-    окном, чтобы не терять недавний контекст короткого диалога."""
+    messages режется до последних _CASUAL_HISTORY_WINDOW, а не идёт целиком:
+    _get_casual_agent строит агента с middleware=[] (в отличие от ролей
+    пайплайна — никакого _CompactResearchMiddleware, никакого сжатия
+    вообще), поэтому вся история хода без обрезки — это неограниченно
+    растущий сырой контекст, ничем не сжимаемый. Длинная разнородная
+    история (например несколько часов вперемешку debugging другого
+    проекта/git/восстановления файлов) может довести модель до полного
+    распада связности на простом вопросе в конце: она начинает вслух
+    рассуждать про собственный системный промпт, путать его с промптами
+    других ролей, виденными раньше в этом же ходе, и генерировать случайный
+    код/мешанину языков — при этом тот же вопрос без истории или с
+    системным промптом casual, но без остальной истории, даёт чистый
+    корректный ответ, то есть причина именно в объёме/разнородности
+    истории, а не в бэкенде или промпте сами по себе. classify_intent (выше
+    в этом же файле) по той же причине уже режет историю до последних 2
+    сообщений для классификации (короткий ответ не должен теряться без
+    контекста, но и не должен тащить всё); ответ casual — то же самое,
+    только с чуть большим окном, чтобы не терять недавний контекст
+    короткого диалога."""
     if on_event:
         await on_event({"type": "stage_changed", "stage": "casual"})
     agent, model = await _get_casual_agent()

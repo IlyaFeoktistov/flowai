@@ -53,12 +53,12 @@ async def web_search(query: str) -> str:
         return "Error: search query not specified"
 
     # searxng_reachable/unresponsive_engines — different failure mode than
-    # "SearXNG is down": a live run showed SearXNG answer 200 OK with 0
-    # results because ALL its upstream engines were rate-limited/CAPTCHA'd
-    # at once (brave/duckduckgo/startpage all in the response's own
-    # "unresponsive_engines"), yet the old code fell through to the SAME
-    # "SearXNG is not running" message as a real connection failure — false
-    # and unhelpful, since SearXNG was never down at all.
+    # "SearXNG is down": SearXNG can answer 200 OK with 0 results because
+    # ALL its upstream engines are rate-limited/CAPTCHA'd at once (named in
+    # the response's own "unresponsive_engines", e.g. brave/duckduckgo/
+    # startpage together) — that must not be reported with the SAME
+    # "SearXNG is not running" message as a real connection failure, since
+    # SearXNG was never down at all.
     searxng_reachable = False
     unresponsive_engines: list = []
     try:

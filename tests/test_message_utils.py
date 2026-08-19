@@ -1,8 +1,8 @@
 """mcp_agent/message_utils.py — _calls_by_id (single home for the
 tool_call_id -> tc join, previously copy-pasted in 4 places) and the
-repeated-identical-tool-call nudge in _dedupe_identical_tool_results (live
-incident: Verifier looped on an identical failing `go get` call 5x with no
-progress, see message_utils.py's comment on the nudge branch)."""
+repeated-identical-tool-call nudge in _dedupe_identical_tool_results, which
+stops a role from looping on an identical failing call (e.g. `go get`)
+with no progress — see message_utils.py's comment on the nudge branch."""
 from conftest import ai_message, tool_message
 
 from mcp_agent.message_utils import _calls_by_id, _dedupe_identical_tool_results, _find_call_by_id

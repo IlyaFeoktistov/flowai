@@ -39,15 +39,15 @@ from mcp_agent.model_config import (
 from mcp_agent.stage_runner import run_stage
 from utils.parsing import parse_json_loose
 
-# Живой инцидент: 30 оказалось слишком тесно для character creation —
-# один ход там легко тратит 11+ tool call'ов (set_character, location,
-# calendar, weather, level, gold, 2x inventory item, 2x equip) уже ДО того,
-# как мастер вообще начинает писать вступительную сцену, а recursion_limit
-# в LangGraph считает каждый проход agent-node/tool-node отдельным шагом, не
-# "ход = 1 шаг". Раунд оборвался ПОСРЕДИ работы (см. dnd_stream_chat про
-# hit_recursion_limit) — пользователь увидел не ответ мастера, а пустой/
-# оборванный текст, что выглядело как "зависание/зацикливание", хотя на
-# самом деле это был жёсткий обрыв по бюджету шагов. Поднято до масштаба
+# 30 недостаточно для character creation — один ход там легко тратит 11+
+# tool call'ов (set_character, location, calendar, weather, level, gold, 2x
+# inventory item, 2x equip) уже ДО того, как мастер вообще начинает писать
+# вступительную сцену, а recursion_limit в LangGraph считает каждый проход
+# agent-node/tool-node отдельным шагом, не "ход = 1 шаг". При обрыве
+# раунда посреди работы (см. dnd_stream_chat про hit_recursion_limit)
+# пользователь видит не ответ мастера, а пустой/оборванный текст, что
+# выглядит как "зависание/зацикливание", хотя на самом деле это жёсткий
+# обрыв по бюджету шагов. Значение поднято до масштаба
 # CODER_RECURSION_LIMIT (model_config.py) — не привязано к нему напрямую,
 # dnd не роль кодинг-пайплайна, свой независимый бюджет, просто того же
 # порядка.
@@ -75,24 +75,23 @@ _QUESTION_END_RE = re.compile(r"[?？][\s\"'»)\]]*$")
 # Sentinel embedded in a ToolMessage's content by _StopAfterQuestionMiddleware
 # .awrap_tool_call, detected by its own .awrap_model_call to hard-stop the
 # ReAct loop before the model gets another generation hop — see that class's
-# docstring for the live incident this replaced a text-only note with.
+# docstring for why a text-only instruction alone wasn't reliable enough.
 _STOP_MARKER = "[[DND_STOP_AFTER_QUESTION]]"
 
 
 class _StopAfterQuestionMiddleware(AgentMiddleware):
-    """Live bug: the DM asked the player a question AND called a tool in
-    the SAME reply (e.g. dnd_set_current_threat while introducing an
-    enemy) — LangGraph's ReAct loop then gave the model one more
-    generation hop after the tool result came back, and that hop kept
+    """Guards against the DM asking the player a question AND calling a tool
+    in the SAME reply (e.g. dnd_set_current_threat while introducing an
+    enemy): LangGraph's ReAct loop then gives the model one more
+    generation hop after the tool result comes back, and that hop can keep
     narrating as if the player had already answered, when they hadn't
-    said anything yet ("отвечая за меня" — live user report). The system
-    prompt now says to stop after a question even across a tool call, but
-    plain instruction text alone wasn't reliable enough on its own
-    elsewhere in this project either — this is the same mechanical-
-    backstop pattern as _AskUserFinalizeMiddleware (mcp_agent/
-    ask_user_tool.py) for the coding pipeline's ask_user tool, just for a
-    question embedded in ordinary narrative text instead of a dedicated
-    tool call.
+    said anything yet. The system prompt says to stop after a question
+    even across a tool call, but plain instruction text alone isn't
+    reliable enough on its own elsewhere in this project either — this is
+    the same mechanical-backstop pattern as _AskUserFinalizeMiddleware
+    (mcp_agent/ask_user_tool.py) for the coding pipeline's ask_user tool,
+    just for a question embedded in ordinary narrative text instead of a
+    dedicated tool call.
 
     Can't outright BLOCK the tool call the way that middleware blocks a
     stray tool call after ask_user — the tool call here is usually
@@ -101,15 +100,15 @@ class _StopAfterQuestionMiddleware(AgentMiddleware):
     that issued it ends in a question — if so, tag the tool's own result
     with a sentinel marker (_STOP_MARKER).
 
-    Live incident (session 20260807-171951-c700b4ca, seq 39-58): a text-only
-    note asking the model to stop was NOT reliable — the model read the note
-    and, on the very next hop, still kept going: called dnd_set_current_threat
-    to introduce a new enemy, then on the hop after THAT called dnd_roll_check
-    for an action the player never actually took, narrating two more turns'
-    worth of story the player never had a chance to respond to. Same lesson
-    as everywhere else in this project: an instruction embedded in text is
-    something the model can choose to ignore; it needs a mechanical stop.
-    So awrap_model_call below inspects the trailing tool results BEFORE
+    A text-only note asking the model to stop is not reliable on its own:
+    the model can read the note and, on the very next hop, still keep
+    going — e.g. call dnd_set_current_threat to introduce a new enemy,
+    then on the hop after that call dnd_roll_check for an action the
+    player never actually took, narrating further turns of story the
+    player never had a chance to respond to. Same lesson as everywhere
+    else in this project: an instruction embedded in text is something the
+    model can choose to ignore; it needs a mechanical stop. So
+    awrap_model_call below inspects the trailing tool results BEFORE
     letting the model run again — if any carries the sentinel, the model is
     never invoked at all for that hop; an empty AIMessage is returned
     directly, which ends the ReAct loop right there without generating a
@@ -326,13 +325,12 @@ def _context_note(game_id: int) -> str:
     if game["race"] or game["class"]:
         parts.append(f"Character: race={game['race'] or '(not set)'}, class={game['class'] or '(not set)'}.")
     else:
-        # Live-tested failure mode (small local models): asked race, player
-        # answered, asked class, player answered — model narrated "you are
-        # now a dwarf archer" in plain text and moved straight into the
-        # opening scene WITHOUT ever calling dnd_set_character, leaving the
-        # game's race/class permanently NULL in storage even though the
+        # Small local models can narrate the race/class choice in plain
+        # text (e.g. "you are now a dwarf archer") and move straight into
+        # the opening scene WITHOUT ever calling dnd_set_character, leaving
+        # the game's race/class permanently NULL in storage even though the
         # conversation clearly settled both. A static system-prompt
-        # instruction alone didn't prevent it; this per-turn, state-aware
+        # instruction alone doesn't prevent this; this per-turn, state-aware
         # reminder (same pattern as pipeline.py's _investigator_scope_note)
         # fires on every single turn until the tool call actually lands.
         parts.append(
@@ -357,11 +355,11 @@ def _context_note(game_id: int) -> str:
     if game["current_threat"]:
         threat_level = game["current_threat_level"] or 1
         player_level = game["level"]
-        # Явное сравнение силы посчитано ЗДЕСЬ, в коде, не оставлено модели
-        # на арифметику/оценку "на глаз" — живой запрос пользователя: агент
-        # не должен верить заявлению игрока об исходе спорной схватки на
-        # слово, ему нужно явно видеть, что силы неравны, а не выводить это
-        # из двух чисел самостоятельно (не всегда получается надёжно).
+        # Явное сравнение силы посчитано ЗДЕСЬ, в коде, а не оставлено
+        # модели на арифметику/оценку "на глаз": агент не должен верить
+        # заявлению игрока об исходе спорной схватки на слово, ему нужно
+        # явно видеть, что силы неравны, а не выводить это из двух чисел
+        # самостоятельно (модель не всегда делает это надёжно).
         if threat_level >= player_level + 3:
             gap = "MUCH stronger than the player — a claimed easy/instant win here is implausible"
         elif threat_level > player_level:
@@ -406,12 +404,12 @@ def _context_note(game_id: int) -> str:
     return " ".join(parts)
 
 
-# Live bug: dnd_end_chapter never fired ONCE in a real ~35-minute, 70+
-# message session despite the prompt's own "per-scene, not per-quest"
-# guidance and at least 2 obvious scene changes (village -> tavern) —
-# static prompt text alone wasn't enough here either, same lesson as the
-# race/class reminder above. Once a chapter has clearly run long, remind
-# the model EVERY turn until it actually closes one.
+# Static prompt guidance alone ("per-scene, not per-quest") doesn't
+# reliably make the model call dnd_end_chapter — a chapter can run for
+# many turns and several obvious scene changes without ever closing,
+# same lesson as the race/class reminder above. Once a chapter has
+# clearly run long, remind the model EVERY turn until it actually closes
+# one.
 _CHAPTER_LENGTH_REMINDER_THRESHOLD = 8  # ~4 back-and-forth exchanges
 
 
@@ -462,18 +460,18 @@ async def _get_dnd_agent(game_id: int):
             num_predict=OLLAMA_NUM_PREDICT,
             reasoning=settings.get("show_thinking"),
             temperature=MODEL_TEMPERATURE,
-            # Live bug: long dnd sessions (many back-and-forth turns, same
-            # narrator voice for 20+ minutes) kept reusing the same imagery
+            # Long dnd sessions (many back-and-forth turns over a long
+            # narrator voice) can fall into reusing the same imagery
             # ("магия пульсирует", "всё дрожит") turn after turn — this
             # constructor was copied from router.py:_get_casual_agent (one-off
             # casual replies, where repetition across turns is a non-issue) and
-            # never picked up the same anti-repetition tuning agent_builder.py's
-            # coding-pipeline models already carry. Ollama's own default
-            # (repeat_penalty=1.1, repeat_last_n=64 tokens) is tuned for short
-            # single replies, not a long narrative conversation — same
-            # constants the coding pipeline already uses for the same reason
-            # (see model_config.py's own docstring on why 64 tokens was too
-            # short a window in practice).
+            # doesn't otherwise pick up the same anti-repetition tuning
+            # agent_builder.py's coding-pipeline models already carry.
+            # Ollama's own default (repeat_penalty=1.1, repeat_last_n=64
+            # tokens) is tuned for short single replies, not a long
+            # narrative conversation — same constants the coding pipeline
+            # already uses for the same reason (see model_config.py's own
+            # docstring on why 64 tokens was too short a window in practice).
             repeat_penalty=REPEAT_PENALTY,
             repeat_last_n=REPEAT_LAST_N,
         )
@@ -488,13 +486,12 @@ async def _get_dnd_agent(game_id: int):
     return await _dnd_agent_cache.get_or_build(game_id, current_model, _build)
 
 
-# Живой запрос пользователя: мировой лор (королевства, короли, таверны,
-# география) должен расти по ходу игры, но не забивать контекст безлимитно
-# — тот же принцип, что compress.py:compress_history уже применяет к
-# истории кодинг-чата, просто здесь для dnd_facts (dnd_store.py), не для
-# messages. count_facts — один дёшевый COUNT(*) на каждый ход; сама LLM-
-# сводка запускается только когда фактов реально накопилось много, не на
-# каждый новый факт.
+# Мировой лор (королевства, короли, таверны, география) должен расти по
+# ходу игры, но не забивать контекст безлимитно — тот же принцип, что
+# compress.py:compress_history уже применяет к истории кодинг-чата, просто
+# здесь для dnd_facts (dnd_store.py), не для messages. count_facts — один
+# дёшевый COUNT(*) на каждый ход; сама LLM-сводка запускается только когда
+# фактов реально накопилось много, не на каждый новый факт.
 FACT_COMPACT_THRESHOLD = 60
 _FACT_COMPACT_NUM_PREDICT = 800
 
@@ -569,14 +566,14 @@ async def dnd_stream_chat(messages: list[dict], game_id: int, on_event=None):
     store.touch_game(game_id)
 
     if result.hit_recursion_limit:
-        # Живой инцидент (см. DND_RECURSION_LIMIT про сам разбор): раньше
-        # этот случай просто yield'ил result.final_text как есть — часто
-        # пустой или оборванный на середине предложения текст, который
-        # читался как "мастер зациклился/сломался", хотя на самом деле это
-        # честный обрыв по бюджету шагов. Явное сообщение вместо мусора —
-        # то же самое, что mcp_agent/pipeline.py уже делает для Analyzer/
-        # Planner на этот же случай, просто здесь нет отдельной ветки
-        # пайплайна, чтобы это подхватить автоматически.
+        # См. DND_RECURSION_LIMIT про сам разбор бюджета шагов. Без явного
+        # сообщения ниже этот случай yield'ил бы result.final_text как
+        # есть — часто пустой или оборванный на середине предложения
+        # текст, который читается как "мастер зациклился/сломался", хотя
+        # на самом деле это честный обрыв по бюджету шагов. Явное
+        # сообщение вместо мусора — то же самое, что mcp_agent/pipeline.py
+        # уже делает для Analyzer/Planner на этот же случай, просто здесь
+        # нет отдельной ветки пайплайна, чтобы это подхватить автоматически.
         if on_event:
             await on_event({
                 "type": "stats", "tokens_in": result.tokens_in, "tokens_out": result.tokens_out,
@@ -643,12 +640,12 @@ _RECONCILE_INSTRUCTION = (
 
 
 async def reconcile_before_exit(game_id: int, messages: list[dict]) -> None:
-    """Safety net for exactly the failure mode found in live testing: a
-    model can narrate an event correctly (money changed hands, someone
-    joined the party) and never actually call the matching dnd_* tool, so
-    the DB silently drifts from the story it told — later resuming the
-    game would see stale/missing state and either contradict the player or
-    quietly re-invent details instead of knowing them for sure. Run once,
+    """Safety net for a model narrating an event correctly (money changed
+    hands, someone joined the party) without ever calling the matching
+    dnd_* tool, so the DB silently drifts from the story it told — later
+    resuming the game would see stale/missing state and either contradict
+    the player or quietly re-invent details instead of knowing them for
+    sure. Run once,
     right as the player exits /dnd (cli.py:_dnd_exit) — one more turn to
     the SAME agent/tools, explicitly asked to close any gap between
     narration and saved state before the session ends, rather than trusting

@@ -6,9 +6,8 @@ mcp_agent/servers/knowledge_server.py, чтобы agent.py тоже мог чи�
 
 - format_knowledge/load_knowledge — auto-inject в agent.py:stream_chat
   (каждый ход, дёшево: прямой SQLiteMemoryStore.load()), избавляет модель
-  от необходимости САМОЙ вспомнить вызвать тул get_knowledge (живой прогон:
-  за всю историю проекта вызван 2 раза, несмотря на явную инструкцию в
-  system prompt).
+  от необходимости САМОЙ вспомнить вызвать тул get_knowledge — модель почти
+  никогда не вызывает его сама, даже при явной инструкции в system prompt.
 - save_knowledge_entry — то же, что делает тул update_knowledge.
 - save_auto_note — программная запись авто-факта, минующая approval-гейт
   (см. mcp_agent/config.py:TOOLS_REQUIRING_APPROVAL) и саму модель: решение
@@ -76,10 +75,9 @@ async def save_auto_note(repo_path: str, text: str) -> None:
     data = await store.load(pkey)
     knowledge: dict = data.get("knowledge", {})
     auto: dict = knowledge.setdefault(AUTO_CATEGORY, {})
-    # Микросекунды, не только секунды — две записи в один и тот же вызов
-    # секунды (наблюдалось в тестовом прогоне с частыми вызовами подряд)
-    # иначе схлопывались бы в один ключ и тихо перезатирали друг друга
-    # вместо накопления отдельных записей.
+    # Микросекунды, не только секунды — два вызова в один и тот же
+    # секундный интервал иначе схлопнулись бы в один и тот же ключ и тихо
+    # перезатёрли друг друга вместо накопления отдельных записей.
     auto[datetime.now().strftime("%Y%m%d-%H%M%S%f")] = text
     while len(auto) > _AUTO_MAX_ENTRIES:
         del auto[min(auto)]

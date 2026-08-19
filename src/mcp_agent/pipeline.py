@@ -25,8 +25,8 @@ needs_change/change_is_ambiguous) — mcp_agent/roles.py даёт функции
 verifier_tools), которые stream_chat вызывает с текущими флагами, чтобы
 получить КОНКРЕТНЫЙ набор тулов для каждой стадии. Новый, не совпадающий с
 прежними случай — это просто другая комбинация тех же 4 флагов, а не повод
-заводить пятую хардкоженную ветку (см. router.py про живой пример: вопрос
-про квантизацию локальной модели).
+заводить пятую хардкоженную ветку (см. router.py: новый случай
+классифицируется той же комбинацией флагов, а не отдельным kind).
 
 needs_change=true и change_is_ambiguous=false (старое kind="quick_fix") —
 короткая ветка Router -> executor(investigate+write в ОДНОЙ роли) <->
@@ -34,9 +34,9 @@ Verifier: отдельная investigator/planner-стадия целиком п
 "quick_fix" сама читает, что нужно, и правит в том же раунде. Нет ни
 plan_steps-чек-листа (нет плана, который можно было бы пронумеровать), ни
 ask_user — эта ветка существует именно для задач, где Planner-этап
-согласования плана был бы чистым оверхедом (живой инцидент: 8 циклов
-"готов ли я...?" на правке в проекте из 3 файлов, ни один так и не привёл
-к реальной правке).
+согласования плана был бы чистым оверхедом: на узкой однозначной правке
+цикл ask_user-подтверждений плана может пройти несколько раз подряд, ни
+разу не приведя к реальной правке.
 
 needs_change=false (старое kind="explain", включая его расширение на
 needs_project=false+needs_shell=true — см. router.py) — короткая ветка
@@ -45,9 +45,9 @@ Router -> investigator, без Planner/Coder/Verifier: read-only вопрос (�
 подразумевается правка файла — саммари инвестигатора сразу становится
 финальным ответом (см. stream_chat, ветка сразу после инвестигатора).
 Существует для задач, где Planner заведомо не может ничего согласовать —
-нет предполагаемой правки, только вопрос (живой инцидент, см. docstring
-router.py: Planner на чисто информационном запросе заблудился в
-несуществующем пути к файлу и застрял на бессмысленном уточнении).
+нет предполагаемой правки, только вопрос: на чисто информационном запросе
+Planner не может согласовать план и рискует застрять на бессмысленном
+уточнении несуществующего пути к файлу (см. docstring router.py).
 """
 import asyncio
 import os
@@ -156,10 +156,9 @@ _NUMBERED_STEP_RE = re.compile(r"^\s*(\d+)[.\)]\s+(.+)$")
 
 
 def _parse_numbered_plan(text: str) -> list[str]:
-    """Live bug (67fac007f4c34ba88d899fbb175f7313): Planner's final plan
-    sometimes balloons past what was actually approved in ask_user — one
-    step trailed off on a dangling ':' with no content (a cut-off
-    sub-list), and two other steps were exact-duplicate wording. Coder
+    """Drops plan lines that are malformed or duplicated before Coder ever
+    sees them: a step can trail off on a dangling ':' with no content (a
+    cut-off sub-list), or two steps can be exact-duplicate wording. Coder
     executes each numbered step literally and never merges/skips one, so a
     dangling or duplicate step becomes a real, separate (and inconsistent)
     edit. This is a mechanical backstop for the prompt instruction in
@@ -189,16 +188,15 @@ def _started_plan_step_numbers(round_msgs: list) -> list[int]:
     and ask_user_tool.py:mark_plan_step_current), not a guess reconstructed
     from parsing Coder's own freeform final report.
 
-    Live bug this replaces: plan_step_done used to come from counting how
-    many numbered lines _parse_numbered_plan found in Coder's OWN report
-    and marking that many indices done starting from 0 — completely
-    unrelated to which steps were actually worked on. One real run: round 1
-    marked only step 0 done because the report happened to have 1 numbered
-    line (even though the round did more), then round 2's report happened
-    to number all 9 lines and ALL 9 steps flipped done in one shot, before
-    Verifier had even looked at the result. A round that resumes at step 4
-    (e.g. after Verifier sent steps 1-3 back already fixed) would wrongly
-    stomp 0-3 as done too under the old scheme.
+    This replaces marking plan_step_done by counting how many numbered
+    lines _parse_numbered_plan finds in Coder's OWN report and marking that
+    many indices done starting from 0 — unrelated to which steps were
+    actually worked on: a report with only 1 numbered line marks only step
+    0 done even if the round did more, and a report that numbers all N
+    lines flips all N steps done in one shot, before Verifier has even
+    looked at the result. A round that resumes at step 4 (e.g. after
+    Verifier sent steps 1-3 back already fixed) would wrongly stomp 0-3 as
+    done too under that scheme.
 
     Same lookup pattern as self_heal.py:_written_paths — ToolMessage itself
     doesn't carry the call's args, only the matching AIMessage.tool_calls
@@ -278,25 +276,21 @@ def _investigator_scope_note(is_final_answer: bool, is_followup: bool = False) -
     have project tools, don't bother trying") — removed once project-read
     tools became unconditional in roles.py:investigator_tools, same class
     of fix as _SHELL_TOOLS earlier: Router's needs_project classification
-    (the same quantized chat model, fallible) was plainly wrong on "what
-    parameters does this project's model have" (a project-scoped question
-    if there ever was one), and this note then actively told the model to
-    refuse instead of trying — a live incident (2026-08-14, glm-4.7-flash)
-    reproduced exactly that: the model obediently answered "I can't access
-    project files" to a question that needed nothing more than
-    `cat mcp_agent/model_config.py` (bash, which it always had
-    regardless of needs_project).
+    (the same quantized chat model, fallible) can be plainly wrong on a
+    project-scoped question like "what parameters does this project's
+    model have", and that branch would have actively told the model to
+    refuse instead of trying — even though bash (always available
+    regardless of needs_project) can answer such a question with nothing
+    more than `cat mcp_agent/model_config.py`.
 
-    Live incidents this still fixes: (1) final answers to pure questions
-    came back with Planner-style "inventory" framing and unwanted
-    meta-commentary ("mission accomplished") because the prompt always
-    assumes a Planner reads this next; (2) "проведи анализ на дыры в
-    безопасности" followed a turn later by "попробуй исправить самое
-    простое" — the user's own earlier message list already contained this
-    stage's OWN full report (files, line numbers, code) from the first
-    turn, but this stage re-ran the same searches/reads from zero anyway,
-    burning ~2.5 minutes before Planner even started on what should have
-    been a two-line fix."""
+    Still guards against: (1) final answers to pure questions coming back
+    with Planner-style "inventory" framing and unwanted meta-commentary
+    ("mission accomplished") because the prompt always assumes a Planner
+    reads this next; (2) a follow-up request re-running the same searches/
+    reads from zero even when the user's own earlier message list already
+    contains this stage's OWN full report (files, line numbers, code) on
+    the same subject from an earlier turn, burning time before Planner
+    even starts on what should have been a quick fix."""
     parts = []
     if is_final_answer:
         parts.append(
@@ -353,13 +347,12 @@ async def stream_chat(messages: list[dict], on_event=None):
     # (router.py) — bare create_agent(tools=[]) без stage_runner'а вокруг, а
     # значит без verdict/guidance ретраев и БЕЗ compaction (см. её докстринг
     # про _CASUAL_HISTORY_WINDOW) — на моделях, склонных к повторам без
-    # верификации ответа, это уходило в бесконечный слоп (см. коммит
-    # "Fix casual-chat coherence collapse"). Когда тумблер выключен, эти же
-    # сообщения (needs_change=false) просто не отбиваются здесь и идут в
-    # обычную analyzer-ветку ниже — is_final_answer=not needs_change уже
-    # верно (True), так что Analyzer отвечает с той же verdict/guidance/
-    # recursion-machinery, что и на project-вопросах, но не вызывает
-    # Planner/Coder/Verifier.
+    # верификации ответа, это уходит в бесконечный слоп. Когда тумблер
+    # выключен, эти же сообщения (needs_change=false) просто не отбиваются
+    # здесь и идут в обычную analyzer-ветку ниже — is_final_answer=not
+    # needs_change уже верно (True), так что Analyzer отвечает с той же
+    # verdict/guidance/recursion-machinery, что и на project-вопросах, но
+    # не вызывает Planner/Coder/Verifier.
     if not (needs_project or needs_shell or needs_change) and settings.get("casual_answers_enabled"):
         text = await answer_casual(messages, on_event=on_event)
         if on_event:
@@ -394,11 +387,11 @@ async def stream_chat(messages: list[dict], on_event=None):
     async def _capture_if_useful(note_context: str) -> None:
         # Разведка не должна теряться, если пайплайн НЕ дошёл до успешного
         # конца (Planner/Coder/Verifier исчерпали бюджет, Verifier так и не
-        # подтвердил успех и т.д.) — живой прогон: Analyzer честно прочитал
-        # 5+ файлов, Planner дважды упёрся в лимит, пользователь остановил
-        # ход сам, и вся эта работа пропала без следа. Вызывается на КАЖДОМ
-        # пути завершения после того, как Analyzer уже что-то дал, не только
-        # на happy path в самом конце.
+        # подтвердил успех и т.д.) — иначе файлы, прочитанные Analyzer'ом, и
+        # проведённое исследование пропадают без следа, если ход прервался
+        # раньше happy path (пользователем, лимитом раундов и т.д.).
+        # Вызывается на КАЖДОМ пути завершения после того, как Analyzer уже
+        # что-то дал, не только на happy path в самом конце.
         if not saved_knowledge_this_turn and len(investigated_items) >= 4:
             await maybe_auto_capture(judge_model, repo_path, messages[-1].get("content", ""), investigated_items, note_context)
 
@@ -455,11 +448,11 @@ async def stream_chat(messages: list[dict], on_event=None):
             )
             return
         if analyzer_result.hit_context_overflow:
-            # Живой прогон #8 (compaction.py's module docstring, 20260814):
-            # запрос разросся больше, чем помещается в контекст модели, и
-            # был отклонён бэкендом ещё до генерации — run_stage уже дал
-            # Analyzer'у шанс переретраить с дайджестом (stage_runner.py),
-            # это финальный, ПОСЛЕДНИЙ провал.
+            # Запрос разросся больше, чем помещается в контекст модели, и
+            # был отклонён бэкендом ещё до генерации (см. compaction.py's
+            # module docstring) — run_stage уже дал Analyzer'у шанс
+            # переретраить с дайджестом (stage_runner.py), это финальный,
+            # ПОСЛЕДНИЙ провал.
             await _capture_if_useful(analyzer_text or "(no summary — request kept overflowing the context window)")
             yield await _finish(
                 "⚠️ Расследование каждый раз разрасталось больше, чем помещается в "
@@ -473,11 +466,10 @@ async def stream_chat(messages: list[dict], on_event=None):
             return
 
         if is_final_answer:
-            # Read-only ветка (mcp_agent/router.py про инцидент с
-            # "остановись") — саммари инвестигатора УЖЕ полный ответ на
-            # чисто информационный запрос, Planner/Coder/Verifier здесь не
-            # нужны: нет правки, которую нужно согласовывать/применять/
-            # проверять.
+            # Read-only ветка (см. mcp_agent/router.py) — саммари
+            # инвестигатора УЖЕ полный ответ на чисто информационный
+            # запрос, Planner/Coder/Verifier здесь не нужны: нет правки,
+            # которую нужно согласовывать/применять/проверять.
             await _capture_if_useful(analyzer_text)
             yield await _finish(analyzer_text)
             return
@@ -621,7 +613,8 @@ async def stream_chat(messages: list[dict], on_event=None):
             if plan_steps and on_event:
                 # _started_plan_step_numbers — реальные вызовы
                 # mark_plan_step_current(N), не парсинг отчёта (см. её
-                # докстринг про живой баг со счётчиком строк). Раз этот
+                # докстринг про эвристику подсчёта строк, которую это
+                # заменяет). Раз этот
                 # coder-раунд дошёл сюда (не hit_recursion_limit/
                 # hit_context_overflow/пустой текст, см. проверку выше),
                 # Coder остановился штатно — "STOP and report back... once
@@ -700,16 +693,16 @@ async def stream_chat(messages: list[dict], on_event=None):
             yield await _finish(msg + "\n\nПоследний отчёт Verifier'а:\n\n" + (verifier_feedback or verifier_text))
             return
     except (KeyboardInterrupt, asyncio.CancelledError):
-        # Живой инцидент: пользователь остановил ход РУЧНО посреди Coder, ДО
-        # того как дело дошло до Verifier — auto-revert выше срабатывает
-        # только когда Verifier САМ провалил проверку внутри пайплайна, не
-        # при внешнем прерывании. Файл остался в частично применённом,
-        # невалидном состоянии (реальный случай: сигнатура метода была
-        # стёрта на середине правки) без единого предупреждения — заметили
-        # только руками через git diff. Не тихий auto-revert здесь
-        # (прервали могли по причине, не связанной с качеством правки) —
-        # громкое предупреждение с точным списком тронутых файлов, чтобы
-        # это не пришлось искать вручную.
+        # Если пользователь остановил ход РУЧНО посреди Coder, ДО того как
+        # дело дошло до Verifier — auto-revert выше срабатывает только
+        # когда Verifier САМ провалил проверку внутри пайплайна, не при
+        # внешнем прерывании. Файл может остаться в частично применённом,
+        # невалидном состоянии (например, сигнатура метода стёрта на
+        # середине правки) без единого предупреждения, если не показать
+        # это явно — иначе заметить можно только руками через `git diff`.
+        # Не тихий auto-revert здесь (прервали могли по причине, не
+        # связанной с качеством правки) — громкое предупреждение с точным
+        # списком тронутых файлов, чтобы это не пришлось искать вручную.
         if touched_paths and on_event:
             await on_event({"type": "answer_start"})
             await on_event({"type": "answer_chunk", "text": (

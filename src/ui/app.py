@@ -172,14 +172,15 @@ class _OutputControl(UIControl):
         return max(base, round(base * self._scroll_accel))
 
     def scroll_up(self, step: int = 10) -> None:
-        # Живой баг: create_content clamps only the RENDERED offset
-        # (offset = min(self._scroll_offset, max_offset)), but never wrote
-        # the clamp back — self._scroll_offset itself kept growing past the
-        # real top of the buffer on every extra tick at the boundary. Once
-        # you reversed direction, scroll_down had to burn through all that
-        # invisible excess before the view actually moved, making it look
-        # "stuck". Clamping here (using the bound cached from the last
-        # render) keeps the counter itself honest, not just its render.
+        # create_content clamps only the RENDERED offset (offset =
+        # min(self._scroll_offset, max_offset)) but never writes the clamp
+        # back, so self._scroll_offset itself would keep growing past the
+        # real top of the buffer on every extra tick at the boundary.
+        # Without clamping here too, reversing direction would make
+        # scroll_down burn through all that invisible excess before the
+        # view actually moved, making it look "stuck". Clamping here
+        # (using the bound cached from the last render) keeps the counter
+        # itself honest, not just its render.
         self._scroll_offset = min(
             self._scroll_offset + self._accelerated_step(step, +1),
             self._max_scroll_offset,
@@ -295,12 +296,12 @@ class _OutputControl(UIControl):
             # then falls through its "walk x backwards to find a match" loop
             # with nothing to find and reports position (0, 0) instead — i.e.
             # row 0 of the CURRENT VIEWPORT, not the row actually clicked.
-            # Live bug: dragging a selection across a blank line between
-            # paragraphs made _sel_end jump to the top of the visible window
-            # on every such row, ballooning the selection to "everything
-            # above" instead of the intended range. A single unstyled space
-            # is visually identical to true emptiness but gives that row
-            # exactly one resolvable column.
+            # Without this, dragging a selection across a blank line
+            # between paragraphs makes _sel_end jump to the top of the
+            # visible window on every such row, ballooning the selection to
+            # "everything above" instead of the intended range. A single
+            # unstyled space is visually identical to true emptiness but
+            # gives that row exactly one resolvable column.
             if i >= len(visible):
                 return [("", " ")]
             line = visible[i]
@@ -644,9 +645,9 @@ class FlowAIApp:
         # Coder executes (mcp_agent/pipeline.py emits plan_steps/
         # plan_step_done, see ui/stream.py:StreamDisplay.on_event). Cleared
         # by StreamDisplay.finish() on EVERY turn end (success, error, or
-        # Ctrl+C) — live bug: leaving it up after the turn (even fully
-        # checked) reads as "still doing something" once a NEW unrelated
-        # turn starts, since nothing else in the footer says otherwise.
+        # Ctrl+C): leaving it up after the turn (even fully checked) would
+        # read as "still doing something" once a NEW unrelated turn starts,
+        # since nothing else in the footer says otherwise.
         # _plan_current — separate from _plan_done: which step Coder is
         # WORKING ON right now (mark_plan_step_current tool call, see
         # ui/stream.py), so the user isn't only told what's finished at the
@@ -838,31 +839,30 @@ class FlowAIApp:
             focusable=True,
         )
 
-        # Live bug: height was hardcoded to 1, so a long line never actually
-        # had room to wrap — get_line_prefix below already distinguishes
-        # wrap_count>0 (continuation lines get "  " instead of "› "), i.e.
-        # wrapping was always intended here, it just had nowhere to render:
-        # with only 1 row available, prompt_toolkit falls back to scrolling
-        # the single visible row horizontally to keep the cursor in view
-        # instead of showing the wrapped continuation. Dimension(min=1,
-        # max=10) lets the window grow with the buffer's actual wrapped line
-        # count (up to 10 rows) instead of a fixed height.
+        # A hardcoded height of 1 would leave a long line no room to wrap —
+        # get_line_prefix below already distinguishes wrap_count>0
+        # (continuation lines get "  " instead of "› "), i.e. wrapping is
+        # intended here, but with only 1 row available prompt_toolkit falls
+        # back to scrolling the single visible row horizontally to keep the
+        # cursor in view instead of showing the wrapped continuation.
+        # Dimension(min=1, max=10) lets the window grow with the buffer's
+        # actual wrapped line count (up to 10 rows) instead of a fixed
+        # height.
         #
-        # Live bug #2 (found right after #1): with just min/max, HSplit's
-        # _divide_heights does a SECOND pass after giving every child its
-        # content-driven preferred size — it then keeps growing whichever
-        # children haven't hit their own `max` yet to soak up any leftover
-        # terminal height, entirely regardless of what their content needs.
-        # Since output_win has no explicit height (effectively max=huge) and
-        # this window's max was a static 10, both were eligible for that
-        # leftover-space giveaway, and a terminal taller than a few dozen
-        # rows reliably inflated a ONE-LINE input to the full 10 rows.
-        # Verified directly against HSplit._divide_heights: short text came
-        # back as height=10, not 1. dont_extend_height=True caps this
-        # window's reported max at whatever its CONTENT actually prefers
-        # (still ≤10 from the Dimension above), so it can no longer grow
-        # past what the current text needs, while still being free to grow
-        # up to 10 as the text actually wraps into more lines.
+        # With just min/max, HSplit's _divide_heights does a SECOND pass
+        # after giving every child its content-driven preferred size — it
+        # then keeps growing whichever children haven't hit their own `max`
+        # yet to soak up any leftover terminal height, regardless of what
+        # their content needs. Since output_win has no explicit height
+        # (effectively max=huge) and this window's max was a static 10,
+        # both are eligible for that leftover-space giveaway, so a terminal
+        # taller than a few dozen rows would inflate a ONE-LINE input to
+        # the full 10 rows (confirmed against HSplit._divide_heights: short
+        # text renders at height=10, not 1). dont_extend_height=True caps
+        # this window's reported max at whatever its CONTENT actually
+        # prefers (still ≤10 from the Dimension above), so it can no longer
+        # grow past what the current text needs, while still being free to
+        # grow up to 10 as the text actually wraps into more lines.
         input_win = Window(
             content=input_ctrl,
             height=Dimension(min=1, max=10),
@@ -900,14 +900,14 @@ class FlowAIApp:
             filter=is_asking,
         )
 
-        # Live bug (user report): the real input bar (input_win below) stayed
+        # Without hiding it, the real input bar (input_win below) stays
         # visible and cursor-active-LOOKING the whole time a perm/ask dialog
-        # was open, even though every key while just navigating a list/Y-N
+        # is open, even though every key while just navigating a list/Y-N
         # (is_confirming, or is_asking WITHOUT custom mode) is swallowed by
         # the "<any>" catch-all bindings below and never reaches this buffer
         # at all — an empty "› " prompt line sitting right under the dialog's
-        # own "✎ Свой вариант..."/options looks like a SECOND place to type,
-        # reported as "the input bar duplicated". Only actually show it in
+        # own "✎ Свой вариант..."/options looks like a SECOND place to type
+        # (the input bar appearing duplicated). Only actually show it in
         # normal mode, or once the user has explicitly entered ask_user's
         # custom-answer mode (where typing into it is the real, intended
         # thing — see _ask_enter_custom_mode/is_asking_custom below).
@@ -916,13 +916,13 @@ class FlowAIApp:
         # Plan checklist (mcp_agent/pipeline.py) — non-blocking, unlike
         # perm_win/ask_win above (no future to wait on), just a persistent
         # status board while/after Planner->Coder run. No divider of its own
-        # here — live bug: stats_win's own comment below ("above the divider
-        # line") already assumes exactly ONE divider for this whole block
-        # (the `divider` window further down, right before input_display).
-        # A second divider here doubled that line the moment a plan was
+        # here — stats_win's own comment below ("above the divider line")
+        # already assumes exactly ONE divider for this whole block (the
+        # `divider` window further down, right before input_display). A
+        # second divider here would double that line the moment a plan was
         # visible, with only stats_win/recap_win (1-2 often-blank lines)
-        # between the two — read as one bar duplicated, not two intentional
-        # separators.
+        # between the two, reading as one bar duplicated rather than two
+        # intentional separators.
         has_plan = Condition(lambda: bool(self._plan_steps))
         plan_ctrl = FormattedTextControl(self._plan_formatted_text)
         plan_win = ConditionalContainer(
@@ -1445,21 +1445,20 @@ class FlowAIApp:
         """Clear _active_task only if it's still THIS task — use from a
         task's own completion handler instead of set_active_task(None).
 
-        Live bug (reported by user): a "/"-command (e.g. /settings) runs as
-        its OWN tracked task even while a chat turn is already streaming
-        (see cli.py:_enqueue — commands must run immediately, not wait
-        behind the chat queue). Both call set_active_task(task) on start
-        and used to call set_active_task(None) unconditionally on
-        completion. Opening /settings mid-response and closing it again
-        finishes the SETTINGS task first — its unconditional
-        set_active_task(None) clobbered the still-running chat task's
-        registration, leaving Ctrl+C with nothing to cancel for the rest of
-        that turn (self._active_task stayed None even though the chat task
-        was still generating). Guarding on identity here fixes both
-        directions of the race (command-finishes-first, matching the
-        report, and the reverse chat-finishes-first case the original
-        set_active_task(None) call site never actually protected against
-        either — see its comment history in cli.py)."""
+        A "/"-command (e.g. /settings) runs as its OWN tracked task even
+        while a chat turn is already streaming (see cli.py:_enqueue —
+        commands must run immediately, not wait behind the chat queue).
+        Both call set_active_task(task) on start and used to call
+        set_active_task(None) unconditionally on completion. Opening
+        /settings mid-response and closing it again finishes the SETTINGS
+        task first — its unconditional set_active_task(None) would clobber
+        the still-running chat task's registration, leaving Ctrl+C with
+        nothing to cancel for the rest of that turn (self._active_task
+        stays None even though the chat task is still generating). Guarding
+        on identity here fixes both directions of the race
+        (command-finishes-first, and the reverse chat-finishes-first case
+        the original set_active_task(None) call site never actually
+        protected against either — see its comment history in cli.py)."""
         if self._active_task is task:
             self._active_task = None
 

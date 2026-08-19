@@ -1,11 +1,9 @@
 """mcp_agent/pipeline.py:stream_chat — Coder/Verifier must not report
 success when they exhausted every self-heal attempt without ever getting a
-relevant=True verdict. Live incident this fixes: quick_fix ran out of
-retries after repeatedly failing to call write/edit, and the pipeline
-still handed the (untouched) round to Verifier as if quick_fix had
-succeeded, then Verifier re-ran the same doomed check a second time before
-giving up — see pipeline.py's own commit message for the platformer.c
-run this was found on."""
+relevant=True verdict. Without this: if quick_fix runs out of retries
+after repeatedly failing to call write/edit, the pipeline hands the
+(untouched) round to Verifier as if quick_fix had succeeded, and Verifier
+re-runs the same doomed check a second time before giving up."""
 import pytest
 
 import mcp_agent.pipeline as pipeline_mod

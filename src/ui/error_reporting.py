@@ -11,12 +11,13 @@ capture teardown ("ValueError: I/O operation on closed file") the moment
 a test imports cli.py — this function has no such baggage and can be
 exercised directly.
 
-Live incident: an MCP server's stdio background reader task raised a
-pydantic ValidationError parsing a malformed JSON-RPC frame long after the
-tool call that started that connection had already returned. The user saw
-the raw traceback flash on screen and then vanish — the TUI's next redraw
-overwrote it before anyone could read past the first few lines, and
-nothing about it was recorded anywhere."""
+Without this, an exception raised by an orphaned task — e.g. an MCP
+server's stdio background reader hitting a pydantic ValidationError while
+parsing a malformed JSON-RPC frame, long after the tool call that started
+that connection already returned — flashes on screen as a raw traceback
+and then vanishes: the TUI's next redraw overwrites it before anyone can
+read past the first few lines, and nothing about it gets recorded
+anywhere."""
 import asyncio
 import traceback
 

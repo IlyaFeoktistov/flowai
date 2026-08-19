@@ -86,20 +86,19 @@ _GENERATING_PHRASES = (
 )
 # self_heal.py:_semantic_check — судейский вызов модели ПОСЛЕ того, как
 # видимый ответ уже дописан (answer_end), перед решением "готово" vs "ещё
-# попытка". Живой баг (репорт пользователя): на медленном локальном железе
-# этот вызов сам по себе занимает МИНУТЫ (свой промпт из TASK+TOOL RESULTS+
-# ANSWER, та же CPU-тяжёлая модель) — без отдельной фазы футер просто
-# показывал последнюю фразу от answer_end/tool_end и молчал, выглядело как
-# зависание "уже всё написал, а крутится неизвестно почему".
+# попытка". На медленном локальном железе этот вызов сам по себе может
+# занимать МИНУТЫ (свой промпт из TASK+TOOL RESULTS+ANSWER, та же
+# CPU-тяжёлая модель) — без отдельной фазы футер показывал бы последнюю
+# фразу от answer_end/tool_end и молчал, что выглядит как зависание "уже
+# всё написал, а крутится неизвестно почему".
 _VERIFYING_PHRASES = (
     "проверяю ответ", "сверяю с задачей", "перечитываю сам себя",
 )
 
 # mcp_agent/pipeline.py эмитит "stage_changed" при переходе между ролями
-# (mcp_agent/roles.py) — до этого пользователь видел только generic
+# (mcp_agent/roles.py) — без этого пользователь видел бы только generic
 # "[MCP-AGENT]" в DEBUG-выводе и не мог понять, какая именно роль сейчас
-# работает (живая жалоба: "я везде вижу MCP_AGENT, хочу видеть конкретно
-# какой агент — анализатор или кодер"). Ключи — то, что реально шлёт
+# работает (анализатор, кодер и т.д.). Ключи — то, что реально шлёт
 # pipeline.py (analyzer/planner/coder/verifier/casual), значение — то, что
 # видит пользователь в футере и разовой строке перехода.
 _STAGE_LABELS = {
@@ -131,11 +130,11 @@ def _format_file_edit_result(name: str, args: dict, result: str) -> tuple[str, l
     nothing to diff against, or a tool error) so the caller falls back to
     the generic tool_end rendering instead of showing an empty/wrong body.
 
-    Live bug motivation (user report): the generic rendering showed the raw
-    diff text with only +/- text-color coding and no indication of which
-    real file lines changed — reading it required counting from the "@@"
-    header by hand. This renders a compact header ("Update(path) · +N -M")
-    plus a numbered body instead."""
+    Without this, the generic rendering shows the raw diff text with only
+    +/- text-color coding and no indication of which real file lines
+    changed — reading it requires counting from the "@@" header by hand.
+    This renders a compact header ("Update(path) · +N -M") plus a numbered
+    body instead."""
     lines = result.splitlines()
     if not any(_HUNK_HEADER_RE.match(ln) for ln in lines):
         return None
@@ -267,11 +266,10 @@ class StreamDisplay:
 
     async def _blink_tool_dot(self, line_idx: int, name: str) -> None:
         """Toggles ONE pending tool's status dot between gray and white
-        every _TOOL_DOT_BLINK_S seconds. Real ANSI blink (SGR 5) was tried
-        first and dropped — live bug (user report): it didn't actually
-        blink in their terminal (font/terminal-dependent, and its rate
-        isn't controllable) — this drives the same effect explicitly via a
-        redraw loop instead, same pattern as _footer_loop's own spinner
+        every _TOOL_DOT_BLINK_S seconds. Real ANSI blink (SGR 5) is avoided
+        because whether it actually blinks depends on the terminal/font and
+        its rate isn't controllable — this drives the same effect explicitly
+        via a redraw loop instead, same pattern as _footer_loop's own spinner
         tick, just targeting one specific historical line instead of the
         fixed footer row. App-mode only — see tool_start's own comment on
         why legacy-terminal mode can't do this safely."""
@@ -330,12 +328,12 @@ class StreamDisplay:
     async def _footer_loop(self) -> None:
         """Single always-on footer ticker for the WHOLE turn — one task, not
         a separate spinner-task-per-phase plus a separately-started token
-        counter. Live bug: those two used to run concurrently (a spinner
-        task from tool_start alongside the counter task started at the
-        first answer_start) and fought over the same footer line, each
+        counter. Running those as two separate tasks (a spinner task from
+        tool_start alongside a counter task started at the first
+        answer_start) would make them fight over the same footer line, each
         overwriting the other's set_stats() call on its own cadence — the
-        footer visibly flickered between "⠏ дёргаю рычаги... 31с | 9с" and
-        "AI › 474 tok · 1м 48с". A phase change now just updates
+        footer would visibly flicker between "⠏ дёргаю рычаги... 31с | 9с"
+        and "AI › 474 tok · 1м 48с". A phase change now just updates
         self._phase_label — there's nothing left to race, and the token
         count + elapsed time stay visible through every phase (thinking,
         running a tool, processing its result, generating), same unified
@@ -468,7 +466,7 @@ class StreamDisplay:
             # сплошной белой на tool_end (см. там же и _render_markup выше).
             # U+25CF BLACK CIRCLE — не эмодзи-код "⏺" (U+23FA), который на
             # многих системах рисуется цветной emoji-иконкой вместо простой
-            # монохромной точки (живой баг: пользователь увидел именно это).
+            # монохромной точки.
             # В app-режиме строка адресуема (_output._lines) — точку можно
             # честно перезаписать позже. В legacy-терминале (обычный
             # scrolling stdout) исторические строки не переписать надёжно
@@ -524,19 +522,20 @@ class StreamDisplay:
                     set_title(f"AI: ~{self._tok_approx} tok · {_format_duration(elapsed)}")
 
         # ── TOOL ARG CHUNK (real streaming, not shown — just counted) ─────
-        # Live bug (user report): the live "~N tok" counter only ticked on
+        # Without this, the live "~N tok" counter would only tick on
         # answer_chunk (the model's own text) — a tool call's own arguments
         # (write_file's whole new file content, edit_file's new_string,
         # ...) are real generation too, sometimes the bulk of a slow round,
         # but arrive as tool_call_chunks with .content usually empty (see
         # mcp_agent/agent.py:_stream_round's "messages" mode loop), so the
-        # counter looked frozen for the ENTIRE duration and only jumped once
-        # at tool_start, well after the fact — "506 tok · 9m 47s" looked
-        # like the model was stuck. len//4 here (not +=1 per chunk like
-        # answer_chunk) because a tool_call_chunks fragment's size varies by
-        # provider/backend in a way plain content chunks don't seem to on
-        # this project's own backends — a length-based estimate stays
-        # roughly right regardless of how big each individual fragment is.
+        # counter would look frozen for the ENTIRE duration and only jump
+        # once at tool_start, well after the fact — e.g. "506 tok · 9m 47s"
+        # reading as if the model were stuck. len//4 here (not +=1 per chunk
+        # like answer_chunk) because a tool_call_chunks fragment's size
+        # varies by provider/backend in a way plain content chunks don't
+        # seem to on this project's own backends — a length-based estimate
+        # stays roughly right regardless of how big each individual
+        # fragment is.
         elif t == "tool_arg_chunk":
             text = event.get("text", "")
             if text:
@@ -604,14 +603,14 @@ class StreamDisplay:
             elif result:
                 lines = result.splitlines()
                 if len(lines) > 1:
-                    # Live bug (user report): this branch is reached exactly
-                    # when `diffish` above was None, i.e. the result is NOT
-                    # diff-shaped (no "@@" hunk header) — a plain bash
-                    # output like `ls -la` still has lines starting with "-"
-                    # (a regular file's "-rw-r--r--" permission string), and
-                    # _diff_line_style would color those red as if removed,
-                    # exactly like a git diff, even though this is plain
-                    # command output with nothing to do with a diff at all.
+                    # This branch runs exactly when `diffish` above was
+                    # None, i.e. the result is NOT diff-shaped (no "@@"
+                    # hunk header) — a plain bash output like `ls -la` still
+                    # has lines starting with "-" (a regular file's
+                    # "-rw-r--r--" permission string), which _diff_line_style
+                    # would color red as if removed, exactly like a git
+                    # diff, even though this is plain command output with
+                    # nothing to do with a diff at all.
                     show = lines[:20]
                     for ln in show:
                         console.print(f"[bright_black]     {_escape_markup(ln)}[/]")
@@ -643,14 +642,14 @@ class StreamDisplay:
         self._last_written_was_newline) down to exactly one — same fix as
         _rerender_markdown's blank-line stripping, just applied to the RAW
         live stream instead of only at the final re-render. Without this,
-        a multi-paragraph reply looked double-spaced WHILE typing and only
-        snapped tight once generation finished and the markdown re-render
-        replaced it — visibly different before/after, which read as
-        "why did it just shrink?" (live user report). Returns the text
-        actually written (with any newlines removed accounted for), not
-        the original — callers that count '\\n' for line-tracking should
-        count THIS, not the input, or they overcount blank lines that
-        never actually made it to the screen."""
+        a multi-paragraph reply looks double-spaced WHILE typing and only
+        snaps tight once generation finishes and the markdown re-render
+        replaces it — a visible before/after mismatch that reads as
+        "why did it just shrink?". Returns the text actually written (with
+        any newlines removed accounted for), not the original — callers
+        that count '\\n' for line-tracking should count THIS, not the
+        input, or they overcount blank lines that never actually made it
+        to the screen."""
         if not text:
             return ""
         text = re.sub(r"\n{2,}", "\n", text)

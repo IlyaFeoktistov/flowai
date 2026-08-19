@@ -82,30 +82,29 @@ _SEMANTIC_SYSTEM_PROMPT = (
     "Respond with ONLY a JSON object, no other text."
 )
 
-# Сколько символов каждого tool-результата видит судья. Раньше было 300 —
-# на реальном прогоне из-за этого судья дважды подряд забраковал ЯВНО
-# релевантные результаты (git_status со списком файлов, git_diff с реальным
-# диффом): при 300 символах он просто не видел содержательную часть вывода и
-# судил по обрубку. 2000 — достаточно, чтобы не резать типичный
-# git_status/git_diff/search_code вывод на самом интересном месте, но всё ещё
-# заметно меньше, чем полный вывод, который получает основная модель.
+# Сколько символов каждого tool-результата видит судья. 300 символов
+# слишком мало: судья не видит содержательную часть вывода (например
+# git_status со списком файлов или git_diff с реальным диффом) и судит по
+# обрубку, из-за чего может забраковать явно релевантные результаты. 2000 —
+# достаточно, чтобы не резать типичный git_status/git_diff/search_code
+# вывод на самом интересном месте, но всё ещё заметно меньше, чем полный
+# вывод, который получает основная модель.
 _JUDGE_SNIPPET_CHARS = 2000
 
 
-# На живом прогоне маленький judge_model (тот же qwen3:8b, что и основная
-# модель) один раз пометил "relevant: true" раунд, где была только успешная
-# запись файла (write_file) без единого bash — то есть сам факт "файл
-# записан" судья спутал с "код проверен, что работает". Ловим это
-# ДЕТЕРМИНИРОВАННО, без ещё одного вызова маленькой модели, которая уже
-# показала, что путает эти две вещи.
+# Маленький judge_model (тот же qwen3:8b, что и основная модель) может
+# спутать сам факт "файл записан" (write_file без единого bash) с "код
+# проверен, что работает" и пометить такой раунд как "relevant: true".
+# Ловим это ДЕТЕРМИНИРОВАННО, без ещё одного вызова маленькой модели,
+# которая путает эти две вещи.
 #
-# Раньше это правило ещё и требовало, чтобы пользователь дословно попросил
-# "проверь"/"убедись" — но это угадывание намерения по словам задачи ломается
-# на любой перефразировке и не следует из самого правила: системный промпт
-# (шаг 4 воркфлоу) и так уже требует верификации ПОСЛЕ ЛЮБОЙ записи кода, а
-# не только когда юзер попросил явно. Убрали угадывание — теперь правило
-# завязано только на структуру вызовов этого раунда: код записан → нужна
-# bash-верификация, вне зависимости от формулировки задачи.
+# Правило не требует, чтобы пользователь дословно попросил "проверь"/
+# "убедись" — угадывание намерения по словам задачи ломается на любой
+# перефразировке и не следует из самого правила: системный промпт (шаг 4
+# воркфлоу) и так уже требует верификации ПОСЛЕ ЛЮБОЙ записи кода, а не
+# только когда юзер попросил явно. Правило завязано только на структуру
+# вызовов этого раунда: код записан → нужна bash-верификация, вне
+# зависимости от формулировки задачи.
 def _wrote_code(tool_messages: list[ToolMessage]) -> bool:
     return any(m.name in ("write_file", "edit_file") for m in tool_messages)
 
@@ -132,50 +131,42 @@ def _has_execution_evidence(tool_messages: list[ToolMessage]) -> bool:
 
 def _execution_evidence_shows_failure(round_msgs: list) -> bool:
     """_has_execution_evidence only checks that bash was CALLED, not
-    that it succeeded — live run: self-heal saw bash in the round and
-    treated that as sufficient verification, twice in a row, while its
-    result started with 'Error (exit 1): ... IndentationError' both times.
-    The broken file was never caught by the retry logic; the user had to
-    stop the process by hand instead. bash (see bash_server.py)
-    always prefixes a non-zero exit with 'Error (exit N):'.
+    that it succeeded — a round can't be treated as verified just because
+    bash ran, since its result may start with 'Error (exit 1): ...
+    IndentationError'. bash (see bash_server.py) always prefixes a
+    non-zero exit with 'Error (exit N):'.
 
     Needs round_msgs (not just tool_messages) — uses _bash_commands to see
     each call's actual command text, needed for the two refinements below.
-
-    Live run (mail-server, 20260707-163337-11afd268): this check, once
-    fixed to actually see error text (see _tool_text), became too blunt in
-    the OTHER direction — it flagged the whole round as broken and the
-    stream_chat auto-revert (see agent.py) threw away an already-fixed,
-    already-reverified-clean set of edits, because TWO unrelated things
-    earlier in the same (long) round also started with 'Error':
-      1. A `php -l` on a file the model had just introduced a real syntax
-         error into via a botched replace_lines — genuine evidence, but
-         the model noticed it too (via the same php -l), fixed the file,
-         and re-ran the EXACT SAME command, which came back clean. The
-         earlier failure shouldn't keep counting once its own re-run says
-         otherwise — only the LAST result of each distinct command matters.
-      2. A repo-wide `find . -exec php -l {} \\;` that hit bash's own
-         timeout ('Error: command timeout', no exit code at all) — that's
-         a badly-scoped verification command, not evidence the CODE is
-         broken; it never even finished running. Only a completed run with
-         a real non-zero exit ('Error (exit N):') is evidence about the
-         code — a bare 'Error: ...' (timeout, no command, an exception
+    Seeing the actual error text (via _tool_text) isn't enough by itself,
+    though: it can be too blunt and make the stream_chat auto-revert (see
+    agent.py) throw away an already-fixed, already-reverified-clean set of
+    edits, because TWO unrelated things earlier in the same (long) round
+    can also start with 'Error':
+      1. A `php -l` on a file with a real syntax error introduced via a
+         botched replace_lines is genuine evidence — but if the model then
+         fixes the file and re-runs the EXACT SAME command, which comes
+         back clean, the earlier failure shouldn't keep counting. Only the
+         LAST result of each distinct command matters.
+      2. A repo-wide `find . -exec php -l {} \\;` that hits bash's own
+         timeout ('Error: command timeout', no exit code at all) is a
+         badly-scoped verification command, not evidence the CODE is
+         broken — it never even finished running. Only a completed run
+         with a real non-zero exit ('Error (exit N):') is evidence about
+         the code — a bare 'Error: ...' (timeout, no command, an exception
          raised by bash itself) says nothing either way and must not
          overwrite a real prior result for that same command.
 
-    Live run (2026-08-13): Verifier guessed two nonexistent project
-    directories ('cd /home/ifeoktistov/neural_network', ...) before finding
-    the real one — both `cd`s failed with 'Error (exit 2): ... cd: can't cd
-    to ...'. The correct dir it settled on ran a real, clean check right
-    after ('Создание нейронной сети...' printed, exit 0) — but that's a
-    DIFFERENT command string (different cd target), so it never overwrote
-    the two wrong-dir failures already recorded. `any(...)` stayed True on
-    those alone, and the whole round — including a verifier report that
-    read as 100% passing — got marked execution_failure and reverted. A `cd`
-    that fails because the AGENT guessed a directory that doesn't exist is
-    evidence about the agent's own navigation, not about whether the CODE
-    works — must not count as execution evidence either way, same as the
-    bare-error case above."""
+    A `cd` that fails with 'Error (exit 2): ... cd: can't cd to ...'
+    because the agent guessed a directory that doesn't exist is evidence
+    about the agent's own navigation, not about whether the CODE works,
+    and must not count as execution evidence either way, same as the
+    bare-error case above — otherwise a wrong-dir `cd` failure, recorded
+    under its own command string, never gets overwritten by the real,
+    clean run that follows under a different command string (a different
+    cd target), so `any(...)` stays True even though the whole round —
+    including a verifier report that reads as 100% passing — would
+    otherwise be marked execution_failure and reverted for no reason."""
     _NAV_ERROR_MARKERS = ("cd: can't cd to", "cd: no such file or directory")
     last_verdict_by_command: dict[str, bool] = {}
     for cmd, result in _bash_commands(round_msgs):
@@ -195,11 +186,10 @@ def _execution_evidence_shows_failure(round_msgs: list) -> bool:
 # write_file/edit_file (file_ops_server.py) never throw a protocol-level MCP
 # error on a semantic failure (old_string not found/not unique, size/binary
 # guard, ...) — they just RETURN a plain "Error: ..." string, so .status is
-# never "error" even when the file was never touched. Live run (predecessor
-# to this exact tool, same shape of bug): Coder sent a byte-for-byte
-# identical line-based edit 5 times in a row, got "Error: ..." each time,
-# never re-read the file — the round-level verdict didn't see this as a
-# failure because it only checked .status, not the returned text. Checking
+# never "error" even when the file was never touched. A round-level
+# verdict that only checks .status misses this even if the model resends
+# a byte-for-byte identical edit repeatedly and gets "Error: ..." each
+# time without ever re-reading the file. Checking
 # _tool_text(...).startswith("Error") alongside .status catches this class
 # regardless of which of the two signals the tool actually uses.
 def _failed_write_messages(tool_messages: list[ToolMessage]) -> list[ToolMessage]:
@@ -242,11 +232,11 @@ def _write_stage_outcome(new_tool_msgs: list, round_final_text: str) -> str:
 # сформулирована задача (даже если git_status был вызван мимоходом, а не
 # по прямой просьбе "покажи правки").
 #
-# Живой прогон, из-за которого появилось это правило: judge_model пометил
-# "relevant: true" (с пустой reason) раунд, где агент вызвал только
-# git_status (список ИМЁН изменившихся файлов) и read_file на usage.json —
-# ни разу не вызвал ни один git_diff*-тул, то есть не увидел ни строчки
-# реального содержимого правок в agent.py, где и была вся суть изменений.
+# Без этой проверки судья может пометить "relevant: true" (с пустой
+# reason) раунд, где агент вызвал только git_status (список ИМЁН
+# изменившихся файлов) и, скажем, read_file на побочный файл, ни разу не
+# вызвав ни один git_diff*-тул — то есть не увидев ни строчки реального
+# содержимого правок.
 def _git_status_reports_changes(tool_messages: list[ToolMessage]) -> bool:
     for m in tool_messages:
         if m.name == "git_status" and (
@@ -257,18 +247,16 @@ def _git_status_reports_changes(tool_messages: list[ToolMessage]) -> bool:
     return False
 
 
-# Живой прогон, ДВАЖДЫ подряд (даже после того, как системный промпт уже
-# явно потребовал звать git_show/git_diff по каждому коммиту): задача
-# "покажи код последних изменений" — модель вызвала только git_log
-# (даёт ТОЛЬКО хэш/автора/дату/сообщение, никогда сам код), затем написала
-# по абзацу на каждый коммит, процитировав его полный хэш и пересказав
-# содержимое — по одному лишь сообщению коммита ("fix", "spinner"), не
-# прочитав ни одного реального диффа. Судья это поймал оба раза, но раз
-# промпт-инструкции одной не хватило дважды подряд на слабой локальной
-# модели — нужна структурная страховка: если финальный ответ цитирует
-# конкретные хэши коммитов из git_log, а git_show/git_diff по НИ ОДНОМУ из
-# них в этом раунде не вызывался, значит содержимое этих коммитов
-# нафантазировано по одним сообщениям, а не прочитано.
+# Системный промпт уже явно требует звать git_show/git_diff по каждому
+# коммиту, но модель может вместо этого вызвать только git_log (даёт
+# ТОЛЬКО хэш/автора/дату/сообщение, никогда сам код), а затем написать по
+# абзацу на каждый коммит, процитировав его полный хэш и пересказав
+# содержимое по одному лишь сообщению коммита, не прочитав ни одного
+# реального диффа — на слабой локальной модели одних промпт-инструкций
+# может быть недостаточно, нужна структурная страховка: если финальный
+# ответ цитирует конкретные хэши коммитов из git_log, а git_show/git_diff
+# по НИ ОДНОМУ из них в этом раунде не вызывался, значит содержимое этих
+# коммитов нафантазировано по одним сообщениям, а не прочитано.
 def _described_commits_without_diff(tool_messages: list[ToolMessage], final_text: str) -> bool:
     log_hashes: set[str] = set()
     for m in tool_messages:
@@ -282,15 +270,14 @@ def _described_commits_without_diff(tool_messages: list[ToolMessage], final_text
 
 
 def _has_diff_evidence(tool_messages: list[ToolMessage]) -> bool:
-    # Живой прогон ПОСЛЕ первой версии этой проверки: модель, следуя новому
-    # системному промпту, вызвала git_diff_unstaged — но НЕ git_diff_staged,
-    # хотя правки лежали и в staged, и в unstaged (правки этого самого
-    # коммита поверх уже застейдженных правок предыдущего). Тогда её ответ
-    # честно пересказал только незастейдженную половину и заявил "изменён
-    # только комментарий", хотя основная логика была именно в staged-части.
-    # git_diff("HEAD") в одиночку покрывает и то, и другое разом, поэтому
-    # считаем условие выполненным либо им, либо ОБОИМИ staged+unstaged —
-    # одного из двух недостаточно, если другой не вызывался.
+    # Правки могут лежать и в staged, и в unstaged одновременно (например
+    # правки текущего коммита поверх уже застейдженных правок предыдущего)
+    # — вызов только git_diff_unstaged в таком случае покажет лишь половину
+    # изменений и может пропустить основную логику, которая лежит в
+    # staged-части. git_diff("HEAD") в одиночку покрывает и то, и другое
+    # разом, поэтому считаем условие выполненным либо им, либо ОБОИМИ
+    # staged+unstaged — одного из двух недостаточно, если другой не
+    # вызывался.
     called = {m.name for m in tool_messages}
     if "git_diff" in called:
         return True
@@ -298,15 +285,16 @@ def _has_diff_evidence(tool_messages: list[ToolMessage]) -> bool:
 
 
 # Маркер, которым _cap_tool_output (см. ниже) помечает обрезанный результат
-# тула. Живой прогон: git_diff_unstaged с context_lines=50 на файле с
-# небольшой правкой в начале и большой веткой логики в конце — весь объём
-# ушёл за TOOL_OUTPUT_CHAR_CAP, обрезка пришлась ровно перед той самой
-# крупной веткой, и модель молча ответила по обрубку, ни разу не упомянув,
-# что видела не весь дифф (хотя системный промпт явно требует это
-# проговаривать). Судья тоже не заметил — обрубок на 2000 символов ещё
-# короче того, что видит основная модель, и по нему выглядит вполне
-# самодостаточным. Раз оба уровня (модель и судья) пропустили это на
-# практике, ловим ДЕТЕРМИНИРОВАННО по самому факту наличия маркера.
+# тула. Обрезка вывода (например git_diff_unstaged с большим
+# context_lines на файле с небольшой правкой в начале и большой веткой
+# логики в конце) может прийтись за TOOL_OUTPUT_CHAR_CAP ровно перед самой
+# содержательной частью, а модель может молча ответить по обрубку, ни разу
+# не упомянув, что видела не весь дифф, хотя системный промпт явно требует
+# это проговаривать. Судья тоже может этого не заметить — обрубок на 2000
+# символов (_JUDGE_SNIPPET_CHARS) ещё короче того, что видит основная
+# модель, и по нему выглядит вполне самодостаточным. Раз оба уровня
+# (модель и судья) могут это пропустить, ловим ДЕТЕРМИНИРОВАННО по самому
+# факту наличия маркера.
 _TRUNCATION_MARKER = "...[TRUNCATED"
 
 _GIT_DIFF_TOOL_NAMES = ("git_diff", "git_diff_staged", "git_diff_unstaged")
@@ -320,18 +308,18 @@ _GROUNDING_TOOL_NAMES = _GIT_DIFF_TOOL_NAMES + (
 
 
 def _recovered_after_truncation(tool_messages: list[ToolMessage], last_truncated: int) -> bool:
-    """Живой прогон: retry на обрезанный результат срабатывал ДАЖЕ когда
-    модель после этого честно последовала совету промпта — позвала более
-    узкий bash `git diff -- <path>`, перечитала конкретный файл, или
-    повторила тот же тул с более узким запросом — и получила ПОЛНУЮ,
-    необрезанную картину. Штрафовать раунд в этом случае значит наказывать
-    модель за то, что она поступила ровно так, как просит система, вместо
-    того чтобы засчитать восстановление. Считаем восстановлением: после
-    ПОСЛЕДНЕГО обрезанного результата (last_truncated) есть хотя бы один
-    более поздний результат от "заземляющего" тула (см. _GROUNDING_TOOL_NAMES)
-    БЕЗ метки обрезания — не обязательно тот же самый вызов, просто сигнал,
-    что модель продолжила добывать полную информацию, а не осталась с
-    обрубком как с единственным источником."""
+    """Штрафовать retry'ем раунд, где модель после обрезанного результата
+    честно последовала совету промпта — позвала более узкий bash
+    `git diff -- <path>`, перечитала конкретный файл, или повторила тот же
+    тул с более узким запросом — и получила ПОЛНУЮ, необрезанную картину,
+    значит наказывать модель за то, что она поступила ровно так, как
+    просит система, вместо того чтобы засчитать восстановление. Считаем
+    восстановлением: после ПОСЛЕДНЕГО обрезанного результата
+    (last_truncated) есть хотя бы один более поздний результат от
+    "заземляющего" тула (см. _GROUNDING_TOOL_NAMES) БЕЗ метки обрезания —
+    не обязательно тот же самый вызов, просто сигнал, что модель
+    продолжила добывать полную информацию, а не осталась с обрубком как с
+    единственным источником."""
     return any(
         m.name in _GROUNDING_TOOL_NAMES and _TRUNCATION_MARKER not in _tool_text(m.content)
         for m in tool_messages[last_truncated + 1:]
@@ -452,34 +440,32 @@ def _bash_commands(round_msgs: list) -> list[tuple[str, str]]:
     return out
 
 
-# Live run (mail-server session, 20260707-135011-31723e6e): after editing two
-# PHP files, the model ran `php -l` on each and reported success as its ONLY
-# verification — despite having ALREADY run `find . -name "*Test*.php" |
-# grep -i mailbox` a few tool calls earlier in this SAME round and gotten
-# back real test file paths. `php -l` only parses the file; it proves
-# nothing about whether the changed behavior is correct, and the discovered
-# tests were simply never run. _has_execution_evidence only checks that
+# After editing PHP files, a model can run `php -l` on each and report
+# success as its ONLY verification, even when a `find . -name "*Test*.php"
+# | grep -i mailbox`-style command earlier in the same round already
+# turned up real test file paths. `php -l` only parses the file; it proves
+# nothing about whether the changed behavior is correct, and the
+# discovered tests never get run. _has_execution_evidence only checks that
 # bash was called at all — a syntax-only command satisfies it just as
-# well as a real test run, so this slipped through as "verified". Flags the
+# well as a real test run, so this slips through as "verified". Flags the
 # narrower, common case: every bash call this round is a bare syntax/
 # lint check, none of them is an actual test-runner invocation, and some
 # tool result from this same round names a real test file — i.e. a proper
 # check was one command away and wasn't taken.
 #
-# Live run (mail-server, ee810cad03a24f33beb9b21b9d2b25c0): Verifier was
-# checking a one-line change in MailboxConverter.php, which genuinely has
-# no test file. A `list_directory` on the tests tree turned up
-# MessageLinkShortnerTest.php and ValidatorTest.php — real test files, but
-# for UNRELATED classes — and this function (matching ANY test-like path,
-# anywhere) flagged that as "a real test was discoverable", forcing a
-# retry that could never succeed (no test for this class exists) and
-# burned the whole recursion budget hunting for one. Now requires the
-# discovered test path's basename to actually reference one of THIS
-# round's diffed files (via _extract_diffed_paths) — "some test file
-# exists somewhere in the repo" is not evidence THIS change is testable.
-# Falls back to the old broad match if no diff was seen yet this round
-# (nothing to narrow against — stay conservative rather than let a
-# same-round syntax-only check slip through unnoticed).
+# Matching ANY test-like path anywhere in the repo is too broad, though: a
+# one-line change to a class with genuinely no test file can turn up real
+# test files for UNRELATED classes (e.g. a `list_directory` on the tests
+# tree finds MessageLinkShortnerTest.php and ValidatorTest.php while the
+# actual change is in MailboxConverter.php) and get flagged as "a real
+# test was discoverable", forcing a retry that can never succeed (no test
+# for this class exists) and burning the whole recursion budget hunting
+# for one. Requires the discovered test path's basename to actually
+# reference one of THIS round's diffed files (via _extract_diffed_paths) —
+# "some test file exists somewhere in the repo" is not evidence THIS
+# change is testable. Falls back to the old broad match if no diff was
+# seen yet this round (nothing to narrow against — stay conservative
+# rather than let a same-round syntax-only check slip through unnoticed).
 def _verified_with_syntax_check_only_despite_discoverable_tests(round_msgs: list) -> bool:
     commands = _bash_commands(round_msgs)
     if not commands:
@@ -513,18 +499,16 @@ def _verified_with_syntax_check_only_despite_discoverable_tests(round_msgs: list
     return False
 
 
-# Живой прогон: задача "разбери дифф, найди баги". Модель на попытке 2
-# честно вызвала git_diff('HEAD') и получила настоящий дифф по конкретным
-# файлам — но ПОСЛЕ этого ещё несколько раз вызвала search_code/
-# search_code_semantic по касательным темам (сами по себе разумные вопросы —
-# "почему заменили X на Y", "где конфигурируются модели"), и в финальный
-# ответ попало только последнее, что она посмотрела (случайный search_code
-# по "permission-политика"), а не сам дифф, который она уже успешно
-# прочитала. Промпт теперь просит синтезировать ответ из первичных
-# доказательств, а не из последнего, что попалось на глаза — это
-# ДЕТЕРМИНИРОВАННАЯ страховка на случай, если модель всё равно проигнорирует:
-# если дифф реально показал изменения по конкретным файлам, а финальный
-# текст не упоминает НИ ОДИН из них — ответ явно построен не по диффу.
+# Модель может честно вызвать git_diff('HEAD') и получить настоящий дифф
+# по конкретным файлам — но ПОСЛЕ этого ещё несколько раз вызвать
+# search_code/search_code_semantic по касательным темам (сами по себе
+# разумные вопросы), и в финальный ответ попадёт только последнее, что она
+# посмотрела, а не сам дифф, который она уже успешно прочитала. Промпт
+# просит синтезировать ответ из первичных доказательств, а не из
+# последнего, что попалось на глаза — это ДЕТЕРМИНИРОВАННАЯ страховка на
+# случай, если модель всё равно проигнорирует: если дифф реально показал
+# изменения по конкретным файлам, а финальный текст не упоминает НИ ОДИН
+# из них — ответ явно построен не по диффу.
 def _final_answer_ignores_diff(final_text: str, diffed_paths: set[str]) -> bool:
     if not diffed_paths:
         return False

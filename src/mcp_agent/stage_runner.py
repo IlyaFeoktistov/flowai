@@ -17,9 +17,9 @@ mcp_agent/roles.py и план в .claude/plans/), а run_stage остаётся
 конкретный verdict_fn.
 
 Копия механики — по точным диапазонам из mcp_agent/agent.py, та же
-дисциплина, что описана в его собственном докстринге (живой инцидент:
-прошлый разбор на подфайлы пересочинил код по памяти и перепутал границы
-stream_chat при вырезании).
+дисциплина, что описана в его собственном докстринге: пересочинять код по
+памяти вместо копирования точных диапазонов рискует перепутать границы
+stream_chat при вырезании.
 """
 import time
 from dataclasses import dataclass, field
@@ -119,10 +119,7 @@ async def run_stage(
     # previous Coder<->Verifier round, even a previous turn) makes
     # _dedupe_read_tool hand this fresh thread a stub pointing at an
     # "earlier result" it never actually saw — the real file content never
-    # reaches it. Live incident: Verifier's round-2 thread got exactly that
-    # stub for platformer.c/.h because quick_fix's round-2 thread had just
-    # read them first, in the same shared dict, in a wholly separate
-    # conversation. _seed_retry already clears this for retries WITHIN one
+    # reaches it. _seed_retry already clears this for retries WITHIN one
     # run_stage call (see below) — this extends the same invariant to the
     # call boundary itself.
     read_history.clear()
@@ -151,19 +148,18 @@ async def run_stage(
             gen_duration_ms += round_gen_ms
         except ollama.ResponseError as e:
             if attempt == max_attempts - 1:
-                # Live run (mail-server, f9557fc.../ee810cad...): Coder's
-                # LAST attempt applied a real, correct edit (confirmed via
-                # git diff) and then crashed generating its own closing
-                # report — this branch used to give up immediately with
-                # final_text="", and pipeline.py treats an empty final_text
-                # exactly like "nothing was done" (touched_paths gets
-                # reverted via _revert_turn_paths), throwing away a
-                # genuinely successful edit over a transient generation
-                # hiccup unrelated to whether the work was correct. One
-                # bonus attempt (same pattern as the punt-to-user rescue
-                # below) gives the model a real chance to just report what
-                # it already did, without masking a SECOND consecutive
-                # generation failure — that still gives up for real.
+                # A generation failure on the LAST attempt can happen right
+                # after a real, correct edit was already applied — giving up
+                # immediately here would return final_text="", and
+                # pipeline.py treats an empty final_text exactly like
+                # "nothing was done" (touched_paths gets reverted via
+                # _revert_turn_paths), throwing away a genuinely successful
+                # edit over a transient generation hiccup unrelated to
+                # whether the work was correct. One bonus attempt (same
+                # pattern as the punt-to-user rescue below) gives the model
+                # a real chance to just report what it already did, without
+                # masking a SECOND consecutive generation failure — that
+                # still gives up for real.
                 if not generation_error_bonus_used:
                     generation_error_bonus_used = True
                     max_attempts += 1
@@ -220,11 +216,10 @@ async def run_stage(
             continue
 
         if hit_overflow_this_round:
-            # Живой прогон #8 (compaction.py's module docstring, 20260814,
-            # analyzer role): тот же приём, что hit_limit_this_round выше —
-            # _stream_round перехватил реальный 400 "exceeds the available
-            # context size" (compaction.py's проактивный гейт — chars//4
-            # эвристика — не сработал заранее для лог-дампов) ровно как
+            # Тот же приём, что hit_limit_this_round выше — _stream_round
+            # перехватил реальный 400 "exceeds the available context size"
+            # (compaction.py's проактивный гейт — chars//4 эвристика — не
+            # сработал заранее, например для больших лог-дампов) ровно как
             # GraphRecursionError, так что round_msgs всё ещё содержит все
             # успешно завершённые шаги до отказавшего вызова модели.
             # Дайджестим и ретраим с чистого, маленького payload вместо
@@ -254,9 +249,9 @@ async def run_stage(
             continue
 
         if not new_tool_msgs and _leaked_tool_call_syntax(round_final_text):
-            # Живой прогон (delegate_tool.py/agent.py): модель сгенерировала
-            # невалидную разметку вызова тула вместо настоящего structured
-            # tool_calls — парсим сами и выполняем напрямую вместо того,
+            # Модель иногда генерирует невалидную разметку вызова тула
+            # вместо настоящего structured tool_calls (см. delegate_tool.py/
+            # agent.py) — парсим её сами и выполняем напрямую вместо того,
             # чтобы жечь оставшиеся попытки на одной и той же генерации.
             leaked_calls = _parse_leaked_tool_calls(round_final_text)
             if leaked_calls:

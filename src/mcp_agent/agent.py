@@ -104,9 +104,9 @@ async def _stream_round(
       генерации, а не по завершении всего сообщения. Раньше был только
       "values", и весь текст (и намерение-перед-тулом, и финальный ответ)
       прилетал ОДНИМ блоком, когда модель уже полностью его досочинила —
-      живой прогон подтвердил, что ChatOllama.astream() отдаёт реальные
-      суб-словные дельты ('2', ' +', ' 2', ' =', ' 4', ...), просто это
-      никуда не прокидывалось дальше "values"-агрегации.
+      ChatOllama.astream() при этом отдаёт реальные суб-словные дельты
+      ('2', ' +', ' 2', ' =', ' 4', ...), просто раньше это никуда не
+      прокидывалось дальше "values"-агрегации.
 
     Оба режима идут по одному и тому же message id: "messages" даёт текст
     непрерывно как только он появляется (эмитим как answer_start/
@@ -124,20 +124,20 @@ async def _stream_round(
 
     gen_ms — суммарное МИЛЛИСЕКУНДНОЕ время реальной генерации токенов (окна
     между первым и последним "messages"-чанком одного AIMessage), БЕЗ
-    времени выполнения тулов между шагами графа (см. живой баг: duration_ms
-    в stream_chat считает весь ход целиком, включая ожидание bash/
-    tool-раундтрипов и judge-вызов self_heal — на медленном локальном
-    железе это давало tok/s в разы ниже реальной скорости генерации
-    модели). Недооценивает на шагах, где модель вызвала тул без единого
-    текстового токена (msg_chunk.content всегда пусто) — приемлемо, речь
-    именно о скорости печати ТЕКСТА, а не о времени шага графа целиком.
+    времени выполнения тулов между шагами графа: duration_ms в stream_chat
+    считает весь ход целиком, включая ожидание bash/tool-раундтрипов и
+    judge-вызов self_heal — на медленном локальном железе это даёт tok/s в
+    разы ниже реальной скорости генерации модели. Недооценивает на шагах,
+    где модель вызвала тул без единого текстового токена (msg_chunk.content
+    всегда пусто) — приемлемо, речь именно о скорости печати ТЕКСТА, а не о
+    времени шага графа целиком.
 
     mid_turn_queue — опциональная asyncio.Queue[str] (см. stream_chat), через
     которую cli.py подкладывает сообщение, пришедшее от пользователя, ПОКА
     этот ход уже идёт (не во время "жду первого токена" — тот случай стрим_chat
-    решает раньше, амендом текущего запроса). Живой фиче-запрос: очередь
-    должна попадать в контекст МЕЖДУ шагами графа, а не ждать конца всего
-    хода — иначе пользователь, поправивший себя посреди длинного
+    решает раньше, амендом текущего запроса). Очередь должна попадать в
+    контекст МЕЖДУ шагами графа, а не ждать конца всего хода — иначе
+    пользователь, поправивший себя посреди длинного
     расследования/правки, увидел бы реакцию только после того, как модель
     уже довела до конца весь первоначальный (возможно, уже неверный) план.
     Проверяется ТОЛЬКО сразу после шага, где последнее
@@ -164,7 +164,7 @@ async def _stream_round(
 
     Тот же приём — теперь и для реального 400 "exceeds the available
     context size" (см. compaction.py's is_context_overflow_error и его
-    докстринг, live-run #8): _CompactResearchMiddleware's собственный
+    докстринг): _CompactResearchMiddleware's собственный
     проактивный гейт (compaction.py:_needs_compaction) — chars//4-эвристика,
     которая может занизить реальную токенизацию (лог-дампы токенизируются
     заметно хуже прозы/кода) и не сработать ДО того, как бэкенд реально
@@ -183,11 +183,11 @@ async def _stream_round(
 
     # Буфер утёкшей tool-call разметки (см. _LEAK_MARKER_START_RE) — весь
     # текст ТЕКУЩЕГО стримящегося сообщения, сколько из него уже показано
-    # пользователю, и найдено ли начало маркера утечки. Живой прогон: сама
-    # утечка не обязательно с первого символа сообщения — до неё может идти
-    # настоящий текст-намерение, который надо показать как есть, а вот
-    # дальше саму разметку — нет, дальше просто копим (и никогда больше не
-    # показываем) для _parse_leaked_tool_calls в stream_chat.
+    # пользователю, и найдено ли начало маркера утечки. Утечка не обязательно
+    # начинается с первого символа сообщения — до неё может идти настоящий
+    # текст-намерение, который надо показать как есть, а вот дальше саму
+    # разметку — нет, дальше просто копим (и никогда больше не показываем)
+    # для _parse_leaked_tool_calls в stream_chat.
     full_buffer = ""
     flushed_len = 0
     leak_detected = False
@@ -210,13 +210,13 @@ async def _stream_round(
             ):
                 if mode == "messages":
                     msg_chunk, _meta = payload
-                    # Live bug (user report): the live token counter only
-                    # ticked on msg_chunk.content (plain text) — a tool call
-                    # being generated (write_file's whole new file content,
-                    # replace_lines' new_content, ...) is real, often slow,
-                    # generation too, but arrives as tool_call_chunks with
-                    # content usually empty, so the counter looked frozen for
-                    # the entire duration and only jumped once at tool_start
+                    # The live token counter only ticks on msg_chunk.content
+                    # (plain text) — a tool call being generated (write_file's
+                    # whole new file content, replace_lines' new_content, ...)
+                    # is real, often slow, generation too, but arrives as
+                    # tool_call_chunks with content usually empty, so without
+                    # this the counter would look frozen for the entire
+                    # duration and only jump once at tool_start
                     # (mcp_agent/agent.py below), well after the fact. Same
                     # AIMessageChunk can carry both fields — check
                     # independently of the content branch below, not elif.
@@ -309,10 +309,9 @@ async def _stream_round(
                             # No console.print here on purpose — ui/stream.py's
                             # tool_start already renders this same call (name +
                             # args) as the "🔧 name {...}" box; a raw dict echo
-                            # right above it duplicated that box using a
+                            # right above it would duplicate that box using a
                             # DIFFERENT truncation limit than tool_end below,
-                            # which on a live run (some-site, styles.css)
-                            # produced a garbled half-line right before the
+                            # producing a garbled half-line right before the
                             # correct, fully-rendered one. log_event still runs
                             # unconditionally (not under DEBUG) — it's the
                             # always-on side channel debug_log.py's docstring
@@ -334,7 +333,7 @@ async def _stream_round(
                         # multi-line diff collapsed into one "line" and never
                         # rendered; the user saw a truncated repr instead of the
                         # actual (tool-generated) diff. See message_utils.py's
-                        # _tool_text docstring for the live run this came from.
+                        # _tool_text docstring for more detail.
                         result_text = _tool_text(m.content)
                         # No console.print here either — same reason as
                         # tool_call above, this duplicated tool_end's own
@@ -368,8 +367,7 @@ async def _stream_round(
                 current_input = Command(resume=response)
                 continue
             if injected_text is not None:
-                # Живой фиче-запрос ("подправить ход, не начиная заново"):
-                # оборачиваем явной пометкой, что это НЕ новая, вытесняющая
+                # Оборачиваем явной пометкой, что это НЕ новая, вытесняющая
                 # задача — модель сама решает, отреагировать сейчас или
                 # заметить и вернуться к этому после текущей работы.
                 if on_event:
@@ -406,10 +404,9 @@ async def _stream_round(
     return chunk, emitted, tokens_in, tokens_out, llm_calls, hit_recursion_limit, hit_context_overflow, int(gen_ms)
 
 
-# Живой прогон (mail-server, 20260707-201534-f48ff36e, GraphRecursion
-# digest): список раньше покрывал только read_file-семейство — добавленные с
+# Список раньше покрывал только read_file-семейство — добавленные с
 # тех пор list_directory/directory_tree/lsp/delegate не появлялись в digest
-# вообще, хотя это была БОЛЬШАЯ часть реальной разведки того раунда. Общий
+# вообще, хотя это может быть БОЛЬШАЯ часть реальной разведки раунда. Общий
 # модуль-level список — используется и в _summarize_round (digest между
 # попытками), и в _investigation_signals (auto-capture knowledge ниже) —
 # один и тот же набор "это разведка", а не два независимых, которые могут
@@ -428,8 +425,8 @@ def _investigation_signals(round_msgs: list) -> tuple[set[str], bool]:
     """Для auto-capture knowledge (см. stream_chat, конец хода): сколько
     РАЗНЫХ мест разведано в этом раунде и вызывался ли update_knowledge —
     решить, стоило ли это исследование сохранить фактом на будущее, не
-    полагаясь на то, что об этом вспомнит сама модель (живой прогон: за всю
-    историю проекта update_knowledge вызван 2 раза)."""
+    полагаясь на то, что об этом вспомнит сама модель — за всю историю
+    проекта update_knowledge вызывался лишь 2 раза."""
     call_info = _round_call_info(round_msgs)
     read_items: set[str] = set()
     saved_knowledge = False
@@ -464,11 +461,11 @@ def _summarize_round(round_msgs: list, verdict: dict) -> str:
         if name in _READ_TOOL_NAMES:
             item = str(args.get("path") or args.get("pattern") or args.get("query") or args.get("task") or "?")
             # read_file — сохраняем ТОЧНОЕ окно (offset/limit), не только
-            # путь. Живой прогон (mail-server, Planner): без диапазона
-            # попытка 2 перечитала ТЕ ЖЕ строки 170-190/60-70/10-20, что и
-            # попытка 1 — дайджест отмечал файл как "explored" целиком,
-            # хотя реально был виден только небольшой кусок, и ретрай не
-            # мог отличить "уже видел эти строки" от "весь файл прочитан".
+            # путь. Без диапазона повторная попытка может перечитать ТЕ ЖЕ
+            # строки, что и предыдущая — дайджест отмечал бы файл как
+            # "explored" целиком, хотя реально был виден только небольшой
+            # кусок, и ретрай не смог бы отличить "уже видел эти строки" от
+            # "весь файл прочитан".
             offset, limit = args.get("offset"), args.get("limit")
             if offset is not None or limit is not None:
                 item += f":offset={offset or 0}/limit={limit}"
@@ -519,9 +516,10 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     # on_event(...) — обёртка глушит answer_*/thinking_* внешнего потока,
     # пока delegate (единственный тул легаси-агента, что зовёт sub_agent на
     # том же `model`) не закрылся своим tool_end (см. docstring в
-    # delegate_tool.py про живой баг с утечкой чужого токен-стрима). Кладём
-    # в ContextVar, а не передаём отдельным параметром — delegate() собран
-    # ОДИН раз на весь кеш агента (agent_builder.py:_agent_cache) и не видит
+    # delegate_tool.py про утечку чужого токен-стрима, которую это
+    # предотвращает). Кладём в ContextVar, а не передаём отдельным
+    # параметром — delegate() собран ОДИН раз на весь кеш агента
+    # (agent_builder.py:_agent_cache) и не видит
     # on_event ЭТОГО конкретного хода никаким другим способом. Без reset в
     # конце: ходы в этом CLI идут строго последовательно (не параллельно),
     # так что следующий вызов stream_chat просто перезапишет значение своим
@@ -545,8 +543,8 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     lc_messages = _to_lc_messages(messages)
     # Auto-inject knowledge вместо того, чтобы полагаться на модель, которая
     # ДОЛЖНА сама вызвать get_knowledge (system prompt это явно требует —
-    # см. prompts.py) — живой прогон: за всю историю проекта update_knowledge
-    # вызван 2 раза, get_knowledge не лучше, несмотря на инструкцию. Дешёвый
+    # см. prompts.py): за всю историю проекта update_knowledge вызывался
+    # лишь 2 раза, get_knowledge — не лучше, несмотря на инструкцию. Дешёвый
     # прямой SQLiteMemoryStore.load() (без похода через MCP-подпроцесс) на
     # каждый ход, а не один раз при сборке system prompt (см.
     # mcp_agent/agent_builder.py:_get_agent — агент/промпт кешируются на весь
@@ -671,18 +669,17 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
         return
 
     # Попытки кончились, а verdict так и остался "не подходит" — модель
-    # ответила по неполным/непроверенным данным (см. живой прогон:
-    # финальный ответ вообще уехал в другую тему после исчерпания попыток
-    # на diff-review + truncation). Помечаем явно вместо того, чтобы тихо
-    # выдать это как обычный уверенный ответ.
+    # ответила по неполным/непроверенным данным (после исчерпания попыток
+    # на diff-review + truncation финальный ответ может вообще уехать в
+    # другую тему). Помечаем явно вместо того, чтобы тихо выдать это как
+    # обычный уверенный ответ.
     if final_verdict is not None and not final_verdict["relevant"]:
         if final_verdict.get("kind") == "execution_failure" and touched_paths:
-            # Живой прогон: bash провалился дважды подряд (IndentationError
-            # после плохо посчитанных replace_lines-границ), попытки кончились,
-            # а сломанный agent.py остался лежать в проекте — пользователю
-            # пришлось убивать процесс руками, чтобы модель не жгла третью
-            # попытку впустую. Раз check детерминированно подтвердил, что
-            # код не работает (не просто "не проверили", а РЕАЛЬНО падает),
+            # Bash может провалиться дважды подряд (например, IndentationError
+            # из-за плохо посчитанных replace_lines-границ) — если попытки
+            # кончились, сломанный файл иначе так и останется лежать в
+            # проекте. Раз check детерминированно подтвердил, что код не
+            # работает (не просто "не проверили", а РЕАЛЬНО падает),
             # откатываем правки этого хода сами, а не оставляем починку на
             # пользователя.
             reverted = _revert_turn_paths(touched_paths, turn_start_wall)
