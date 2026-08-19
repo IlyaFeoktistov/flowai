@@ -200,17 +200,32 @@ def _failed_write_messages(tool_messages: list[ToolMessage]) -> list[ToolMessage
     ]
 
 
-def _write_stage_outcome(new_tool_msgs: list, round_final_text: str) -> str:
-    """Classifies a Coder/QuickFix round into one of 4 outcomes —
-    'failed_write' | 'no_write' | 'no_report' | 'ok'. Both stages
-    (mcp_agent/stages/coder.py, mcp_agent/stages/quick_fix.py) ran this
-    exact same 3-check sequence, in the same order, over these same 3
-    predicates — byte-identical control flow, only the reason/guidance
-    WORDING differed (Coder talks about "the plan"'s numbered steps,
-    QuickFix has no plan to refer to). That wording is real per-role
-    content, not duplication — this collapses only the decision logic
-    both stages agreed on, leaving each stage's own verdict_fn/guidance_fn
-    to supply its own text per outcome."""
+def _write_stage_outcome(new_tool_msgs: list, round_final_text: str, round_msgs: list | None = None) -> str:
+    """Classifies a Coder/QuickFix round into one of 6 outcomes —
+    'failed_write' | 'no_write' | 'no_report' | 'not_verified' |
+    'execution_failure' | 'ok'. Both stages (mcp_agent/stages/coder.py,
+    mcp_agent/stages/quick_fix.py) ran this exact same check sequence, in
+    the same order, over these same predicates — byte-identical control
+    flow, only the reason/guidance WORDING differed (Coder talks about
+    "the plan"'s numbered steps, QuickFix has no plan to refer to). That
+    wording is real per-role content, not duplication — this collapses
+    only the decision logic both stages agreed on, leaving each stage's
+    own verdict_fn/guidance_fn to supply its own text per outcome.
+
+    Coder/quick_fix now keep bash (roles.py:coder_tools/executor_tools —
+    for running checks, never for editing, see agent_builder.py:
+    _NoBashSelfFixMiddleware) specifically so a mistake introduced THIS
+    round gets caught and fixed by the SAME role, on the SAME round budget,
+    instead of always waiting for Verifier's separate, more expensive
+    round-trip to find it. 'not_verified'/'execution_failure' enforce
+    that: a round that wrote code but never ran a real check, or ran one
+    that failed, is not done yet — same two checks
+    (_has_execution_evidence/_execution_evidence_shows_failure) Verifier's
+    own verdict already used, applied here too now that this role has the
+    tool to act on them. round_msgs is only needed for that last check
+    (_execution_evidence_shows_failure needs the actual command text, not
+    just which tools were called) — omit it (None) to skip both new
+    checks entirely, e.g. from a test that doesn't care about them."""
     failed = _failed_write_messages(new_tool_msgs)
     # _has_successful_write guard: a failed attempt earlier in the round
     # that the model then retried and got right must not still fail the
@@ -221,6 +236,11 @@ def _write_stage_outcome(new_tool_msgs: list, round_final_text: str) -> str:
         return "no_write"
     if not round_final_text.strip():
         return "no_report"
+    if round_msgs is not None:
+        if not _has_execution_evidence(new_tool_msgs):
+            return "not_verified"
+        if _execution_evidence_shows_failure(round_msgs):
+            return "execution_failure"
     return "ok"
 
 
@@ -438,6 +458,21 @@ def _bash_commands(round_msgs: list) -> list[tuple[str, str]]:
             command = str((tc.get("args") or {}).get("command", "")) if tc else ""
             out.append((command, _tool_text(m.content)))
     return out
+
+
+def _last_check_error(round_msgs: list) -> str:
+    """The most recent failing bash result in this round — same "only the
+    LAST result of each command matters" principle as
+    _execution_evidence_shows_failure, just returning the actual text
+    instead of a bool, for a guidance message to quote. Shared by
+    coder_guidance/quick_fix_guidance (mcp_agent/stages/coder.py,
+    mcp_agent/stages/quick_fix.py) — same byte-identical logic those two
+    already share via _write_stage_outcome above."""
+    for _cmd, result in reversed(_bash_commands(round_msgs)):
+        text = result.lstrip()
+        if text.lower().startswith("error (exit"):
+            return text[:1000]
+    return "(check output not found — re-run it and read the actual error)"
 
 
 # After editing PHP files, a model can run `php -l` on each and report

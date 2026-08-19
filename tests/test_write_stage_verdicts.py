@@ -45,9 +45,29 @@ def test_outcome_no_report_when_wrote_but_no_final_text():
     assert _write_stage_outcome(_new_tool_msgs(round_msgs), "") == "no_report"
 
 
-def test_outcome_ok_when_wrote_and_reported():
+def test_outcome_ok_when_wrote_and_reported_and_round_msgs_omitted():
+    # round_msgs=None (default) skips the verification checks entirely —
+    # used by callers/tests that don't care about them.
     round_msgs = write_round(final_text="done, wrote x.py")
     assert _write_stage_outcome(_new_tool_msgs(round_msgs), "done, wrote x.py") == "ok"
+
+
+def test_outcome_not_verified_when_wrote_but_never_ran_bash():
+    round_msgs = write_round(final_text="done, wrote x.py")  # bash_ok=None — no bash call at all
+    outcome = _write_stage_outcome(_new_tool_msgs(round_msgs), "done, wrote x.py", round_msgs)
+    assert outcome == "not_verified"
+
+
+def test_outcome_execution_failure_when_the_real_check_failed():
+    round_msgs = write_round(bash_ok=False, final_text="done, wrote x.py")
+    outcome = _write_stage_outcome(_new_tool_msgs(round_msgs), "done, wrote x.py", round_msgs)
+    assert outcome == "execution_failure"
+
+
+def test_outcome_ok_when_wrote_reported_and_verified():
+    round_msgs = write_round(bash_ok=True, final_text="done, wrote x.py")
+    outcome = _write_stage_outcome(_new_tool_msgs(round_msgs), "done, wrote x.py", round_msgs)
+    assert outcome == "ok"
 
 
 def test_coder_and_quick_fix_verdicts_agree_on_outcome_differ_only_in_wording():
@@ -62,8 +82,27 @@ def test_coder_and_quick_fix_verdicts_agree_on_outcome_differ_only_in_wording():
     assert "the plan isn't done" not in qf_v["reason"]  # quick_fix has no plan
 
 
-def test_coder_and_quick_fix_verdicts_both_succeed_on_a_clean_round():
-    round_msgs = write_round(final_text="applied the fix")
+def test_coder_and_quick_fix_verdicts_reject_an_unverified_round():
+    round_msgs = write_round(final_text="applied the fix")  # no bash call
+    new_tool_msgs = _new_tool_msgs(round_msgs)
+    coder_v = coder_verdict(round_msgs, new_tool_msgs, "applied the fix")
+    qf_v = quick_fix_verdict(round_msgs, new_tool_msgs, "applied the fix")
+    assert coder_v["relevant"] is False and qf_v["relevant"] is False
+    assert "no real check" in coder_v["reason"]
+    assert "no real check" in qf_v["reason"]
+
+
+def test_coder_and_quick_fix_verdicts_reject_a_failed_check_with_execution_failure_kind():
+    round_msgs = write_round(bash_ok=False, final_text="applied the fix")
+    new_tool_msgs = _new_tool_msgs(round_msgs)
+    coder_v = coder_verdict(round_msgs, new_tool_msgs, "applied the fix")
+    qf_v = quick_fix_verdict(round_msgs, new_tool_msgs, "applied the fix")
+    assert coder_v["relevant"] is False and coder_v["kind"] == "execution_failure"
+    assert qf_v["relevant"] is False and qf_v["kind"] == "execution_failure"
+
+
+def test_coder_and_quick_fix_verdicts_both_succeed_on_a_verified_clean_round():
+    round_msgs = write_round(bash_ok=True, final_text="applied the fix")
     new_tool_msgs = _new_tool_msgs(round_msgs)
     assert coder_verdict(round_msgs, new_tool_msgs, "applied the fix")["relevant"] is True
     assert quick_fix_verdict(round_msgs, new_tool_msgs, "applied the fix")["relevant"] is True

@@ -166,33 +166,40 @@ def executor_tools(needs_project: bool) -> set[str]:
     проекта не бывает без его чтения), так что на практике этот набор
     всегда включает _PROJECT_READ_TOOLS.
 
-    БЕЗ bash — в отличие от investigator_tools, не наследует
-    _SHELL_TOOLS. Раньше эта функция вызывалась изнутри investigator_tools
-    и потому безусловно наследовала bash оттуда, хотя собственный промпт
-    (_quick_fix_system_prompt) прямо говорил "you do NOT have bash" — тот
-    же класс несоответствия схема/промпт, что уже чинили для Analyzer.
-    Смысловая причина держать его БЕЗ shell та же,
-    что у coder_tools(): после quick_fix ВСЕГДА идёт Verifier (pipeline.py
-    запускает verifier после coder_role независимо от того, "coder" это или
-    "quick_fix") — самопроверка исполнителя противоречит смыслу отдельной
-    непредвзятой проверки."""
-    names = set(_WEB_TOOLS) | _META_TOOLS | _WRITE_TOOLS
+    С bash — та же причина, что у coder_tools(): нужно реально
+    собрать/запустить свою правку и увидеть настоящую ошибку, не заявлять
+    готово по одному лишь чтению. bash только для проверок, не для правок
+    в объезд snapshot-защиты write_file/edit_file — см.
+    agent_builder.py:_NoBashSelfFixMiddleware. Verifier всё равно идёт
+    следом (pipeline.py запускает его после coder_role независимо от
+    того, "coder" это или "quick_fix") — финальная независимая проверка,
+    не единственная."""
+    names = set(_WEB_TOOLS) | _META_TOOLS | _WRITE_TOOLS | _SHELL_TOOLS
     if needs_project:
-        names |= _project_read_tools(has_shell=False)
+        names |= _project_read_tools(has_shell=True)
     return _apply_optimized_filter(names)
 
 
 def coder_tools() -> set[str]:
     """Двустадийный путь (после согласованного Planner'ом плана) — всегда
-    полный проектный read+write, но НИКОГДА bash независимо от флагов:
-    верификация целиком у Verifier (см. verifier_tools) — Coder не должен
-    иметь возможность сам себя "проверить".
+    полный проектный read+write, ТЕПЕРЬ включая bash: Coder должен реально
+    собрать/запустить свою правку и увидеть настоящую ошибку компилятора/
+    теста, а не заявлять готово по одному лишь чтению кода — "верификация
+    целиком у Verifier" оставляла найденные ошибки на Coder<->Verifier
+    раунды (ограниченный бюджет, см. CODER_VERIFIER_MAX_ROUNDS), вместо
+    того чтобы Coder сам исправил то, что сам же сломал, пока может. bash
+    здесь — ТОЛЬКО для запуска проверок (build/test/run), не для правок в
+    объезд snapshot-защиты write_file/edit_file — механически закрыто той
+    же мидлварью, что у Verifier (см.
+    agent_builder.py:_NoBashSelfFixMiddleware). Verifier остаётся
+    финальной независимой проверкой ПОСЛЕ Coder — не отменяется, просто
+    должен реже находить то, что Coder мог бы найти сам.
 
     mark_plan_step_current — только здесь: единственная стадия, у которой
     вообще есть пронумерованный plan_steps-чек-лист над футером (см.
     pipeline.py/ui/app.py) — Planner/Analyzer/Verifier/quick_fix его не
     рисуют, им нечего отмечать текущим."""
-    raw = _project_read_tools(has_shell=False) | _WEB_TOOLS | _META_TOOLS | _WRITE_TOOLS
+    raw = _project_read_tools(has_shell=True) | _WEB_TOOLS | _META_TOOLS | _WRITE_TOOLS | _SHELL_TOOLS
     return _apply_optimized_filter(raw) | {"mark_plan_step_current"}
 
 

@@ -4,17 +4,19 @@ Verdict/guidance для стадии QuickFix (mcp_agent/roles.py, mcp_agent/pip
 QuickFix — облегчённая ветка пайплайна для маленьких, однозначных правок
 (router.py: needs_change=true и change_is_ambiguous=false): вместо
 Analyzer->Planner->Coder эта стадия сама читает, что нужно, и сразу правит
-— без отдельного плана и без ask_user (см. roles.py:executor_tools).
-Verdict здесь — те же детерминированные
-предикаты, что у coder_verdict (mcp_agent/stages/coder.py): были ли реально
-внесены правки, не провалился ли сам вызов записи, есть ли финальный
-отчёт — просто без формулировок про "план", которого в этой ветке нет.
+— без отдельного плана и без ask_user (см. roles.py:executor_tools), а
+теперь и сама проверяет результат реальной командой (bash — только для
+запуска проверок) прежде чем отдавать Verifier'у. Verdict здесь — те же
+детерминированные предикаты, что у coder_verdict (mcp_agent/stages/
+coder.py): были ли реально внесены правки, проверены ли они реальной
+командой, есть ли финальный отчёт — просто без формулировок про "план",
+которого в этой ветке нет.
 """
-from mcp_agent.self_heal import _failed_write_messages, _wrote_code, _write_stage_outcome
+from mcp_agent.self_heal import _failed_write_messages, _last_check_error, _wrote_code, _write_stage_outcome
 
 
 def quick_fix_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: str) -> dict:
-    outcome = _write_stage_outcome(new_tool_msgs, round_final_text)
+    outcome = _write_stage_outcome(new_tool_msgs, round_final_text, round_msgs)
     if outcome == "failed_write":
         failed = _failed_write_messages(new_tool_msgs)
         return {
@@ -31,7 +33,18 @@ def quick_fix_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: s
             "relevant": False,
             "reason": "edits were made but no final report was written — report what changed and why it fixes the issue",
         }
-    return {"relevant": True, "reason": "investigated and applied the fix directly, reported what changed"}
+    if outcome == "not_verified":
+        return {
+            "relevant": False,
+            "reason": "edits were made but no real check (build/test/run) was run via bash — a write only means the file was saved, not that it works",
+        }
+    if outcome == "execution_failure":
+        return {
+            "relevant": False,
+            "reason": "ran a real check and it failed",
+            "kind": "execution_failure",
+        }
+    return {"relevant": True, "reason": "investigated, applied the fix, verified it, and reported what changed"}
 
 
 def quick_fix_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_final_text: str) -> str:
@@ -55,4 +68,18 @@ def quick_fix_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, rou
             "of forcing an edit — don't keep reading without ever writing or "
             "explaining why."
         )
-    return "Write a final report describing what you changed and why it fixes the issue."
+    if verdict.get("kind") == "execution_failure":
+        error_text = _last_check_error(round_msgs)
+        return (
+            "Your own check failed — read the actual error below and fix "
+            "the code, then run the SAME check again to confirm before "
+            f"reporting done:\n{error_text}"
+        )
+    if not round_final_text.strip():
+        return "Write a final report describing what you changed and why it fixes the issue."
+    return (
+        "You wrote code but never ran a real check (build/test/run) via "
+        "bash to confirm it actually works — a successful write only means "
+        "the file was saved. Run the appropriate check now; if it fails, "
+        "fix the code and check again before reporting done."
+    )

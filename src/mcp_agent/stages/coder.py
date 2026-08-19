@@ -1,18 +1,16 @@
 """
 Verdict/guidance для стадии Coder (mcp_agent/roles.py, mcp_agent/pipeline.py).
 
-Coder получает утверждённый нумерованный план и должен его исполнить —
-верификации здесь нет вообще (это отдельная стадия, Verifier), так что
-verdict проверяет только "были ли реально сделаны правки" — те же
-детерминированные предикаты self_heal.py, что раньше жили в общем дереве
-mcp_agent/agent.py, просто без всей верификационной части (execution_
-failure/syntax_only и т.д. — то, что здесь БЫЛО про bash, целиком
-переехало в mcp_agent/stages/verifier.py)."""
-from mcp_agent.self_heal import _failed_write_messages, _wrote_code, _write_stage_outcome
+Coder получает утверждённый нумерованный план и должен его исполнить, а
+теперь и сам проверить результат реальной командой (bash — только для
+запуска проверок, roles.py:coder_tools) прежде чем отдавать Verifier'у —
+verdict проверяет и это, помимо базовых "были ли реально сделаны правки"
+предикатов self_heal.py, унаследованных из общего дерева mcp_agent/agent.py."""
+from mcp_agent.self_heal import _failed_write_messages, _last_check_error, _wrote_code, _write_stage_outcome
 
 
 def coder_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: str) -> dict:
-    outcome = _write_stage_outcome(new_tool_msgs, round_final_text)
+    outcome = _write_stage_outcome(new_tool_msgs, round_final_text, round_msgs)
     if outcome == "failed_write":
         failed = _failed_write_messages(new_tool_msgs)
         return {
@@ -29,7 +27,18 @@ def coder_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: str) 
             "relevant": False,
             "reason": "edits were made but no final report was written — report what changed for each numbered plan step",
         }
-    return {"relevant": True, "reason": "applied edits and reported what changed"}
+    if outcome == "not_verified":
+        return {
+            "relevant": False,
+            "reason": "edits were made but no real check (build/test/run) was run via bash — a write only means the file was saved, not that it works",
+        }
+    if outcome == "execution_failure":
+        return {
+            "relevant": False,
+            "reason": "ran a real check and it failed",
+            "kind": "execution_failure",
+        }
+    return {"relevant": True, "reason": "applied edits, verified them, and reported what changed"}
 
 
 def coder_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_final_text: str) -> str:
@@ -60,4 +69,19 @@ def coder_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_f
             "order, don't just re-read files you already have from the "
             "plan/Analyzer's findings above."
         )
-    return "Write a final report describing what you changed, numbered 1:1 with the plan's steps."
+    if verdict.get("kind") == "execution_failure":
+        error_text = _last_check_error(round_msgs)
+        return (
+            "Your own check failed — read the actual error below and fix "
+            "the code, then run the SAME check again to confirm before "
+            f"reporting done:\n{error_text}"
+        )
+    if not round_final_text.strip():
+        return "Write a final report describing what you changed, numbered 1:1 with the plan's steps."
+    return (
+        "You wrote code but never ran a real check (build/test/run) via "
+        "bash to confirm it actually works — a successful write only means "
+        "the file was saved. Run the appropriate check now; if it fails, "
+        "fix the code and check again before reporting done."
+    )
+

@@ -707,8 +707,9 @@ class _InvestigationReadOnlyBashMiddleware(AgentMiddleware):
     backstops. Mechanical backstop, only
     attached to roles whose tool set includes bash but no legitimate
     reason to ever mutate anything (analyzer, planner — see
-    _build_role_agent; verifier gets _VerifierNoSelfFixMiddleware instead,
-    a denylist, since it legitimately needs to run arbitrary builds/tests):
+    _build_role_agent; verifier/coder/quick_fix get
+    _NoBashSelfFixMiddleware instead, a denylist, since they legitimately
+    need to run arbitrary builds/tests):
     reject any bash/bash_bg call whose command isn't on the
     narrow read-only allowlist, same "final, don't retry" contract as a
     real permission denial."""
@@ -735,27 +736,28 @@ class _InvestigationReadOnlyBashMiddleware(AgentMiddleware):
         )
 
 
-class _VerifierNoSelfFixMiddleware(AgentMiddleware):
-    """Verifier has no write tools on purpose (roles.py:verifier_tools —
-    only read + shell) precisely so a failed check turns into a REPORTED
-    failure that sends the change back to Coder for a proper, snapshotted
-    fix (pipeline.py's Coder<->Verifier retry loop) — not something
-    Verifier patches itself. Its own system prompt already says so in
-    plain English ("You have NO write/edit tools... a failure goes back to
-    the Coder stage", prompts.py:_verifier_system_prompt) — that alone
-    isn't enough: given e.g. a `go build` failure (unused import), a model
-    can run `sed -i '/strconv/d' snake.go && go build snake.go` via bash
-    instead of reporting it. bash is the ONE tool Verifier keeps that
-    can still write to disk (it needs it to run builds/tests), and the
-    prompt sentence alone didn't stop the model from using it to edit
-    instead of just check. That edit landed with NO pre-write snapshot
-    (_snapshot_before_write only wraps write_file/edit_file — bash was
-    never in that list, on purpose, since most bash calls aren't edits) and
-    skipped the whole Coder-Verifier retry loop the pipeline is built
-    around. Mechanical backstop, only attached when role == "verifier"
-    (see _build_role_agent): reject bash/bash_bg calls whose
-    command looks like an in-place file edit, pointing the model back at
-    reporting the failure instead of retrying with a different shell
+class _NoBashSelfFixMiddleware(AgentMiddleware):
+    """Every role with both bash and real write tools (coder, quick_fix)
+    or bash alone with no write tools at all (verifier) must still make
+    every actual edit through write_file/edit_file, which have a pre-write
+    snapshot for safety (_snapshot_before_write) — bash is only for
+    RUNNING checks (build/test/run), never for patching a file in place.
+    Verifier's own system prompt already says this in plain English ("You
+    have NO write/edit tools... a failure goes back to the Coder stage",
+    prompts.py:_verifier_system_prompt) and Coder/quick_fix's prompts now
+    describe the same bash-for-checks-only boundary — that alone isn't
+    enough: given e.g. a `go build` failure (unused import), a model can
+    run `sed -i '/strconv/d' snake.go && go build snake.go` via bash
+    instead of fixing it the safe way. Such an edit lands with NO pre-write
+    snapshot (bash was never in _snapshot_before_write's tool list, on
+    purpose, since most bash calls aren't edits) — for Verifier specifically
+    it also skips the whole Coder-Verifier retry loop the pipeline is built
+    around, since Verifier itself has no write tools to have made the
+    edit through. Mechanical backstop, attached whenever role is
+    "verifier"/"coder"/"quick_fix" (see _build_role_agent): reject
+    bash/bash_bg calls whose command looks like an in-place file edit,
+    pointing the model back at write_file/edit_file (or, for Verifier,
+    at reporting the failure) instead of retrying with a different shell
     trick — same "final, don't retry" contract as a real permission
     denial (prompts.py already tells every role to treat a rejected/
     denied call as final).
@@ -763,13 +765,19 @@ class _VerifierNoSelfFixMiddleware(AgentMiddleware):
     repo_path is passed through to _looks_like_file_mutation so a redirect
     to scratch space OUTSIDE the project (e.g. /tmp) isn't treated as a
     self-fix — see that function's module-level comments: without this,
-    Verifier legitimately writing a throwaway /tmp syntax-check file (say
-    the real build is blocked by a missing system dependency it has no way
-    to install) would be denied outright alongside real in-project edits,
-    leaving it unable to verify anything it COULD have checked."""
+    legitimately writing a throwaway /tmp syntax-check file (say the real
+    build is blocked by a missing system dependency there's no way to
+    install) would be denied outright alongside real in-project edits,
+    leaving the role unable to verify anything it COULD have checked."""
 
-    def __init__(self, repo_path: str):
+    def __init__(self, repo_path: str, has_write_tools: bool):
         self._repo_path = repo_path
+        # Verifier has no write tools at all (roles.py:verifier_tools) —
+        # telling it to "use write_file/edit_file instead" would name
+        # tools it doesn't have; coder/quick_fix DO have them, so the
+        # denial should point there instead of at reporting a failure to
+        # a separate stage that, for them, IS this same stage.
+        self._has_write_tools = has_write_tools
 
     async def awrap_tool_call(self, request, handler):
         if request.tool_call["name"] not in ("bash", "bash_bg"):
@@ -777,19 +785,26 @@ class _VerifierNoSelfFixMiddleware(AgentMiddleware):
         command = str((request.tool_call.get("args") or {}).get("command", ""))
         if not _looks_like_file_mutation(command, self._repo_path):
             return await handler(request)
+        fix_instruction = (
+            "Use write_file/edit_file instead — they have a pre-write "
+            "snapshot for safety, unlike an unsnapshotted shell edit."
+            if self._has_write_tools else
+            "Report this as a failure in your verdict instead (which file, "
+            "what the real error/output was) — you have no write tools on "
+            "purpose, you check, you don't fix; the Coder stage does the "
+            "fix, with a pre-write snapshot for safety, unlike an "
+            "unsnapshotted shell edit here."
+        )
         return ToolMessage(
             content=(
                 f"Denied: this command looks like it would modify a file "
-                f"inside the project ({command!r}) — Verifier has no "
-                "write tools on purpose, you check, you don't fix. Report "
-                "this as a failure in your verdict instead (which file, "
-                "what the real error/output was) so it goes back to the "
-                "Coder stage — which has real write tools AND a pre-write "
-                "snapshot for safety, unlike an unsnapshotted shell edit "
-                "here. Do not retry this or a similar command. (Writing a "
-                "throwaway scratch file OUTSIDE the project, e.g. under "
-                "/tmp, to help you verify something IS allowed — this "
-                "denial means the target resolves inside the project.)"
+                f"inside the project ({command!r}) — bash here is for "
+                f"RUNNING checks (build/test/run), never for editing "
+                f"files. {fix_instruction} Do not retry this or a similar "
+                "command. (Writing a throwaway scratch file OUTSIDE the "
+                "project, e.g. under /tmp, to help you verify something IS "
+                "allowed — this denial means the target resolves inside "
+                "the project.)"
             ),
             name=request.tool_call["name"],
             tool_call_id=request.tool_call["id"],
@@ -837,7 +852,7 @@ def _base_agent_middleware(
     across every caller.
 
     `pre_hitl` (role-specific mechanical bash-content rejectors —
-    _VerifierNoSelfFixMiddleware/_InvestigationReadOnlyBashMiddleware, see
+    _NoBashSelfFixMiddleware/_InvestigationReadOnlyBashMiddleware, see
     _build_role_agent's own tail) MUST be inserted BEFORE hitl_middleware,
     not appended after it: langchain's middleware order is outermost-first
     (langchain.agents.factory._chain_tool_call_wrappers's own docstring,
@@ -1155,13 +1170,15 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     # pre_hitl parameter) — a command they're going to reject mechanically
     # must never reach the human approval prompt in the first place.
     pre_hitl: list = []
-    if role == "verifier":
-        # Только Verifier держит bash БЕЗ единого write-тула рядом —
-        # единственная роль, где bash реально способен подменить
-        # собой запись файла (sed -i и т.п.), см. докстринг мидлвари.
-        # resolved_repo_path — чтобы отличить редирект В ПРОЕКТ (самопочинка)
-        # от редиректа в /tmp и подобное (одноразовый scratch для проверки).
-        pre_hitl.append(_VerifierNoSelfFixMiddleware(resolved_repo_path))
+    if role in ("verifier", "coder", "quick_fix"):
+        # Все три держат bash способный подменить собой запись файла
+        # (sed -i и т.п., см. докстринг мидлвари) — Verifier БЕЗ единого
+        # write-тула рядом, Coder/quick_fix С write_file/edit_file (bash
+        # у них только для запуска проверок, не для правок в объезд их
+        # snapshot-защиты). resolved_repo_path — чтобы отличить редирект
+        # В ПРОЕКТ (самопочинка) от редиректа в /tmp и подобное
+        # (одноразовый scratch для проверки).
+        pre_hitl.append(_NoBashSelfFixMiddleware(resolved_repo_path, has_write_tools=role != "verifier"))
     if role in ("analyzer", "planner"):
         # Обе роли держат bash безусловно (roles.py:investigator_tools/
         # planner_tools) только для диагностики, никогда для мутации — см.
