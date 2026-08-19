@@ -37,6 +37,23 @@ def _calls_by_id(messages: list) -> dict[str, dict]:
     return calls_by_id
 
 
+def _find_call_by_id(messages: list, tool_call_id: str) -> AIMessage | None:
+    """The AIMessage that made a given tool_call_id — same reversed-scan
+    shape independently written twice: ask_user_tool.py's
+    _sibling_tool_names (wants every SIBLING call from that same
+    AIMessage, to block a tool called alongside ask_user before it's
+    answered) and dnd_agent.py's post-tool-call middleware (wants the
+    message's own .content text, to check whether the turn that triggered
+    this tool call ended on a question). Not the same job as _calls_by_id
+    above — that flattens every call across the whole conversation into an
+    id->call dict, which loses which message a call belonged to; both
+    callers here need the MESSAGE itself, not just its tool_calls entry."""
+    for m in reversed(messages):
+        if isinstance(m, AIMessage) and any(tc.get("id") == tool_call_id for tc in (m.tool_calls or [])):
+            return m
+    return None
+
+
 # Живой прогон (mail-server, 20260707-155842-8b900098): MCP tool results
 # normally come back as a LIST of content blocks ([{'type': 'text', 'text':
 # '...'}, ...]), not a plain string — langchain_mcp_adapters' standard shape

@@ -5,7 +5,7 @@ incident: Verifier looped on an identical failing `go get` call 5x with no
 progress, see message_utils.py's comment on the nudge branch)."""
 from conftest import ai_message, tool_message
 
-from mcp_agent.message_utils import _calls_by_id, _dedupe_identical_tool_results
+from mcp_agent.message_utils import _calls_by_id, _dedupe_identical_tool_results, _find_call_by_id
 
 
 def test_calls_by_id_joins_tool_call_id_to_the_call_dict():
@@ -25,6 +25,24 @@ def test_calls_by_id_ignores_tool_calls_with_a_falsy_id():
 
 def test_calls_by_id_empty_for_no_ai_messages():
     assert _calls_by_id([tool_message("bash", tool_call_id="1")]) == {}
+
+
+def test_find_call_by_id_returns_the_message_with_all_its_sibling_calls():
+    msgs = [
+        ai_message([
+            {"id": "1", "name": "ask_user", "args": {}},
+            {"id": "2", "name": "read_file", "args": {"path": "a.py"}},
+        ], content="checking in"),
+        tool_message("ask_user", tool_call_id="1"),
+    ]
+    found = _find_call_by_id(msgs, "2")
+    assert found is not None
+    assert found.content == "checking in"
+    assert {tc["name"] for tc in found.tool_calls} == {"ask_user", "read_file"}
+
+
+def test_find_call_by_id_returns_none_when_not_found():
+    assert _find_call_by_id([tool_message("bash", tool_call_id="1")], "1") is None
 
 
 def _bash_round(n, result_text):

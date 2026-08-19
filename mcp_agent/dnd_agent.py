@@ -27,7 +27,7 @@ from mcp_agent import dnd_store as store
 from mcp_agent.agent_builder import _ChatOllamaWithNumKeep
 from mcp_agent.build_cache import BuildCache
 from mcp_agent.dnd_tools import build_dnd_tools
-from mcp_agent.message_utils import _to_lc_messages
+from mcp_agent.message_utils import _find_call_by_id, _to_lc_messages
 from mcp_agent.model_config import (
     MODEL_TEMPERATURE,
     OLLAMA_KEEP_ALIVE,
@@ -118,13 +118,12 @@ class _StopAfterQuestionMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request, handler):
         result = await handler(request)
         messages = request.state["messages"] if isinstance(request.state, dict) else getattr(request.state, "messages", [])
-        triggering_text = ""
-        for m in reversed(messages):
-            if isinstance(m, AIMessage) and any(
-                tc.get("id") == request.tool_call["id"] for tc in (m.tool_calls or [])
-            ):
-                triggering_text = (m.content or "").strip() if isinstance(m.content, str) else ""
-                break
+        triggering_msg = _find_call_by_id(messages, request.tool_call["id"])
+        triggering_text = (
+            (triggering_msg.content or "").strip()
+            if triggering_msg is not None and isinstance(triggering_msg.content, str)
+            else ""
+        )
         if not triggering_text or not _QUESTION_END_RE.search(triggering_text):
             return result
         if not isinstance(result, ToolMessage):

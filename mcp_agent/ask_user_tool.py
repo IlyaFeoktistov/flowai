@@ -21,6 +21,7 @@ from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 
 import settings
+from mcp_agent.message_utils import _find_call_by_id
 from mcp_agent.model_config import ASK_USER_FINALIZE_NUM_PREDICT
 from tools.confirm import ask_permission, ask_user_question
 
@@ -127,10 +128,8 @@ async def mark_plan_step_current(step_number: int) -> str:
 
 def _sibling_tool_names(state: Any, tool_call_id: str) -> set[str]:
     messages = state["messages"] if isinstance(state, dict) else getattr(state, "messages", [])
-    for m in reversed(messages):
-        if isinstance(m, AIMessage) and any(tc.get("id") == tool_call_id for tc in (m.tool_calls or [])):
-            return {tc["name"] for tc in (m.tool_calls or [])}
-    return set()
+    m = _find_call_by_id(messages, tool_call_id)
+    return {tc["name"] for tc in (m.tool_calls or [])} if m else set()
 
 
 class _ToolErrorGuardMiddleware(AgentMiddleware):
