@@ -27,7 +27,15 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 mcp = FastMCP("music")
 
-OUTPUT_DIR = Path(_PROJECT_ROOT) / "generated"
+
+def _output_dir() -> Path:
+    """Path.cwd() — this server is always spawned with cwd=repo_path (see
+    mcp_agent/config.py's build_mcp_connections), the project the user has
+    open right now, not flowAI's own install directory: generated music
+    belongs next to the project it was generated for, same convention as
+    every other "generated/" dir in this app (gen3d.pipeline.
+    generated_models_dir(), image_gen_server.py's OUTPUT_DIR)."""
+    return Path.cwd() / "generated"
 
 _MODEL_NAME = "facebook/musicgen-small"
 _model = None
@@ -159,11 +167,12 @@ async def generate_music(prompt: str, duration: float = 10.0) -> str:
 
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _load_model)
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    output_dir = _output_dir()
+    output_dir.mkdir(exist_ok=True)
 
     def _run():
         audio_np, sample_rate = generate_clip_sync(prompt, duration)
-        out = OUTPUT_DIR / f"{hash(prompt) & 0xFFFFFF:06x}.wav"
+        out = output_dir / f"{hash(prompt) & 0xFFFFFF:06x}.wav"
         # scipy, not torchaudio — torchaudio isn't in this venv and must match
         # torch's exact version to install safely; scipy is already a
         # transitive dependency here and needs no version coordination.

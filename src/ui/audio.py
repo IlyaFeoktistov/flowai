@@ -32,9 +32,15 @@ _PS = "/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe"
 # .venv, где живёт diffusers/SDXL (см. tts_worker.py docstring про живую
 # диагностику этого конфликта). Поэтому синтез — всегда subprocess, никогда
 # прямой import.
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Two different "roots" since this file moved one level deeper under src/
+# (src/ui/audio.py): _SRC_ROOT (unchanged dirname count) now correctly
+# lands on src/ itself, which is where ui/ (and tts_worker.py inside it)
+# actually lives — but venv-tts/ is a real repo-root directory that never
+# moved there, so it needs the true root, one dirname further up.
+_SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = os.path.dirname(_SRC_ROOT)
 _VENV_TTS_PY = os.path.join(_PROJECT_ROOT, "venv-tts", "bin", "python")
-_TTS_WORKER = os.path.join(_PROJECT_ROOT, "ui", "tts_worker.py")
+_TTS_WORKER = os.path.join(_SRC_ROOT, "ui", "tts_worker.py")
 
 _whisper_model = None  # ленивая синглтон-загрузка, см. transcribe()
 

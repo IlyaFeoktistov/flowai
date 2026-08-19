@@ -5,4 +5,4 @@
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-exec "$HERE/.venv/bin/python" "$HERE/cli.py" "$@"
+exec "$HERE/.venv/bin/python" "$HERE/src/cli.py" "$@"

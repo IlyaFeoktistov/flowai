@@ -25,7 +25,10 @@ fail-open contract as expert_streaming.ensure_running.
 import subprocess
 from pathlib import Path
 
-FLOWAI_ROOT = Path(__file__).resolve().parent.parent
+# One extra .parent — this file lives one level deeper under src/
+# (src/mcp_agent/ollama_kv_cache.py) now, but scripts/ is a real repo-root
+# directory that never moved there.
+FLOWAI_ROOT = Path(__file__).resolve().parent.parent.parent
 SWITCH_SCRIPT = FLOWAI_ROOT / "scripts" / "ollama_kv_cache_switch.sh"
 
 # Models known to crash under OLLAMA_KV_CACHE_TYPE=q8_0 (GGML_ASSERT, see

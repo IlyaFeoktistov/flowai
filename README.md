@@ -64,7 +64,7 @@ python3 setup.py --dry-run
 python3 setup.py --only tts   # main | image-gen | whisper | tts | hunyuan3d-2gp | unirig | animato | supermat | expert-streaming
 ```
 
-Дальше запускать через лончер `./flowai` (сам находит `.venv`, активировать вручную не нужно) или `python3 cli.py` после `source .venv/bin/activate`.
+Дальше запускать через лончер `./flowai` (сам находит `.venv`, активировать вручную не нужно) или `python3 src/cli.py` после `source .venv/bin/activate`.
 
 Компоненты по отдельности:
 
@@ -273,7 +273,7 @@ Ollama, см. `expert_streaming.py` — обычный Ollama-путь для Э
 ```bash
 ./flowai
 # или
-python3 cli.py
+python3 src/cli.py
 ```
 
 Команды в чате: `/img путь.jpg`, `/paste`, `/gen промпт`, `/gen_model промпт [--rig]`, `/anim описание движения`, `/gen_texture @модель @картинка`, `/usage`, `/settings`, `/clear`, `/help`.

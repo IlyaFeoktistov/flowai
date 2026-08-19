@@ -31,7 +31,10 @@ from pathlib import Path
 
 import settings
 
-_REPO_ROOT = Path(__file__).resolve().parent
+# .parent.parent, not .parent — update.py lives one level deep under src/
+# (src/update.py), but every path built from _REPO_ROOT below (.git,
+# requirements.txt, .venv) is a REAL repo-root asset that never moved there.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 _GIT_TIMEOUT = 30
 _PIP_TIMEOUT = 180
 _CHECK_INTERVAL = timedelta(hours=6)

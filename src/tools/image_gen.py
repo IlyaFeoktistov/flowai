@@ -130,7 +130,13 @@ async def _spin_download(label: str) -> None:
             sys.stdout.buffer.write(b"\r\033[K")
             sys.stdout.buffer.flush()
 
-OUTPUT_DIR = Path(__file__).parent.parent / "generated"
+def _output_dir() -> Path:
+    """Path.cwd() — the project the user has open right now (repo_path),
+    not flowAI's own install directory: generated images belong next to
+    the project they were generated for, same convention as every other
+    "generated/" dir in this app (gen3d.pipeline.generated_models_dir(),
+    music_server.py's OUTPUT_DIR)."""
+    return Path.cwd() / "generated"
 
 _pipe = None
 _pipe_key: tuple = (None, None, None, None)  # (model, device, safety, steps)
@@ -419,7 +425,8 @@ async def generate_image(args: dict) -> dict:
             return fail(err)
         _pipe_key = key
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    output_dir = _output_dir()
+    output_dir.mkdir(exist_ok=True)
 
     final_prompt = f"{prompt_prefix}, {prompt}" if prompt_prefix else prompt
     use_negative = negative_prompt and not _is_flux(model)
@@ -443,7 +450,7 @@ async def generate_image(args: dict) -> dict:
         finally:
             _TqdmCapture.uninstall()
         img = result.images[0]
-        out = OUTPUT_DIR / f"{hash(final_prompt) & 0xFFFFFF:06x}.png"
+        out = output_dir / f"{hash(final_prompt) & 0xFFFFFF:06x}.png"
         img.save(out)
         return str(out)
 

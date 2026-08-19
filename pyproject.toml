@@ -43,7 +43,14 @@ dependencies = [
 flowai = "cli:run"
 
 [tool.hatch.build.targets.wheel]
-# Плоский layout (не src/flowai/...) — модули лежат прямо в корне репозитория.
+# Плоский layout, но физически под src/ (src/cli.py, src/mcp_agent/...), не
+# src/flowai/... — sources ниже strip'ает "src/" при сборке колеса/editable-
+# установки, так что в собранном пакете/на sys.path модули всё равно видны
+# ПЛОСКО (top-level `cli`, `mcp_agent`, ...), как и раньше; поменялось только
+# физическое расположение файлов на диске, не layout самого пакета. include
+# ниже — пути ДО strip'а (реальные пути в репозитории), get_distribution_path
+# сам вычисляет, во что каждый превратится.
+#
 # Список — "main" (см. README:"Установка"): то, что покрывает requirements.txt
 # и обязательно для базового чата. Тяжёлые опциональные части (веса/расчёты
 # image-gen/whisper/tts/gen3d-пайплайна, vendor/*) вне пакета — они ставятся
@@ -60,9 +67,10 @@ flowai = "cli:run"
 # Живой баг, найденный на реальной non-editable установке в чистый venv:
 # без gen3d/*.py `import cli` падал с ModuleNotFoundError уже на старте,
 # даже без единого вызова /gen_model.
+sources = ["src"]
 include = [
-    "cli.py", "compress.py", "main.py", "memory_admin.py",
-    "model_lifecycle.py", "settings.py", "storage.py", "usage.py",
-    "episodic/**", "mcp_agent/**", "memory/**", "rag/**", "tools/**",
-    "ui/**", "utils/**", "gen3d/*.py",
+    "src/cli.py", "src/compress.py", "src/main.py", "src/memory_admin.py",
+    "src/model_lifecycle.py", "src/settings.py", "src/storage.py", "src/usage.py",
+    "src/episodic/**", "src/mcp_agent/**", "src/memory/**", "src/rag/**", "src/tools/**",
+    "src/ui/**", "src/utils/**", "src/gen3d/*.py",
 ]

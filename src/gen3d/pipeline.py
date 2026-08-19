@@ -20,10 +20,25 @@ import time
 from pathlib import Path
 from typing import Callable
 
-FLOWAI_ROOT = Path(__file__).resolve().parent.parent
+# One extra .parent vs. what "gen3d/pipeline.py is one level deep" alone
+# would suggest — gen3d/ lives one level deeper under src/ (src/gen3d/
+# pipeline.py) now, but vendor/ and generated/ are real repo-root
+# directories that never moved there.
+FLOWAI_ROOT = Path(__file__).resolve().parent.parent.parent
 VENDOR_DIR = FLOWAI_ROOT / "vendor"
 BLENDER_SCRIPTS = Path(__file__).resolve().parent / "blender_scripts"
-GENERATED_MODELS_DIR = FLOWAI_ROOT / "generated" / "models"
+
+
+def generated_models_dir() -> Path:
+    """Path.cwd() — this runs inside gen_model_server.py, always spawned
+    with cwd=repo_path (see mcp_agent/config.py's build_mcp_connections),
+    the project the user has open right now, not flowAI's own install
+    directory: generated models belong next to the project they were
+    generated for, same convention as image_gen_server.py/music_server.py's
+    OUTPUT_DIR. A function, not a frozen constant, because model_refs.py's
+    @name completion (ui/app.py) and this module's own generation functions
+    below all need the CURRENT cwd, not whatever it was at import time."""
+    return Path.cwd() / "generated" / "models"
 
 HUNYUAN_DIR = VENDOR_DIR / "hunyuan3d-2gp"
 UNIRIG_DIR = VENDOR_DIR / "unirig"
@@ -469,7 +484,8 @@ def run_gen_model(image_path: str | None = None, out_slug: str = "", rig: bool =
     """
     if bool(image_path) == bool(images):
         raise ValueError("run_gen_model needs exactly one of image_path or images")
-    GENERATED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    models_dir = generated_models_dir()
+    models_dir.mkdir(parents=True, exist_ok=True)
     import tempfile
     with tempfile.TemporaryDirectory(prefix="gen3d_") as tmp:
         tmp = Path(tmp)
@@ -507,7 +523,7 @@ def run_gen_model(image_path: str | None = None, out_slug: str = "", rig: bool =
             add_rig(final, rigged, skin_source=skin_source, on_stage=on_stage, cancel_event=cancel_event)
             final = rigged
 
-        out_path = GENERATED_MODELS_DIR / f"{out_slug}.glb"
+        out_path = models_dir / f"{out_slug}.glb"
         shutil.copy(final, out_path)
 
         for i in range(1, lod + 1):
@@ -518,7 +534,7 @@ def run_gen_model(image_path: str | None = None, out_slug: str = "", rig: bool =
             retopologize(raw_glb, lod_retopo, target_faces=lod_faces, cancel_event=cancel_event)
             lod_textured = tmp / f"lod{i}_textured.glb"
             rebake_texture(raw_glb, lod_retopo, lod_textured, cancel_event=cancel_event)
-            shutil.copy(lod_textured, GENERATED_MODELS_DIR / f"{out_slug}_lod{i}.glb")
+            shutil.copy(lod_textured, models_dir / f"{out_slug}_lod{i}.glb")
 
         return out_path
 
@@ -536,9 +552,10 @@ def run_gen_texture(mesh_path: str, image_path: str, out_slug: str, profile: int
     existing mesh from a reference image, skipping shape generation
     (run_gen_model's "mesh" stage) entirely. Returns the final .glb path
     under generated/models/."""
-    GENERATED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    models_dir = generated_models_dir()
+    models_dir.mkdir(parents=True, exist_ok=True)
     if on_stage:
         on_stage("texture")
-    out_path = GENERATED_MODELS_DIR / f"{out_slug}.glb"
+    out_path = models_dir / f"{out_slug}.glb"
     generate_texture_for_mesh(Path(mesh_path), image_path, out_path, profile=profile, cancel_event=cancel_event)
     return out_path

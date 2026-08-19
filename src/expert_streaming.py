@@ -163,7 +163,10 @@ _LOG_PATH = storage.data_dir() / "expert_streaming_server.log"
 # comment on that) is still correctly recognized as alive by its own pid.
 _STATE_PATH = storage.data_dir() / "expert_streaming_server.json"
 
-FLOWAI_ROOT = Path(__file__).resolve().parent
+# .parent.parent, not .parent — expert_streaming.py lives one level deep
+# under src/ (src/expert_streaming.py), but vendor/ is a real repo-root
+# directory (the llama.cpp fork's build tree) that never moved there.
+FLOWAI_ROOT = Path(__file__).resolve().parent.parent
 VENDOR_DIR = FLOWAI_ROOT / "vendor" / "llama-expert-streaming"
 SERVER_BINARY = VENDOR_DIR / "build" / "bin" / "llama-server"
 

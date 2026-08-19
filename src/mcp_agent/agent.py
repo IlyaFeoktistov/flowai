@@ -52,9 +52,9 @@ Permission-диалог переиспользует САМ tools/confirm.py:ask
 он автоматически покажет настоящий ui/app.py-диалог вместо терминального
 Y/N-фоллбэка — никакого отдельного шага интеграции перед cutover не нужно.
 
-Запуск для сравнения:
+Запуск для сравнения (из корня репозитория):
     source .venv/bin/activate
-    python3 mcp_agent/run_cli.py "проведи аудит незакоммиченных изменений"
+    python3 src/mcp_agent/run_cli.py "проведи аудит незакоммиченных изменений"
 """
 import os
 import time
@@ -63,7 +63,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# One extra dirname — this file lives one level deeper under src/
+# (src/mcp_agent/agent.py) now, but .env is a real repo-root file that
+# never moved there.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage  # noqa: E402

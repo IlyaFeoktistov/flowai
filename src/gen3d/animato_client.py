@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import ollama
 
-from gen3d.pipeline import ANIMATO_DIR, GENERATED_MODELS_DIR, PipelineError, convert, _strip_glb_extras
+from gen3d.pipeline import ANIMATO_DIR, PipelineError, convert, generated_models_dir, _strip_glb_extras
 
 PORT = 8791
 BASE_URL = f"http://127.0.0.1:{PORT}"
@@ -145,7 +145,8 @@ def animate(model_glb: Path, motion: str, chat_model: str, out_slug: str, max_re
         out_glb_raw = tmp / "animated_raw.glb"
         convert(animated_fbx, out_glb_raw)
 
-        GENERATED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-        out_path = GENERATED_MODELS_DIR / f"{out_slug}.glb"
+        models_dir = generated_models_dir()
+        models_dir.mkdir(parents=True, exist_ok=True)
+        out_path = models_dir / f"{out_slug}.glb"
         _strip_glb_extras(out_glb_raw, out_path)
         return out_path

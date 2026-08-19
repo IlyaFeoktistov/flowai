@@ -2,9 +2,9 @@
 Раннер для сравнения нового MCP+LangGraph агента со старым пайплайном —
 аналог scenarios/common.py, но для mcp_agent/agent.py.
 
-Запуск:
+Запуск (из корня репозитория):
     source .venv/bin/activate
-    python3 mcp_agent/run_cli.py "проведи аудит незакоммиченных изменений"
+    python3 src/mcp_agent/run_cli.py "проведи аудит незакоммиченных изменений"
 """
 import asyncio
 import os

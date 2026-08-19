@@ -33,7 +33,15 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 mcp = FastMCP("image_gen")
 
-OUTPUT_DIR = Path(_PROJECT_ROOT) / "generated"
+
+def _output_dir() -> Path:
+    """Path.cwd() — this server is always spawned with cwd=repo_path (see
+    mcp_agent/config.py's build_mcp_connections), the project the user has
+    open right now, not flowAI's own install directory: generated images
+    belong next to the project they were generated for, same convention as
+    every other "generated/" dir in this app (gen3d.pipeline.
+    generated_models_dir(), music_server.py's OUTPUT_DIR)."""
+    return Path.cwd() / "generated"
 
 _pipe = None
 _pipe_key: tuple = (None, None, None, None)
@@ -182,7 +190,8 @@ async def generate_image(prompt: str, negative_prompt: str = "") -> str:
             return f"Error: {err}"
         _pipe_key = key
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    output_dir = _output_dir()
+    output_dir.mkdir(exist_ok=True)
     final_prompt = f"{prompt_prefix}, {prompt}" if prompt_prefix else prompt
     use_negative = negative_prompt and not _is_flux(model)
 
@@ -195,7 +204,7 @@ async def generate_image(prompt: str, negative_prompt: str = "") -> str:
                 kwargs["negative_prompt"] = negative_prompt
             result = _pipe(**kwargs)
         img = result.images[0]
-        out = OUTPUT_DIR / f"{hash(final_prompt) & 0xFFFFFF:06x}.png"
+        out = output_dir / f"{hash(final_prompt) & 0xFFFFFF:06x}.png"
         img.save(out)
         return str(out)
 
@@ -245,7 +254,8 @@ async def edit_image(path: str, prompt: str, negative_prompt: str = "") -> str:
             return f"Error: {err}"
         _pipe_key = key
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    output_dir = _output_dir()
+    output_dir.mkdir(exist_ok=True)
     final_prompt = f"{prompt_prefix}, {prompt}" if prompt_prefix else prompt
     use_negative = negative_prompt and not _is_flux(model)
 
@@ -265,7 +275,7 @@ async def edit_image(path: str, prompt: str, negative_prompt: str = "") -> str:
                 kwargs["negative_prompt"] = negative_prompt
             result = img2img(**kwargs)
         img = result.images[0]
-        out = OUTPUT_DIR / f"{hash(final_prompt + path) & 0xFFFFFF:06x}.png"
+        out = output_dir / f"{hash(final_prompt + path) & 0xFFFFFF:06x}.png"
         img.save(out)
         return str(out)
 
