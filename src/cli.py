@@ -1378,7 +1378,7 @@ def run() -> None:
     [project.scripts]) — setuptools' generated launcher calls a plain
     callable with no args, it doesn't know to asyncio.run() a coroutine
     itself. Same body as the __main__ block below, which stays so
-    `python3 cli.py` keeps working unchanged."""
+    `python3 src/cli.py` keeps working unchanged."""
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -1392,7 +1392,7 @@ def run() -> None:
         # that scrolls off and is gone once the terminal is closed.
         detail = traceback.format_exc()
         log_event("fatal_exception", detail=detail)
-        sys.stdout.write(f"\n{detail}\n[flowai] Приложение упало — подробности выше и в логе сессии (/tmp/flowai-run-logs/).\n")
+        sys.stdout.write(f"\n{detail}\n[flowai] Приложение упало — подробности выше и в логе сессии (~/.local/share/flowai/run-logs/).\n")
 
 
 if __name__ == "__main__":
