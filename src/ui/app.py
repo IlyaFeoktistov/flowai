@@ -414,7 +414,7 @@ class _OutputControl(UIControl):
             elif hover_fold is not None:
                 logical_idx = wrapped_to_logical[abs_i] if abs_i < len(wrapped_to_logical) else None
                 if logical_idx is not None and hover_fold.start <= logical_idx < hover_fold.end:
-                    fragments = _apply_selection(fragments, 0, None)
+                    fragments = _apply_hover_highlight(fragments)
             return fragments
 
         return UIContent(
@@ -546,6 +546,18 @@ def _apply_selection(fragments, col_lo: int, col_hi: int | None):
             out.append((f"{style} reverse" if in_sel else style, ch))
             pos += 1
     return out
+
+
+def _apply_hover_highlight(fragments):
+    """Lightens fragment TEXT color for hover (collapsible tool-output
+    blocks, see _fold_at_logical) — NOT reverse-video like _apply_selection:
+    swapping fg/bg read as a confusing background box/outline rather than
+    "this text is clickable", per direct user feedback. Appending a `fg:`
+    override wins over whatever color the original ANSI carried
+    (bright_black, diff green/red/cyan, ...) because prompt_toolkit resolves
+    same-attribute style tokens left-to-right, later wins — verified via
+    Style.get_attrs_for_style_str."""
+    return [(f"{style} bold fg:ansiwhite", text) for style, text in fragments]
 
 
 # ── Command completer ───────────────────────────────────────────────────────
