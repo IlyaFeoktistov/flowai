@@ -34,9 +34,9 @@
                 vendor/animato) — их несовместимые torch/CUDA-сборки не
                 дают поставить это всё в один venv, см. setup.py)
 
-Никакого отдельного git-сервера (mcp-server-git/git_extra_server.py —
-УБРАНЫ, 2026-08-14, прямое решение пользователя: "зачем git-тулы, есть же
-bash") — git-операции (status/diff/log/show/commit/checkout/restore/...)
+Никакого отдельного git-сервера (mcp-server-git/git_extra_server.py убран
+— git-тулы избыточны, раз есть bash) — git-операции
+(status/diff/log/show/commit/checkout/restore/...)
 идут через bash("git ..."). Analyzer/Planner's bash — read-only allowlist (см.
 agent_builder.py:_is_read_only_bash_command) уже пускает git status/log/
 diff/show/branch/... и блокирует мутирующие подкоманды; Verifier's bash —
@@ -60,6 +60,7 @@ import sys
 import tempfile
 
 import settings
+from mcp_agent import plugins
 
 # ВАЖНО: это каталог УСТАНОВКИ flowAI (где лежит сам config.py), а не место,
 # откуда пользователь запустил `flowai`. Раньше repo_path по умолчанию
@@ -142,16 +143,16 @@ def build_mcp_connections(repo_path: str | None = None) -> dict:
         return os.path.join(servers_dir, f"{name}_server.py")
 
     raw_servers = {
-        # Живой инцидент (изначально про внешний filesystem-сервер, теперь
-        # применимо к file_ops_server.py's read_file): пользователь попросил
-        # модель выйти за пределы repo_path в соседний проект и получил
-        # жёсткий отказ ни с единым шансом спросить разрешения — модель
-        # вместо честного "не могу выйти за пределы проекта" 30 минут
-        # бесцельно копалась в НЕПРАВИЛЬНОМ (текущем) репозитории. Прямое
-        # решение пользователя: ЧТЕНИЕ разрешено везде без единого
-        # approval-вопроса (риск читать — намного ниже риска писать) —
-        # read_file/grep_search/glob_search не проверяют путь против
-        # repo_path вообще; ЗАПИСЬ вне repo_path остаётся под approval — см.
+        # ЧТЕНИЕ разрешено везде без единого approval-вопроса (риск читать —
+        # намного ниже риска писать; изначально касалось внешнего
+        # filesystem-сервера, теперь применимо к file_ops_server.py's
+        # read_file): жёсткая блокировка чтения за пределами repo_path без
+        # единого шанса спросить разрешение оставляла бы модель без честного
+        # выхода — вместо явного "не могу выйти за пределы проекта" она
+        # осталась бы бесцельно копаться в НЕПРАВИЛЬНОМ (текущем)
+        # репозитории. Поэтому read_file/grep_search/glob_search не
+        # проверяют путь против repo_path вообще; ЗАПИСЬ вне repo_path
+        # остаётся под approval — см.
         # mcp_agent/ask_user_tool.py:_OutOfProjectWriteApprovalMiddleware,
         # перехватывает write_file/edit_file/delete_path/restore_deleted_path
         # ДО того, как они дойдут до file_ops_server.py, и спрашивает через
@@ -191,6 +192,14 @@ def build_mcp_connections(repo_path: str | None = None) -> dict:
     if not settings.get("gen_agent_tools"):
         for name in ("image_gen", "music", "gen_model"):
             raw_servers.pop(name, None)
+
+    # Plugin-declared MCP servers (mcp_agent/plugins.py) — a name collision
+    # with one of flowai's own servers above is a plugin author's mistake,
+    # not something to silently let overwrite a built-in, so the built-ins
+    # go into raw_servers FIRST and setdefault only fills in names not
+    # already taken.
+    for name, (command, args) in plugins.load_mcp_servers().items():
+        raw_servers.setdefault(name, (command, args))
 
     connections = {}
     for name, (command, args) in raw_servers.items():

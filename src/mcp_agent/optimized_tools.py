@@ -61,11 +61,15 @@ OPTIMIZED_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
-def build_optimized_tools(tools: list) -> tuple[list, dict]:
+def build_optimized_tools(tools: list, extra_names: frozenset[str] = frozenset()) -> tuple[list, dict]:
     """Фильтрует уже загруженный и обёрнутый список тулов (agent_builder.py:
     _get_tools — dedupe/verify-reminder/snapshot-обёртки уже применены к
     ЭТИМ же объектам по их родным именам, так что достаточно просто выбрать
     подмножество, ничего пересобирать не нужно) под OPTIMIZED_TOOL_NAMES.
+    extra_names — имена тулов плагинов (mcp_agent/plugins.py), неизвестные
+    заранее и потому не входящие в статичный OPTIMIZED_TOOL_NAMES; без
+    этого тумблер optimized_tools молча вырезал бы любой плагинский тул.
     Возвращает (tools, tools_by_name) — та же форма, что _get_tools()."""
-    filtered = [t for t in tools if t.name in OPTIMIZED_TOOL_NAMES]
+    names = OPTIMIZED_TOOL_NAMES | extra_names
+    filtered = [t for t in tools if t.name in names]
     return filtered, {t.name: t for t in filtered}

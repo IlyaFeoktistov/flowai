@@ -16,11 +16,17 @@ Python CLI AI chat application powered by Ollama.
 
 ## Stack
 
-- `agent.py` — main agentic loop, Ollama streaming, tool orchestration
+All source lives under `src/` (flat layout physically under `src/`, not
+`src/flowai/` — `pyproject.toml`'s `sources = ["src"]` strips the prefix at
+install time, so imports everywhere else still read as top-level `import
+cli`/`import mcp_agent`/...).
+
+- `mcp_agent/agent.py` — legacy agentic loop (voice_mode/`pipeline_mode=off`); `mcp_agent/pipeline.py` — the default Analyzer→Planner→Coder→Verifier pipeline
+- `mcp_agent/plugins.py` — plugin loader (slash commands, MCP servers, hooks) for user-installed plugins under `~/.local/share/flowai/plugins/`; `mcp_agent/plugin_hooks.py` — the post_file_edit/pre_commit hook middleware; `examples/plugins/hello-world/` — reference plugin
 - `tools/` — tool handlers: bash_exec, file_ops, web_search, read_page, image_gen, memory
 - `ui/` — terminal UI: stream display, prompt_toolkit input, Rich console
 - `settings.py` — model selection, GPU routing (persisted in SQLite, `~/.local/share/flowai/`)
-- `memory.py` — persistent user memory (SQLite, `~/.local/share/flowai/`)
+- `memory/` — persistent user memory (SQLite, `~/.local/share/flowai/`)
 - `FLOWAI.md` (optional, in the target working directory) — project-specific instructions the agent reads and follows, appended to the system prompt if present
 
 ## Models
@@ -59,7 +65,7 @@ from weight size alone.
 Qwen3 models think by default — on this machine that turned a single short
 reply into 1722 tokens / 368s of generation instead of 21 tokens / 2.6s (66x
 slower), with zero benefit since nothing consumes that reasoning during a
-manual test run. When running live tests (`mcp_agent/run_cli.py` or similar
-one-off invocations), always disable thinking — `ChatOllama(..., reasoning=False)`
+manual test run. When running live tests (`src/mcp_agent/run_cli.py` or
+similar one-off invocations), always disable thinking — `ChatOllama(..., reasoning=False)`
 or `"think": false` in raw Ollama API calls — otherwise every iteration pays
 for a huge, invisible reasoning trace.

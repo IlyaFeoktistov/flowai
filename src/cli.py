@@ -16,24 +16,22 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
-# Живой инцидент: где-то посреди хода на экране мелькала и тут же
-# пропадала (следующая же перерисовка TUI её стирала) панель с трейсбеком
-# из mcp/client/stdio/__init__.py:stdout_reader — pydantic не смог
-# разобрать одну строку с сырого stdout уже открытого MCP-сервера как
-# JSONRPCMessage (какой-то сторонний процесс написал туда простой текст).
-# Сам stdout_reader это переживает штатно (ловит исключение, шлёт его
-# дальше по read_stream, не роняя цикл) — но делает это через
-# logger.exception(...), а корневой logging этого процесса оказывается
-# сконфигурирован НЕ нами: mcp_agent.servers.music_server (импортируется
-# напрямую сюда для /music, /music_gen — см. его докстринг) на своём
-# ЖЕ импорте создаёт `FastMCP("music")`, чей __init__ безусловно зовёт
-# configure_logging() -> logging.basicConfig(handlers=[RichHandler(
-# console=Console(stderr=True), ...)]) — собственный Rich Console
-# FastMCP, пишущий прямо в СЫРОЙ stderr, в обход ui/console.py's
-# _AppProxy (которая рендерит в панель FlowAIApp, а не в терминал
-# напрямую) — отсюда и "мелькнуло и пропало": prompt_toolkit просто
-# перерисовал поверх настоящего терминального вывода на следующем кадре.
-# logging.basicConfig() — no-op, если у root logger уже ЕСТЬ хендлер (нет
+# pydantic can fail to parse a line from an already-open MCP server's raw
+# stdout as a JSONRPCMessage (some unrelated process wrote plain text to
+# it) inside mcp/client/stdio/__init__.py:stdout_reader. stdout_reader
+# survives that fine on its own (catches the exception, forwards it down
+# read_stream, doesn't kill the loop) — but does it via
+# logger.exception(...), and this process' root logging isn't configured
+# by us alone: mcp_agent.servers.music_server (imported directly here for
+# /music, /music_gen — see its docstring) creates `FastMCP("music")` on
+# import, whose __init__ unconditionally calls configure_logging() ->
+# logging.basicConfig(handlers=[RichHandler(console=Console(stderr=True),
+# ...)]) — FastMCP's own Rich Console, writing straight to RAW stderr,
+# bypassing ui/console.py's _AppProxy (which renders into FlowAIApp's
+# panel, not straight to the terminal). Left unhandled, that traceback
+# panel flashes on screen and vanishes on the very next TUI redraw:
+# prompt_toolkit just repaints over the real terminal output on the next
+# frame. logging.basicConfig() — no-op, если у root logger уже ЕСТЬ хендлер (нет
 # force=True ни у нас, ни у FastMCP) — регистрируем СВОЙ первым, ещё до
 # music_server.py и любого другого места, которое могло бы создать
 # FastMCP(...) в этом же процессе, так что музыкин configure_logging()
@@ -68,10 +66,9 @@ for _noisy_logger in ("httpx", "urllib3"):
 # в ast.literal_eval как фолбэк (chat_models.py:_parse_json_string) — эта
 # функция парсит строку через compile(text, "<unknown>", "eval", ...), и
 # Python сам печатает "SyntaxWarning: invalid escape sequence '\|'" ПРЯМО В
-# stderr, минуя curses. Живой прогон: именно так и произошло (лог
-# episodic_messages подтверждает search_code с "\|" в запросе в этот момент)
-# — предупреждение вклинилось в отрисовку и оставило на экране дублированный
-# футер/обрывок строки. literal_eval при этом успешно парсит строку (просто
+# stderr, минуя curses — предупреждение вклинивается в отрисовку и
+# оставляет на экране дублированный футер/обрывок строки. literal_eval при
+# этом успешно парсит строку (просто
 # предупреждает про неоднозначный escape) — подавляем именно этот класс
 # предупреждения, не трогая настоящие SyntaxError/ValueError, которые
 # по-прежнему поднимаются и обрабатываются вызывающим кодом.
@@ -85,6 +82,7 @@ from rich.panel import Panel
 
 from mcp_agent.agent import stream_chat as _legacy_stream_chat
 from mcp_agent import dnd_store
+from mcp_agent import plugins
 from mcp_agent.dnd_agent import dnd_stream_chat, reconcile_before_exit
 from mcp_agent.debug_log import log_event
 from mcp_agent.model_config import DEBUG
@@ -156,38 +154,33 @@ async def _run_shell_command(command: str) -> tuple[str, str, int | None]:
     with nothing on screen to explain why, even before the timeout below
     has any chance to fire.
 
-    Live bug (20260812): a compiled Go binary that reads stdin
-    (bufio.NewReader(os.Stdin)) was run this way, got no input (nothing
-    typed reaches it — same terminal is also owned by prompt_toolkit's own
-    input loop), and the OLD implementation here — asyncio.wait_for(proc.
-    communicate(), timeout=...) — never actually fired its timeout: the
-    process was still alive, unkilled, 269s after the coded 60s cap (ps
-    evidence: both the /bin/sh -c wrapper AND the binary itself still
-    running — proc.kill() sends SIGKILL, which cannot be caught/ignored, so
-    if it had actually run, the wrapper would be dead). Root cause not
-    fully pinned down (no live Python debugger available in this
-    environment to inspect exactly where wait_for's cancellation got lost
-    inside the full app — an isolated repro of just this pattern DID fire
-    correctly), but wrapping a subprocess's own communicate() in wait_for
-    and trusting its cancellation to reliably reach a blocked pipe read is
-    exactly the kind of thing that's fragile to depend on. Replaced with a
-    plain, independent watchdog task (asyncio.sleep + kill, no cancellation
-    involved at all).
+    A program that reads stdin (e.g. a compiled Go binary using
+    bufio.NewReader(os.Stdin)) gets no input here — nothing typed reaches it,
+    since the same terminal is also owned by prompt_toolkit's own input
+    loop — and can hang past the timeout undetected if the timeout logic
+    is wired through the subprocess call's own cancellation: wrapping
+    proc.communicate() in asyncio.wait_for(..., timeout=...) and trusting
+    that its cancellation reliably reaches a blocked pipe read is fragile
+    to depend on — a cancelled wait_for does not guarantee the underlying
+    read actually unblocks, so the process can stay alive well past the
+    coded cap with nothing having fired to kill it. A plain, independent
+    watchdog task (asyncio.sleep + kill, no cancellation involved at all)
+    avoids that dependency entirely.
 
-    Separately (found while testing the fix above): asyncio.subprocess.
-    Process.kill() only signals the immediate `sh -c` wrapper — confirmed
-    live that `/bin/sh -c` FORKS a real child for basically any external
-    command (not just multi-command scripts; even a single bare command
-    like "sleep 5" gets its own child PID here, not an exec() replacement).
-    The child inherits the wrapper's own stdout/stderr pipe file
-    descriptors, so if we kill only the wrapper, that orphaned child keeps
-    holding the pipe's write end open — and proc.communicate() (what
-    reads that pipe) does not see EOF until EVERY holder of the write end
-    is gone. For a command being killed specifically because it never
-    exits on its own, this means communicate() right after kill() can
-    still hang forever even though the kill "succeeded". kill_process_tree
-    (utils/proc.py) kills the whole spawned tree, not just the wrapper —
-    verified live that communicate() then returns within the same tick."""
+    Separately: asyncio.subprocess.Process.kill() only signals the
+    immediate `sh -c` wrapper. `/bin/sh -c` FORKS a real child for
+    basically any external command (not just multi-command scripts — even
+    a single bare command like "sleep 5" gets its own child PID here, not
+    an exec() replacement). The child inherits the wrapper's own
+    stdout/stderr pipe file descriptors, so killing only the wrapper
+    leaves that orphaned child holding the pipe's write end open — and
+    proc.communicate() (what reads that pipe) does not see EOF until EVERY
+    holder of the write end is gone. For a command being killed
+    specifically because it never exits on its own, this means
+    communicate() right after kill() can still hang forever even though
+    the kill "succeeded". kill_process_tree (utils/proc.py) kills the
+    whole spawned tree, not just the wrapper, so communicate() returns
+    right away once it's called."""
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -269,6 +262,7 @@ def _show_help() -> None:
         "[bold cyan]/settings[/]                — настройки моделей и GPU\n"
         "[bold cyan]/memory[/]                  — что помнит нейронка, точечное/полное удаление\n"
         "[bold cyan]/dnd[/]                     — D&D-режим: список сохранений / новая игра\n"
+        "[bold cyan]/plugin[/]                  — список установленных плагинов и что каждый даёт\n"
         "[bold cyan]/clear[/]                   — очистить историю\n"
         "[bold cyan]/help[/]                    — эта справка\n"
         "[bold cyan]![/] [dim]команда[/]                  — выполнить shell-команду, вывод сразу уйдёт нейронке\n"
@@ -379,11 +373,12 @@ async def main() -> None:
             pass  # эмбеддинг — best-effort обогащение, не источник истины
     display = StreamDisplay(_STATS, app=app)
 
-    # Живой инцидент: агент запорол правку файла в другом проекте (write_file
-    # переписал его почти пустым при попытке "откатить" себя), а разобраться
-    # постфактум было нечем — episodic хранит только финальный текст хода,
-    # ни один tool_call/tool_result нигде не сохраняется, только печатается в
-    # консоль под DEBUG=1 и теряется вместе со скроллбеком терминала. При
+    # episodic хранит только финальный текст хода — ни один
+    # tool_call/tool_result нигде не сохраняется, только печатается в
+    # консоль под DEBUG=1 и теряется вместе со скроллбеком терминала, так
+    # что разобраться постфактум с испорченной агентом правкой (например,
+    # write_file переписал файл почти пустым при попытке "откатить" себя)
+    # нечем. При
     # DEBUG=1 пишем эти события в ту же episodic_messages-таблицу — кроме
     # answer_chunk/thinking_chunk (потоковые дельты; их полное содержимое и
     # так попадает в уже сохраняемый финальный текст хода, писать их
@@ -393,18 +388,19 @@ async def main() -> None:
     async def _on_event(event: dict) -> None:
         nonlocal _waiting_for_model
         if event.get("type") in ("tool_start", "answer_chunk"):
-            # Живой баг: _waiting_for_model раньше сбрасывался только на
-            # ПЕРВЫЙ yield stream_chat() — а stream_chat это async-генератор,
+            # Сбрасывать _waiting_for_model только на ПЕРВЫЙ yield
+            # stream_chat() недостаточно — stream_chat это async-генератор,
             # который на обычном ходу отдаёт ровно ОДИН yield с уже ГОТОВЫМ
             # финальным текстом (см. agent.py — реальные tool_start/answer_
             # chunk идут только через on_event, не через yield). Значит
-            # _waiting_for_model оставался True на ВСЁ время, что модель
-            # реально искала файлы/звала тулы — а не только "пока первый
-            # токен ещё не пришёл", как задумано комментарием ниже. Любое
-            # доп. сообщение, отправленное в это время, ошибочно считалось
-            # "модель ещё не начала" и уходило в ветку cancel-and-combine
-            # (см. _enqueue) — отменяя весь уже проделанный раунд тулов
-            # вместо того, чтобы встать в очередь и продолжить ПОСЛЕ него.
+            # так _waiting_for_model оставался бы True на ВСЁ время, что
+            # модель реально ищет файлы/зовёт тулы — а не только "пока
+            # первый токен ещё не пришёл", как задумано комментарием ниже.
+            # Любое доп. сообщение, отправленное в это время, ошибочно
+            # считалось бы "модель ещё не начала" и уходило бы в ветку
+            # cancel-and-combine (см. _enqueue) — отменяя весь уже
+            # проделанный раунд тулов вместо того, чтобы встать в очередь и
+            # продолжить ПОСЛЕ него.
             _waiting_for_model = False
         t = event.get("type", "event")
         if t not in _DEBUG_SKIP_EVENTS:
@@ -474,9 +470,9 @@ async def main() -> None:
         _dnd_game_id — factored out of _handle_input's normal per-message
         flow so /dnd new and /dnd <id> can trigger it directly with a
         synthetic seed_text right after entering the mode, instead of
-        leaving the DM silent until the player types something first (live
-        request: starting/resuming a game with no greeting/recap read as
-        the mode not actually having started). Never echoes seed_text as a
+        leaving the DM silent until the player types something first —
+        starting/resuming a game with no greeting/recap reads as the mode
+        not actually having started. Never echoes seed_text as a
         "You ›" line — _handle_input's own flow already echoes a REAL
         player message before calling this; a synthetic kickoff shouldn't
         be echoed as if the player typed it."""
@@ -940,10 +936,10 @@ async def main() -> None:
                     "     мастер сейчас пишет первый ответ — это может занять от секунд до нескольких минут, "
                     "в зависимости от модели и мощности компьютера[/]\n"
                 )
-                # Мастер сам начинает — живой запрос пользователя: раньше
-                # после /dnd new он молчал, пока игрок не напишет первым,
-                # что читалось как "режим не запустился". Синтетическая
-                # затравка НЕ эхается как "You ›" — см. _run_dnd_turn.
+                # Мастер сам начинает — без этого после /dnd new он молчал
+                # бы, пока игрок не напишет первым, что читается как "режим
+                # не запустился". Синтетическая затравка НЕ эхается как
+                # "You ›" — см. _run_dnd_turn.
                 await _run_dnd_turn(
                     "(OUT-OF-CHARACTER: the player just started a brand "
                     "new game. Greet them briefly and begin character "
@@ -969,9 +965,9 @@ async def main() -> None:
                     "     мастер сейчас пишет рекап — это может занять от секунд до нескольких минут, "
                     "в зависимости от модели и мощности компьютера[/]\n"
                 )
-                # Живой запрос пользователя: при загрузке сохранения мастер
-                # должен сам напомнить, кто ты/где ты/что происходит, а не
-                # молчать, пока игрок не спросит. Контекст (раса/класс/
+                # При загрузке сохранения мастер должен сам напомнить, кто
+                # ты/где ты/что происходит, а не молчать, пока игрок не
+                # спросит. Контекст (раса/класс/
                 # локация/инвентарь/факты) мастер УЖЕ видит через context
                 # note (dnd_agent.py:_inject_context) — тут только просим
                 # его пересказать это игроку, а не создавать заново.
@@ -1084,6 +1080,22 @@ async def main() -> None:
             lines = [f"{i + 1}. {f}" for i, f in enumerate(facts)]
             console.print(Panel(
                 "\n".join(lines), title="[bright_black]факты (старые сверху)[/]",
+                border_style="bright_black", padding=(0, 2),
+            ))
+            console.print()
+            return
+
+        if cmd and cmd != "/plugin":
+            plugin_command = plugins.load_commands().get(cmd.lstrip("/"))
+            if plugin_command is not None:
+                outcome = plugin_command["func"](cmd_args, console)
+                if hasattr(outcome, "__await__"):
+                    await outcome
+                return
+
+        if cmd == "/plugin":
+            console.print(Panel(
+                plugins.describe_installed(), title="[bright_black]plugin[/]",
                 border_style="bright_black", padding=(0, 2),
             ))
             console.print()
@@ -1240,33 +1252,31 @@ async def main() -> None:
             # (unlike the amend-combine case below) and without waiting behind
             # it in _pending (unlike the plain-queue case below).
             #
-            # Still registered via set_active_task -- confirmed live (real
-            # pty-driven Ctrl+C test) that NOT doing this was the actual
-            # reason Ctrl+C could never stop /gen_model: this branch used to
-            # fire-and-forget the task with no tracking at all, so
-            # ui/app.py's _interrupt always saw self._active_task as None
-            # and fell through to the no-op buffer-reset branch, regardless
-            # of how correct gen3d/pipeline.py's own cancel_event/subprocess-
-            # kill plumbing was -- that code was simply never being reached.
+            # Must be registered via set_active_task without this, Ctrl+C can
+            # never stop a command like /gen_model: fire-and-forget with no
+            # tracking at all leaves ui/app.py's _interrupt always seeing
+            # self._active_task as None and falling through to the no-op
+            # buffer-reset branch, regardless of how correct gen3d/
+            # pipeline.py's own cancel_event/subprocess-kill plumbing is --
+            # that code is simply never reached without a registered task.
             # clear_active_task (not set_active_task(None)) on completion --
-            # live bug (user report): /settings blocks in its own curses
-            # screen (run_in_terminal) for as long as it's open, which is
-            # routinely LONGER than "near-instant" if opened while a chat
-            # turn is still streaming. Closing it fires this task's
-            # done-callback while the chat task is still running --
-            # set_active_task(None) used to clobber that chat task's own
-            # registration unconditionally, leaving Ctrl+C with nothing to
-            # cancel for the rest of that turn. clear_active_task guards on
-            # task identity so only the task that's actually still current
-            # gets cleared.
+            # /settings blocks in its own curses screen (run_in_terminal)
+            # for as long as it's open, which is routinely LONGER than
+            # "near-instant" if opened while a chat turn is still
+            # streaming. Closing it fires this task's done-callback while
+            # the chat task is still running -- set_active_task(None) would
+            # clobber that chat task's own registration unconditionally,
+            # leaving Ctrl+C with nothing to cancel for the rest of that
+            # turn. clear_active_task guards on task identity so only the
+            # task that's actually still current gets cleared.
             #
-            # Live bug (user report, /usage — same root cause applies to any
-            # command that blocks in its own screen: /settings, /memory):
-            # clear_active_task above only stops this command's OWN
-            # registration from wrongly nulling out a chat task that took
-            # over in the meantime — it does NOT restore _active_task back
-            # to the chat task that was already running BEFORE this command
-            # started and is STILL running after it closes. set_active_task
+            # The same root cause applies to any command that blocks in its
+            # own screen (/settings, /memory, /usage): clear_active_task
+            # above only stops this command's OWN registration from
+            # wrongly nulling out a chat task that took over in the
+            # meantime — it does NOT restore _active_task back to the chat
+            # task that was already running BEFORE this command started and
+            # is STILL running after it closes. set_active_task
             # above overwrote _active_task to point at THIS command's task
             # the whole time its screen was open; once that task finishes,
             # _active_task genuinely becomes unset for the rest of the
@@ -1295,11 +1305,11 @@ async def main() -> None:
             await _pending.put(combined)
             console.print(f"[dim]  +++ You › {escape(text)}[/]")
         elif _active_handle_task is not None and _mid_turn_queue is not None:
-            # Живой фиче-запрос ("подправить ход на лету"): ход уже
-            # прошёл фазу "жду первый токен" (амменд выше не подошёл бы) —
-            # текущий тул/генерация НЕ прерывается, сообщение подхватится
-            # между шагами графа (mcp_agent/agent.py:_stream_round), а не
-            # ждёт конца всего хода в _pending, как раньше.
+            # "Подправить ход на лету": ход уже прошёл фазу "жду первый
+            # токен" (амменд выше не подошёл бы) — текущий тул/генерация НЕ
+            # прерывается, сообщение подхватится между шагами графа
+            # (mcp_agent/agent.py:_stream_round), а не ждёт конца всего
+            # хода в _pending.
             await _mid_turn_queue.put(text)
             console.print(f"[dim]  📤 передам по ходу: {escape(text)}[/]")
         else:
@@ -1352,12 +1362,11 @@ async def main() -> None:
         clear_session_file_snapshots()
         # expert-streaming (порт 8090) — не системный демон вроде Ollama,
         # это ПОДПРОЦЕСС этого самого flowai (см. expert_streaming.py) —
-        # умирать вместе с ним, а не переживать выход. Живой баг (отчёт
-        # пользователя): без этого он оставался висеть после Ctrl+D/выхода,
-        # и следующий запуск flowai видел порт занятым "каким-то другим
-        # процессом" (ensure_running's health-check guard, см. там же) —
-        # ложный "не запустился", хотя это был осиротевший процесс от
-        # предыдущего же запуска. No-op, если expert-streaming не включён/
+        # должен умирать вместе с ним, а не переживать выход. Без этого он
+        # остаётся висеть после Ctrl+D/выхода, и следующий запуск flowai
+        # видит порт занятым "каким-то другим процессом" (ensure_running's
+        # health-check guard, см. там же) — ложный "не запустился", хотя
+        # это осиротевший процесс от предыдущего же запуска. No-op, если expert-streaming не включён/
         # не запускался в этой сессии (stop_server сам проверяет _proc).
         expert_streaming.stop_server()
 

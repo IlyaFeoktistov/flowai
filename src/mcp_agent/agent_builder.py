@@ -43,6 +43,8 @@ from mcp_agent.debug_log import log_event
 from mcp_agent.delegate_tool import _DelegateNudgeMiddleware, build_delegate_tool
 from mcp_agent.message_utils import _DedupeToolResultsMiddleware
 from mcp_agent.optimized_tools import build_optimized_tools
+from mcp_agent import plugins
+from mcp_agent.plugin_hooks import PluginHookMiddleware
 from mcp_agent.roles import approval_tools, filter_tools
 from mcp_agent.model_config import (
     DEBUG,
@@ -60,15 +62,15 @@ from mcp_agent import prompts
 from mcp_agent.prompts import _build_optimized_system_prompt, _build_system_prompt, _build_voice_system_prompt
 
 
-# Живой прогон (сессия 20260707-135011-31723e6e, journalctl -u ollama):
-# длинный ход (ask_user + два раунда правок + верификация) забил весь
-# num_ctx=32768, и llama.cpp сделал "context shift" — ДВАЖДЫ в этом же ходе
-# ("slot context shift, n_keep=4, n_discard=16381" в логе Ollama), выбросив
-# ВСЁ, кроме первых 4 токенов промпта (системный промпт + исходная задача
-# улетают целиком) и последней половины истории. Второй раз это случилось
-# прямо ПОСЕРЕДИНЕ генерации финального ответа — отсюда обрыв на полуслове
-# ("Таким образом, "), и, вероятно, тем же объясняется бессмысленная вторая
-# правка чуть раньше в том же ходе (тоже сразу после context shift).
+# Длинный ход (например ask_user + несколько раундов правок + верификация)
+# может забить весь num_ctx, и тогда llama.cpp делает "context shift" (в
+# логе Ollama это видно как "slot context shift, n_keep=..., n_discard=..."),
+# выбрасывая всё, кроме первых n_keep токенов промпта и последней части
+# истории — если системный промпт и исходная задача не уместились в n_keep,
+# они улетают целиком. Если context shift происходит ПОСЕРЕДИНЕ генерации
+# финального ответа, ответ обрывается на полуслове; более ранняя правка в
+# том же ходе может тоже оказаться бессмысленной, если она была сделана
+# сразу после предыдущего context shift, уже на урезанном контексте.
 #
 # ChatOllama (langchain_ollama) не имеет поля num_keep вообще — оно не входит
 # ни в список полей модели, ни в дефолтный options_dict, который _chat_params
@@ -77,7 +79,7 @@ from mcp_agent.prompts import _build_optimized_system_prompt, _build_system_prom
 # просто нужно докинуть в params["options"] на уровне API-вызова. Подкласс
 # вместо monkey-patch/.bind(options=...): .bind() кладёт лишний kwarg на
 # верхний уровень запроса (см. комментарий у _extract_ask_user_shape в
-# self_heal.py, там же живой баг с ЭТИМ способом), а не в options{}, и, что
+# self_heal.py — тот же способ подводит и там), а не в options{}, и, что
 # важнее, create_agent() ниже сам вызывает model.bind_tools(...) — обычный
 # Runnable, возвращённый .bind(), этот метод не реализует. Подкласс остаётся
 # настоящим ChatOllama (bind_tools у него есть), только один хук (_chat_params)
@@ -95,11 +97,10 @@ class _ChatOllamaWithNumKeep(ChatOllama):
 # gpt-oss:20b раньше требовал expert_streaming_enabled как единственный
 # способ обойти GGML_ASSERT(tensor->nb[0] == ggml_element_size(tensor)) на
 # обычном Ollama-пути (известный баг Ollama,
-# github.com/ollama/ollama/issues/16946) — живой journalctl-трейс
-# (2026-08-11) показал, что этот краш триггерится НЕ самим gpt-oss, а
-# OLLAMA_KV_CACHE_TYPE=q8_0 конкретно: тот же gpt-oss:20b на том же
-# железе успешно отработал несколько ходов подряд под f16, и упал на
-# первой же загрузке сразу после смены на q8_0. ollama_kv_cache.py
+# github.com/ollama/ollama/issues/16946) — на самом деле краш триггерит не
+# сам gpt-oss, а OLLAMA_KV_CACHE_TYPE=q8_0 конкретно: тот же gpt-oss:20b на
+# том же железе успешно отрабатывает несколько ходов подряд под f16, и
+# падает на первой же загрузке сразу после смены на q8_0. ollama_kv_cache.py
 # переключает это автоматически перед каждой сборкой модели — больше не
 # нужно принудительно гнать gpt-oss через экспериментальный
 # expert-streaming только чтобы обойти эту переменную окружения.
@@ -111,18 +112,18 @@ class _ChatOllamaWithNumKeep(ChatOllama):
 # on top of those defaults in _build_chat_model, never touching them for any
 # other model.
 #
-# glm-4.7-flash: live test (2026-08-14, expert-streaming backend) reproduced
-# this app's default REPEAT_PENALTY=1.2/REPEAT_LAST_N=512 causing the
-# model's tool-call arguments to degenerate into incoherent word-soup on any
-# non-trivial prompt (a long real system prompt + several tools was enough --
-# a trivial one-line prompt didn't trigger it). Root cause: GLM's own
-# tool-call syntax (<tool_call>name<arg_key>...<arg_value>...</tool_call>)
-# repeats the same structural tokens on every argument, and a repeat
-# penalty this strong fights that, pushing the model into increasingly
-# desperate synonym-hunting instead of clean structural output. These are
-# the community-recommended values instead (HF discussion
-# unsloth/GLM-4.7-Flash-GGUF#23) -- confirmed clean on the same reproduction
-# (same prompt/tools, only sampling changed).
+# glm-4.7-flash: this app's default REPEAT_PENALTY=1.2/REPEAT_LAST_N=512
+# causes the model's tool-call arguments to degenerate into incoherent
+# word-soup on any non-trivial prompt (a long real system prompt + several
+# tools is enough -- a trivial one-line prompt doesn't trigger it). Root
+# cause: GLM's own tool-call syntax
+# (<tool_call>name<arg_key>...<arg_value>...</tool_call>) repeats the same
+# structural tokens on every argument, and a repeat penalty this strong
+# fights that, pushing the model into increasingly desperate
+# synonym-hunting instead of clean structural output. These are the
+# community-recommended values instead (HF discussion
+# unsloth/GLM-4.7-Flash-GGUF#23), which stay clean on the same prompt/tools
+# with only sampling changed.
 _MODEL_SAMPLING_OVERRIDES: dict[str, dict] = {
     "glm-4.7-flash": {"temperature": 0.7, "top_p": 0.95, "min_p": 0.01, "repeat_penalty": 1.0},
 }
@@ -142,7 +143,7 @@ def _build_chat_model(
     вместо развилки в каждом из 4 мест конструктора. См.
     expert_streaming.py's docstring за полным разбором: что за форк, откуда,
     почему НЕ смёржен в апстрим, и какой trade-off (PP заметно медленнее, TG
-    в среднем на треть быстрее по живому отзыву автора PR) он приносит.
+    в среднем на треть быстрее по данным автора PR) он приносит.
 
     ensure_running возвращает (False, reason) вместо исключения на любой
     сбой (бинарник не собран, блоб не нашёлся, сервер не поднялся за
@@ -161,29 +162,25 @@ def _build_chat_model(
     has_tools — one of the two signals (with `format`) deciding whether
     _MODEL_SAMPLING_OVERRIDES applies at all for this call — see
     apply_repeat_override's own comment below for the mechanism and the
-    two live bugs that shaped it (naming kept as "has_tools" even though
+    two bugs that shaped it (naming kept as "has_tools" even though
     the gate is really has_tools OR format=="json", to avoid renaming
     every call site's kwarg over what's just an internal detail)."""
     # apply_repeat_override gates the WHOLE _MODEL_SAMPLING_OVERRIDES bundle
     # (temperature/top_p/min_p/repeat_penalty together), not just
-    # repeat_penalty alone — live bug (2026-08-14, same incident as
-    # apply_repeat_override's own introduction above): a first version of
-    # this fix kept temperature/top_p/min_p unconditional and only gated
-    # repeat_penalty, on the assumption they're independent knobs. They
-    # aren't, for this override: the community-recommended values
-    # (_MODEL_SAMPLING_OVERRIDES's comment) were tested and "confirmed
-    # clean" as ONE bundle together with repeat_penalty=1.0 — restoring
-    # plain REPEAT_PENALTY=1.2 while still applying temperature=0.7/
-    # top_p=0.95/min_p=0.01 is a combination nobody ever validated. Live
-    # result: the casual/no-tools path (repeat penalty restored, GLM
-    # temp/top_p/min_p still applied) produced full incoherent breakdown —
-    # garbled mixed-language text, random code snippets, the model
-    # visibly noticing its own malfunction mid-answer ("Wait I'm
-    # generating junk again... bad model behavior loop?") — not just
-    # dull repetition. Treating the override as one all-or-nothing bundle
-    # means every code path uses either a real, live-tested profile (the
-    # full GLM bundle) or the other real, long-standing one (this app's
-    # plain Qwen-tuned defaults) — never an invented third combination.
+    # repeat_penalty alone: these are not independent knobs for this
+    # override. The community-recommended values (_MODEL_SAMPLING_OVERRIDES's
+    # comment) are only validated as ONE bundle together with
+    # repeat_penalty=1.0 — restoring plain REPEAT_PENALTY=1.2 while still
+    # applying temperature=0.7/top_p=0.95/min_p=0.01 is a combination
+    # nobody has validated, and gating repeat_penalty alone produces
+    # exactly that combination on the casual/no-tools path. That untested
+    # combination causes full incoherent breakdown — garbled mixed-language
+    # text, random code snippets, the model visibly noticing its own
+    # malfunction mid-answer ("Wait I'm generating junk again... bad model
+    # behavior loop?") — not just dull repetition. Treating the override as
+    # one all-or-nothing bundle means every code path uses either the full,
+    # validated GLM bundle or this app's plain Qwen-tuned defaults — never
+    # an invented third combination.
     apply_repeat_override = has_tools or format == "json"
     if settings.get("expert_streaming_enabled"):
         ok, msg = expert_streaming.ensure_running(
@@ -208,12 +205,13 @@ def _build_chat_model(
                 temperature=sampling.get("temperature", MODEL_TEMPERATURE),
                 top_p=sampling.get("top_p", TOP_P),
                 extra_body=extra_body,
-                # Live bug (user report): "No streaming chunk received for
-                # 120.0s ... stream_chunk_timeout fired" — langchain_openai's
-                # own watchdog assumes a real OpenAI-class endpoint (first
-                # token in low single-digit seconds even for large prompts).
-                # This backend's own measured prompt-processing throughput
-                # is ~2-5 tok/s (see expert_streaming.py docstring) — a
+                # langchain_openai's own watchdog assumes a real
+                # OpenAI-class endpoint (first token in low single-digit
+                # seconds even for large prompts) and fires
+                # stream_chunk_timeout ("No streaming chunk received for
+                # 120.0s ...") otherwise. This backend's own measured
+                # prompt-processing throughput is ~2-5 tok/s (see
+                # expert_streaming.py docstring) — a
                 # multi-thousand-token system prompt alone can take several
                 # MINUTES before the first generated token appears, which is
                 # not a dead connection, just a slow (but alive) local
@@ -225,9 +223,8 @@ def _build_chat_model(
         # format != "json" — только основная модель печатает предупреждение,
         # не judge_model: тот же model_tag, тот же ensure_running (expert_
         # streaming.py's _last_failure кэширует и не повторяет сам провальный
-        # запуск, но без этой проверки предупреждение всё равно печаталось
-        # бы дважды подряд для одного и того же провала — живой баг, ровно
-        # так и было в отчёте пользователя).
+        # запуск, но без этой проверки предупреждение печаталось бы дважды
+        # подряд для одного и того же провала).
         if format != "json":
             console.print(
                 f"[yellow]⚠ expert-streaming backend недоступен ({msg}) — "
@@ -292,7 +289,7 @@ _tools_cache = BuildCache()
 _agent_cache = BuildCache()
 
 
-async def _load_tools_resilient(client: MultiServerMCPClient, server_names: list[str]) -> list:
+async def _load_tools_resilient(client: MultiServerMCPClient, server_names: list[str], plugin_server_names: frozenset[str] = frozenset()) -> tuple[list, frozenset[str]]:
     """client.get_tools() без server_name гребёт ВСЕ сервера через один
     asyncio.gather() без return_exceptions — если хотя бы один не
     поднимается (например npx недоступен), падает вся пачка и агент
@@ -303,25 +300,39 @@ async def _load_tools_resilient(client: MultiServerMCPClient, server_names: list
     9-12 независимых подпроцессов (fetch/bash/web_search/memory/knowledge/
     rag/file_ops/vision/lsp/+gen*) не имеют друг с другом никакой data
     dependency — раньше каждый спавн+stdio-handshake+schema-fetch ждал
-    предыдущий целиком, хотя мог идти рядом с ним."""
+    предыдущий целиком, хотя мог идти рядом с ним.
+
+    Возвращает (tools, plugin_tool_names) — второе — имена тулов, чьи
+    сервера пришли от плагинов (mcp_agent/plugins.py). roles.py's
+    composer-функции — статичные allowlist'ы ПО ИМЕНИ, собранные ДО того,
+    как известно, какие тулы вообще предоставит установленный плагин, так
+    что имя плагинского тула физически не может попасть ни в один из этих
+    списков — без plugin_tool_names _build_role_agent не смог бы отличить
+    "тул плагина, пропустить в любую роль" от "незнакомое имя, тул кто-то
+    забыл добавить в allowlist" и был бы вынужден выбрать одно поведение
+    для обоих случаев."""
     results = await asyncio.gather(
         *(client.get_tools(server_name=name) for name in server_names),
         return_exceptions=True,
     )
     tools = []
+    plugin_tool_names = set()
     for name, result in zip(server_names, results):
         if isinstance(result, Exception):
             console.print(f"[yellow]⚠ MCP-сервер '{name}' не запустился — его инструменты недоступны: {result}[/]")
         else:
             tools.extend(result)
-    return tools
+            if name in plugin_server_names:
+                plugin_tool_names.update(t.name for t in result)
+    return tools, frozenset(plugin_tool_names)
 
 
 async def _build_tools(repo_path: str | None = None):
     resolved_repo_path = repo_path or os.getcwd()
     connections = build_mcp_connections(resolved_repo_path)
     client = MultiServerMCPClient(connections)
-    tools = await _load_tools_resilient(client, list(connections.keys()))
+    plugin_server_names = frozenset(plugins.load_mcp_servers().keys())
+    tools, plugin_tool_names = await _load_tools_resilient(client, list(connections.keys()), plugin_server_names)
     tools = [_cap_tool_output(t, TOOL_OUTPUT_CHAR_CAP) for t in tools]
     # read_history — {path: [key, ...]} для read_file, очищается в начале
     # каждого stream_chat (см. там же) и на каждом self-heal retry.
@@ -358,7 +369,7 @@ async def _build_tools(repo_path: str | None = None):
         console.print(f"[dim][MCP-AGENT] Loaded {len(tools)} tools: {[t.name for t in tools]}[/]")
     log_event("tools_loaded", names=[t.name for t in tools])
 
-    return tools, tools_by_name, read_history, resolved_repo_path
+    return tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names
 
 
 async def _get_tools(repo_path: str | None = None):
@@ -376,11 +387,9 @@ async def _get_tools(repo_path: str | None = None):
     процесса, даже когда следующий вызов приходил с другим repo_path (у
     пайплайна repo_path = os.getcwd() пересчитывается на каждый ход, см.
     pipeline.py) — file_ops/git-серверы у ВСЕХ последующих
-    ролей молча продолжали бы работать в первом попавшемся проекте. В
-    живом тесте (mail-server) не проявилось напрямую (repo_path был один
-    и тот же весь прогон), но найдено при разборе того же прогона —
-    чинится заранее, до того как ударит на реальной смене проекта в
-    рамках одного процесса."""
+    ролей молча продолжали бы работать в первом попавшемся проекте. Ключ по
+    repo_path чинит это заранее, до того как ударит на реальной смене
+    проекта в рамках одного процесса."""
     key = repo_path or os.getcwd()
     return await _tools_cache.get_or_build(key, True, lambda: _build_tools(repo_path))
 
@@ -469,27 +478,24 @@ _UNCONDITIONAL_MUTATION_PATTERNS = [
     re.compile(r"\bpatch\b"),
 ]
 
-# Live bug #1 (2026-08-14, after git tools were removed in favor of bash for
-# every git/build/test operation): this pattern's ONLY exception used to be
-# `/dev/null` — it didn't know about `N>&M` (duplicating one file
-# descriptor onto another, e.g. `2>&1` to merge stderr into stdout), one of
-# the single most common shell idioms for capturing a build/test command's
-# FULL output. Verifier tried to compile a C project, hit a real "ncurses.h
-# not found" error, and every single retry (`gcc ... 2>&1`, `make 2>&1`,
-# even a plain `ls -la platformer 2>&1`) got denied as "looks like it would
-# modify a file in place" — `2>&1` was never touching a file at all, only
-# redirecting one already-open stream to another. Excluding `>&<digit>` (in
+# This pattern's ONLY exception used to be `/dev/null` — it didn't know
+# about `N>&M` (duplicating one file descriptor onto another, e.g. `2>&1`
+# to merge stderr into stdout), one of the single most common shell idioms
+# for capturing a build/test command's FULL output, so a command like
+# `gcc ... 2>&1` or `make 2>&1` got denied as "looks like it would modify a
+# file in place" even though `2>&1` never touches a file at all, only
+# redirects one already-open stream to another. Excluding `>&<digit>` (in
 # addition to `/dev/null`) fixes this without opening a bypass — `.search()`
 # still scans the WHOLE command, so `cmd 2>&1 > realfile.txt` is still
 # caught by its second, real redirect.
 _REDIRECT_PATTERN = re.compile(r">>?\s*(?!/dev/null\b)(?!&\d)\S")
 _REDIRECT_TARGET_RE = re.compile(r">>?\s*(?!/dev/null\b)(?!&\d)(\S+)")
 
-# Live bug #2 (2026-08-15, same run continued): blocking EVERY redirect
-# outright, regardless of target, stopped Verifier from writing a
-# throwaway syntax-check file to /tmp when the real build was blocked by a
-# missing system dependency (ncurses headers) it had no way to install
-# (sudo needs an interactive password) — a genuinely reasonable way to
+# Blocking EVERY redirect outright, regardless of target, would stop
+# Verifier from writing a throwaway syntax-check file to /tmp when the
+# real build is blocked by a missing system dependency (e.g. ncurses
+# headers) it has no way to install (sudo needs an interactive password)
+# — a genuinely reasonable way to
 # verify what CAN be checked, not an attempt to fix the project. A redirect
 # INTO the project (fixing the file being verified) and a redirect to
 # scratch space elsewhere are not the same risk — only the former is a
@@ -504,12 +510,12 @@ def _shell_command_prefix(command: str) -> str:
     everything after is heredoc CONTENT (e.g. the C source Verifier is
     writing to a scratch file), which can freely contain '>' as a
     comparison operator (`x > 5`) or a word like 'rm'/'tee' inside a
-    comment/string without any of that being a real shell mutation. Live
-    bug: a heredoc body full of C comparisons (`player.vy > 10`, `x + w >
-    p->x`, ...) made the redirect-target extraction below think the
-    command wrote GameLevel-shaped garbage paths INSIDE the project,
-    rejecting a command whose one REAL redirect (`cat > /tmp/test.c
-    <<'EOF'`) was already safely outside it."""
+    comment/string without any of that being a real shell mutation.
+    Without this, a heredoc body full of C comparisons (`player.vy > 10`,
+    `x + w > p->x`, ...) can make the redirect-target extraction below
+    think the command wrote garbage paths INSIDE the project, rejecting a
+    command whose one REAL redirect (`cat > /tmp/test.c <<'EOF'`) is
+    already safely outside it."""
     m = _HEREDOC_START_RE.search(command)
     return command[:m.start()] if m else command
 
@@ -584,17 +590,14 @@ _VERSION_QUERY_FLAGS = {"--version", "-v", "-V", "version"}
 
 
 def _is_read_only_bash_command(command: str) -> bool:
-    """Conservative allowlist heuristic — mirrors the real live incident
-    this backstops (2026-08-14, glm-4.7-flash, "сделай платформер" on an
-    empty repo): Analyzer correctly investigated (get_knowledge,
-    project_tree, ls -la), saw the repo was empty, and then used bash
-    to `cat > platformer.c << EOF`, `cat > Makefile`, `make`, and
-    `apt-get install libncurses5-dev` directly — none of that is a
-    diagnostic, but nothing before this stopped it. Not a watertight
-    sandbox (a determined model could still find a way around this, e.g. a
-    quoted one-liner some allowed command happens to interpret) — a
-    backstop for the common, easy ways a shell command writes something,
-    matching this class of live incident."""
+    """Conservative allowlist heuristic — without it, Analyzer can
+    correctly investigate a task (get_knowledge, project_tree, ls -la),
+    then use bash to `cat > file << EOF`, `make`, or `apt-get install ...`
+    directly instead of reporting back — none of that is a diagnostic, but
+    nothing before this stopped it. Not a watertight sandbox (a determined
+    model could still find a way around this, e.g. a quoted one-liner some
+    allowed command happens to interpret) — a backstop for the common, easy
+    ways a shell command writes something."""
     command = command.strip()
     if not command:
         return False
@@ -628,8 +631,9 @@ class _InvestigationReadOnlyBashMiddleware(AgentMiddleware):
     for READ-ONLY diagnostic commands... never write/delete/mutate
     anything, that is entirely the Coder stage's job", prompts.py:
     _analyzer_system_prompt) — but nothing enforced that boundary at the
-    tool level, only the prompt sentence. Live incident this backstops: see
-    _is_read_only_bash_command's docstring above. Mechanical backstop, only
+    tool level, only the prompt sentence. See
+    _is_read_only_bash_command's docstring above for the failure mode this
+    backstops. Mechanical backstop, only
     attached to roles whose tool set includes bash but no legitimate
     reason to ever mutate anything (analyzer, planner — see
     _build_role_agent; verifier gets _VerifierNoSelfFixMiddleware instead,
@@ -667,9 +671,9 @@ class _VerifierNoSelfFixMiddleware(AgentMiddleware):
     fix (pipeline.py's Coder<->Verifier retry loop) — not something
     Verifier patches itself. Its own system prompt already says so in
     plain English ("You have NO write/edit tools... a failure goes back to
-    the Coder stage", prompts.py:_verifier_system_prompt) — live bug
-    anyway: given a `go build` failure (unused import), qwen3-coder ran
-    `sed -i '/strconv/d' snake.go && go build snake.go` via bash
+    the Coder stage", prompts.py:_verifier_system_prompt) — that alone
+    isn't enough: given e.g. a `go build` failure (unused import), a model
+    can run `sed -i '/strconv/d' snake.go && go build snake.go` via bash
     instead of reporting it. bash is the ONE tool Verifier keeps that
     can still write to disk (it needs it to run builds/tests), and the
     prompt sentence alone didn't stop the model from using it to edit
@@ -687,11 +691,11 @@ class _VerifierNoSelfFixMiddleware(AgentMiddleware):
 
     repo_path is passed through to _looks_like_file_mutation so a redirect
     to scratch space OUTSIDE the project (e.g. /tmp) isn't treated as a
-    self-fix — see live bug #2 in that function's module-level comments:
-    Verifier legitimately writing a throwaway /tmp syntax-check file (the
-    real build was blocked by a missing system dependency it had no way to
-    install) was denied outright alongside real in-project edits, leaving
-    it unable to verify anything it COULD have checked."""
+    self-fix — see that function's module-level comments: without this,
+    Verifier legitimately writing a throwaway /tmp syntax-check file (say
+    the real build is blocked by a missing system dependency it has no way
+    to install) would be denied outright alongside real in-project edits,
+    leaving it unable to verify anything it COULD have checked."""
 
     def __init__(self, repo_path: str):
         self._repo_path = repo_path
@@ -749,14 +753,19 @@ def _compute_num_keep(system_prompt_tokens_estimate: int) -> int:
 
 
 def _base_agent_middleware(resolved_repo_path: str, hitl_middleware: HumanInTheLoopMiddleware) -> list:
-    """The 6-middleware base both the legacy monolith agent (_build_agent)
+    """The 7-middleware base both the legacy monolith agent (_build_agent)
     and every pipeline role agent (_build_role_agent) start from, before
     their own mode/role-specific extras (delegate-nudge/voice for the
     former; ask-user-finalize/verifier-no-self-fix/investigation-read-only-
     bash for the latter — see each function's own tail). `hitl_middleware`
     is the caller's own HumanInTheLoopMiddleware instance (its interrupt_on
     set differs per caller, so it's built by the caller, not here) —
-    everything else in this list is identical across every caller."""
+    everything else in this list is identical across every caller.
+
+    PluginHookMiddleware is unconditional (not gated behind whether any
+    plugin is even installed) — mcp_agent.plugins.load_hooks() is itself
+    the check (empty list, no-op, if nothing declared a given hook), so
+    there's no meaningful "role doesn't need it" case to special-case."""
     return [
         _ToolErrorGuardMiddleware(),
         _UnloadImageGenBeforeGenModelMiddleware(),
@@ -764,11 +773,12 @@ def _base_agent_middleware(resolved_repo_path: str, hitl_middleware: HumanInTheL
         _AskUserGuardMiddleware(),
         _OutOfProjectWriteApprovalMiddleware(resolved_repo_path),
         _DedupeToolResultsMiddleware(),
+        PluginHookMiddleware(resolved_repo_path),
     ]
 
 
 async def _build_agent(repo_path: str | None = None):
-    tools, tools_by_name, read_history, resolved_repo_path = await _get_tools(repo_path)
+    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names = await _get_tools(repo_path)
 
     # Модель берётся из settings.py ("тяжёлая модель" — chat_model), а не из
     # отдельных SPIKE_*-переменных, как было раньше (см. историю: этот файл
@@ -783,9 +793,9 @@ async def _build_agent(repo_path: str | None = None):
     # сессии: на этой машине всего 6 GB VRAM, и загрузка ВТОРОЙ пары весов
     # вместо переиспользования резидентной означает evict/reload у Ollama —
     # само переключение стоит времени, которое routing должен был сэкономить.
-    # qwen2.5-coder:7b в этой же роли на ДВУХ живых прогонах подряд не
-    # завернула tool-call в свои же теги <tool_call>...</tool_call> — не
-    # разовая случайность, а системная ненадёжность именно этой модели тут.
+    # qwen2.5-coder:7b в этой же роли не заворачивает tool-call в свои же
+    # теги <tool_call>...</tool_call> надёжно — не разовая случайность, а
+    # системная ненадёжность именно этой модели тут.
     MAIN_MODEL = settings.get("chat_model")
     voice_mode = settings.get("voice_mode")
 
@@ -799,7 +809,7 @@ async def _build_agent(repo_path: str | None = None):
     full_tools = tools
     use_optimized_tools = not voice_mode and settings.get("optimized_tools")
     if use_optimized_tools:
-        tools, tools_by_name = build_optimized_tools(tools)
+        tools, tools_by_name = build_optimized_tools(tools, plugin_tool_names)
 
     # Built BEFORE the models below (not in its usual place further down)
     # specifically so prompts._SYSTEM_PROMPT_TOKENS_ESTIMATE is already the
@@ -908,10 +918,10 @@ async def _build_agent(repo_path: str | None = None):
     # раз на процесс, ещё до выбора модели. voice_mode пропускает его по
     # той же причине, что и остальные тулы, — пустой список.
     #
-    # ПЕРВЫМ в списке (не последним, как было) — тот же живой прогон
-    # (20260812, XOR-в-Go задача), что и переупорядочивание write_file в
-    # optimized_tools.py: tools_available залогировал delegate ПОСЛЕДНИМ
-    # из ~20 тулов (просто дописан в конец списка), а delegate_tool.py's
+    # ПЕРВЫМ в списке (не последним, как было) — тот же эффект, что уже
+    # оправдал переупорядочивание write_file в optimized_tools.py:
+    # tools_available залогировал delegate ПОСЛЕДНИМ из ~20 тулов (просто
+    # дописан в конец списка), а delegate_tool.py's
     # docstring (см. delegate_nudge middleware ниже) отдельно фиксирует,
     # что модель почти никогда не вызывает его сама, даже когда задача явно
     # многофайловая. Позиционное смещение LLM tool-choice к тулам В НАЧАЛЕ
@@ -997,7 +1007,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     Никакой voice_mode-развилки здесь нет: роли пайплайна не участвуют в
     голосовом режиме — тот идёт по легаси _get_agent (пустой tools=[],
     отдельный _build_voice_system_prompt)."""
-    tools, tools_by_name, read_history, resolved_repo_path = await _get_tools(repo_path)
+    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names = await _get_tools(repo_path)
 
     MAIN_MODEL = settings.get("chat_model")
 
@@ -1015,8 +1025,8 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
         num_keep=num_keep,
     )
     # Тот же принцип, что у judge_model в _build_agent: ОДИН тег с MAIN_MODEL
-    # (не отдельная слабая модель — живой прогон показал ненадёжность
-    # слабого судьи), format="json" безопасен именно здесь, потому что
+    # (не отдельная слабая модель — слабый судья ненадёжен), format="json"
+    # безопасен именно здесь, потому что
     # judge_model нигде в этой роли не используется для обычного текста.
     judge_model = _build_chat_model(
         model_tag=MAIN_MODEL,
@@ -1028,7 +1038,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     )
 
     # delegate (delegate_tool.py) сознательно НЕ даётся ни одной роли
-    # пайплайна, даже инвестигатору — живой прогон: у него ТОТ ЖЕ read-only
+    # пайплайна, даже инвестигатору — у него ТОТ ЖЕ read-only
     # набор тулов (roles.py:LEGACY_INVESTIGATION_TOOL_NAMES), то есть это
     # вложенный саб-агент внутри уже отдельно бюджетируемой
     # исследовательской роли — лишняя матрёшка, а не разделение труда.
@@ -1037,9 +1047,14 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     # расследование делило ОДИН общий бюджет шагов на весь ход — здесь
     # инвестигатор получает свой собственный, достаточно большой бюджет
     # напрямую (см. mcp_agent/roles.py:ROLE_RECURSION_LIMIT) вместо того,
-    # чтобы прятать часть его в непрозрачный (на живом прогоне — до 6+
-    # минут без единого признака прогресса) вложенный вызов.
-    agent_tools = filter_tools(tool_names, tools)
+    # чтобы прятать часть его в непрозрачный (может идти несколько минут
+    # без единого признака прогресса) вложенный вызов.
+    # plugin_tool_names unioned in AFTER roles.py's static allowlist, not
+    # inside it — roles.py can't possibly name a plugin's tools ahead of
+    # time (see _load_tools_resilient's docstring), so every plugin tool
+    # is available to every pipeline role regardless of tool_names, same
+    # blanket-access principle as flowai_guide's _META_TOOLS group.
+    agent_tools = filter_tools(tool_names | plugin_tool_names, tools)
 
     if DEBUG:
         console.print(f"[dim][MCP-AGENT] Role '{role}' has {len(agent_tools)} tools available this turn: {[t.name for t in agent_tools]}[/]")
@@ -1053,8 +1068,8 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     if role == "planner":
         # Только Planner имеет ask_user (roles.py:planner_tools) — эта
         # мидлварь не даёт ему звать что-либо ещё после первого
-        # подтверждения, см. её докстринг в ask_user_tool.py про живой
-        # инцидент с 8 циклами "готов ли я...?".
+        # подтверждения, см. её докстринг в ask_user_tool.py про паттерн
+        # зацикленных "готов ли я...?"-переспросов, который она блокирует.
         agent_middleware.append(_AskUserFinalizeMiddleware())
         agent_middleware.append(_AskUserFinalizeNumPredictMiddleware())
     if role == "verifier":
@@ -1067,8 +1082,8 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     if role in ("analyzer", "planner"):
         # Обе роли держат bash безусловно (roles.py:investigator_tools/
         # planner_tools) только для диагностики, никогда для мутации — см.
-        # докстринг мидлвари про живой инцидент (Analyzer, вместо сводки
-        # для Planner, сам написал файлы игры через `cat > file`).
+        # докстринг мидлвари про сценарий, который она блокирует (Analyzer,
+        # вместо сводки для Planner, сам пишет файлы через `cat > file`).
         agent_middleware.append(_InvestigationReadOnlyBashMiddleware())
     agent_middleware.append(_DropStaleReadsMiddleware())
     agent_middleware.append(compact_research)

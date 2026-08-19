@@ -2,8 +2,13 @@
 server's tools independently (one failing server shouldn't cost every
 other server its tools) but now does so CONCURRENTLY instead of one
 server at a time (perf audit finding: 9-12 independent subprocess spawns
-have no data dependency on each other)."""
+have no data dependency on each other). Also reports which loaded tool
+names came from a plugin-provided server (mcp_agent/plugins.py) — roles.py's
+per-role tool_names are static allowlists that can't possibly know a
+plugin's tool names ahead of time, so agent_builder.py needs this to let
+plugin tools through regardless of role."""
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,18 +26,36 @@ class _FakeClient:
         return behavior
 
 
+def _tool(name):
+    return SimpleNamespace(name=name)
+
+
 @pytest.mark.asyncio
 async def test_merges_tools_from_every_server():
     client = _FakeClient({"a": ["tool_a1", "tool_a2"], "b": ["tool_b1"]})
-    tools = await _load_tools_resilient(client, ["a", "b"])
+    tools, plugin_names = await _load_tools_resilient(client, ["a", "b"])
     assert tools == ["tool_a1", "tool_a2", "tool_b1"]
+    assert plugin_names == frozenset()
 
 
 @pytest.mark.asyncio
 async def test_one_failing_server_does_not_cost_the_others_their_tools():
     client = _FakeClient({"good": ["tool_1"], "bad": RuntimeError("npx not found")})
-    tools = await _load_tools_resilient(client, ["good", "bad"])
+    tools, _plugin_names = await _load_tools_resilient(client, ["good", "bad"])
     assert tools == ["tool_1"]
+
+
+@pytest.mark.asyncio
+async def test_reports_tool_names_from_plugin_servers_only():
+    client = _FakeClient({
+        "bash": [_tool("bash")],
+        "my_plugin_server": [_tool("plugin_tool_a"), _tool("plugin_tool_b")],
+    })
+    tools, plugin_names = await _load_tools_resilient(
+        client, ["bash", "my_plugin_server"], plugin_server_names=frozenset({"my_plugin_server"}),
+    )
+    assert {t.name for t in tools} == {"bash", "plugin_tool_a", "plugin_tool_b"}
+    assert plugin_names == frozenset({"plugin_tool_a", "plugin_tool_b"})
 
 
 @pytest.mark.asyncio

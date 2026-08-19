@@ -1,0 +1,15 @@
+{
+  "name": "hello-world",
+  "version": "0.1.0",
+  "description": "Minimal example plugin — one slash command, one MCP tool, one hook of each kind",
+  "commands": {
+    "hello": {"module": "hello.py", "function": "run", "help": "greet, echoing back whatever text you pass"}
+  },
+  "mcp_servers": {
+    "hello": {"command": "python3", "args": ["server.py"]}
+  },
+  "hooks": {
+    "post_file_edit": ["hooks.py:on_edit"],
+    "pre_commit": ["hooks.py:on_commit"]
+  }
+}
