@@ -588,16 +588,85 @@ _READ_ONLY_OLLAMA_SUBCOMMANDS = {"show", "list", "ps"}
 _VERSION_QUERY_INTERPRETERS = {"node", "php", "python", "python3", "ruby", "go", "java", "perl"}
 _VERSION_QUERY_FLAGS = {"--version", "-v", "-V", "version"}
 
+# Live-run gap: Analyzer investigating a "why doesn't this work" report had
+# no way to actually SEE the failure — `go run platformer.go` was denied by
+# the version-query-only rule above, forcing a whole extra Planner/Coder
+# round just to reproduce something that should have been observable
+# during investigation. This tier allows RUNNING the project's own code to
+# reproduce/observe behavior — still no package installs, no `-m
+# pip`/`-c`/`-e` interpreter flags, no build tools with side-writing
+# subcommands. NOT a sandbox against what the script itself does once
+# running (same caveat as this function's own docstring) — Analyzer/
+# Planner are trusted to run the thing being debugged, not to run anything.
+_EXECUTE_SCRIPT_SPECS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "go":      (("run",), (".go",)),
+    "python":  ((), (".py",)),
+    "python3": ((), (".py",)),
+    "ruby":    ((), (".rb",)),
+    "node":    ((), (".js", ".mjs", ".cjs")),
+    "php":     ((), (".php",)),
+    "perl":    ((), (".pl",)),
+}
+
+# A short, curated list of well-known test-runner invocations, matched as
+# a PREFIX (trailing flags/args of the tool's own choosing are fine — `go
+# test -run TestFoo -v`, `pytest -k foo`, `npm test -- --watch=false`; none
+# of these tools' test subcommand has a flag that installs/writes outside
+# a build/coverage cache) — NOT a general "first token is a test tool"
+# rule: most of these tools also have install/build subcommands that this
+# must keep rejecting (plain `npm`/`go`/`cargo` with no further check would
+# also let `npm install`/`go install`/`cargo build` straight through).
+_EXECUTE_TEST_PREFIXES = {
+    ("go", "test"), ("cargo", "test"), ("pytest",),
+    ("npm", "test"), ("make", "test"),
+}
+
+
+def _is_execute_script_command(first: str, rest: list[str]) -> bool:
+    """`go run file.go [args]`, `python3 file.py [args]` — see
+    _EXECUTE_SCRIPT_SPECS above. The script's OWN arguments (`extra_args`,
+    anything after the script path) are the program-under-test's business,
+    not this function's — only the INTERPRETER position (`script`, the
+    first token after any required subcommand) is checked for a leading
+    '-', which blocks the interpreter's own escape hatches (`python3 -m
+    pip install x`, `python3 -c "..."`, `node -e "..."`) without also
+    blocking legitimate flags to the script itself (`go run main.go
+    --verbose`, `python3 manage.py --settings=test`). The script argument
+    must also carry the right extension for its interpreter."""
+    spec = _EXECUTE_SCRIPT_SPECS.get(first)
+    if spec is None:
+        return False
+    required_subcommand, exts = spec
+    if required_subcommand:
+        if tuple(rest[:len(required_subcommand)]) != required_subcommand:
+            return False
+        rest = rest[len(required_subcommand):]
+    if not rest:
+        return False
+    script = rest[0]
+    if script.startswith("-"):
+        return False
+    return script.endswith(exts)
+
+
+def _is_execute_test_command(first: str, rest: list[str]) -> bool:
+    tokens = (first, *rest)
+    return any(tokens[:len(prefix)] == prefix for prefix in _EXECUTE_TEST_PREFIXES)
+
 
 def _is_read_only_bash_command(command: str) -> bool:
     """Conservative allowlist heuristic — without it, Analyzer can
     correctly investigate a task (get_knowledge, project_tree, ls -la),
     then use bash to `cat > file << EOF`, `make`, or `apt-get install ...`
     directly instead of reporting back — none of that is a diagnostic, but
-    nothing before this stopped it. Not a watertight sandbox (a determined
-    model could still find a way around this, e.g. a quoted one-liner some
-    allowed command happens to interpret) — a backstop for the common, easy
-    ways a shell command writes something."""
+    nothing before this stopped it. Also allows a narrow "run to reproduce"
+    tier (_is_execute_script_command/_is_execute_test_command) on top of
+    the read-only-diagnostics allowlist below — see _EXECUTE_SCRIPT_SPECS'
+    own comment for why. Not a watertight sandbox (a determined model
+    could still find a way around this, e.g. a quoted one-liner some
+    allowed command happens to interpret, or a script that itself mutates
+    something once run) — a backstop for the common, easy ways a shell
+    command writes something."""
     command = command.strip()
     if not command:
         return False
@@ -608,12 +677,16 @@ def _is_read_only_bash_command(command: str) -> bool:
     first = tokens[0].rsplit("/", 1)[-1]
     rest = tokens[1:]
 
+    if _is_execute_test_command(first, rest):
+        return True
     if first == "git":
         return bool(rest) and rest[0] in _READ_ONLY_GIT_SUBCOMMANDS
     if first == "ollama":
         return bool(rest) and rest[0] in _READ_ONLY_OLLAMA_SUBCOMMANDS
-    if first in _VERSION_QUERY_INTERPRETERS:
-        return bool(rest) and all(tok in _VERSION_QUERY_FLAGS for tok in rest)
+    if first in _VERSION_QUERY_INTERPRETERS or first in _EXECUTE_SCRIPT_SPECS:
+        if rest and all(tok in _VERSION_QUERY_FLAGS for tok in rest):
+            return True
+        return _is_execute_script_command(first, rest)
     if first == "find":
         return not any(x in command for x in ("-exec", "-execdir", "-delete", "-ok", "-fprintf"))
 
