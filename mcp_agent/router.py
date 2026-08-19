@@ -166,14 +166,13 @@ _CASUAL_CHAT_SYSTEM_PROMPT = (
     "addressing them directly."
 )
 
-_classify_model_cache = None
-_classify_model_cache_key: str | None = None
-# mcp_agent.build_cache.BuildCache — see its module docstring; single slot
-# (key=None), freshness = chat_model tag.
+# mcp_agent.build_cache.BuildCache — see its module docstring; both single
+# slot (key=None), freshness = chat_model tag.
+_classify_model_cache = BuildCache()
 _casual_agent_cache = BuildCache()
 
 
-def _get_classify_model():
+async def _get_classify_model():
     """format="json" здесь безопасен по той же причине, что у judge_model в
     agent_builder.py:_build_agent — этот объект используется ИСКЛЮЧИТЕЛЬНО
     для classify_intent, ответ всегда обязан быть чистым JSON.
@@ -187,20 +186,19 @@ def _get_classify_model():
     VRAM ушла с ~4 ГБ занятых до 29 МиБ свободных, два резидентных
     инстанса одной и той же модели одновременно. _build_chat_model — единая
     точка сборки, которая уже умеет выбирать backend правильно."""
-    global _classify_model_cache, _classify_model_cache_key
     current_model = settings.get("chat_model")
-    if _classify_model_cache is not None and _classify_model_cache_key == current_model:
-        return _classify_model_cache
-    _classify_model_cache = _build_chat_model(
-        model_tag=current_model,
-        num_predict=JUDGE_NUM_PREDICT,
-        reasoning=False,
-        num_keep=4,
-        format="json",
-        has_tools=False,  # raw JSON verdict, never bound to a tools list — see has_tools's docstring in agent_builder.py
-    )
-    _classify_model_cache_key = current_model
-    return _classify_model_cache
+
+    async def _build():
+        return _build_chat_model(
+            model_tag=current_model,
+            num_predict=JUDGE_NUM_PREDICT,
+            reasoning=False,
+            num_keep=4,
+            format="json",
+            has_tools=False,  # raw JSON verdict, never bound to a tools list — see has_tools's docstring in agent_builder.py
+        )
+
+    return await _classify_model_cache.get_or_build(None, current_model, _build)
 
 
 def _coerce_flags(data) -> dict | None:
@@ -228,7 +226,7 @@ async def classify_intent(messages: list[dict]) -> dict:
     "расследовать", не "пропустить мимо". Возвращает dict с 4 булевыми
     флагами (_FLAG_KEYS) — mcp_agent/pipeline.py собирает из них конкретный
     прогон (какие стадии, какие тулы у каждой), см. docstring модуля."""
-    model = _get_classify_model()
+    model = await _get_classify_model()
     recent = messages[-2:] if len(messages) >= 2 else messages
     convo = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in recent)
     try:
