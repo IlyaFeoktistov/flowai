@@ -17,8 +17,11 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
+from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 
+import settings
+from mcp_agent.model_config import ASK_USER_FINALIZE_NUM_PREDICT
 from tools.confirm import ask_permission, ask_user_question
 
 # Пересказ MCP-тула в (action, detail) для tools/confirm.py:ask_permission()
@@ -234,6 +237,47 @@ class _AskUserFinalizeMiddleware(AgentMiddleware):
                 tool_call_id=request.tool_call["id"],
                 status="error",
             )
+        return await handler(request)
+
+
+class _AskUserFinalizeNumPredictMiddleware(AgentMiddleware):
+    """Planner-only. _AskUserFinalizeMiddleware above stops the model from
+    calling MORE TOOLS once ask_user has answered, but says nothing about
+    how much plain TEXT it's allowed to generate for that final restate —
+    live incident (2026-08-19): forced into text-only mode, the model
+    still re-derived a brand-new plan from scratch instead of restating the
+    one it already put in the ask_user question, and rambled for ~1900
+    tokens/~2min against OLLAMA_NUM_PREDICT's full 4096 budget before the
+    user killed the run thinking it had hung. See
+    model_config.ASK_USER_FINALIZE_NUM_PREDICT's docstring for the same
+    "small model + big budget = incoherent runaway" pattern already
+    documented for router.py:answer_casual.
+
+    Only swaps the budget for the ONE model call right after a real
+    (status != "error") ask_user answer exists — every other Planner call
+    (investigation, drafting the plan, the ask_user call itself) keeps the
+    full OLLAMA_NUM_PREDICT, since those legitimately need it (e.g. the
+    ask_user call's own `options` argument can be long).
+
+    Per-backend kwarg shape copied from self_heal.py:_extract_ask_user_shape
+    (its docstring has the two live bugs that shaped it): ChatOllama needs
+    num_predict inside options{} (bind()'ing it at the top level makes
+    AsyncClient.chat() reject it as an unknown kwarg) and options{} must
+    repeat num_ctx (it REPLACES, not merges, Ollama's per-call params) —
+    ChatOpenAI (expert-streaming backend) takes max_tokens directly and has
+    no per-call options{}/num_ctx equivalent at all."""
+
+    async def awrap_model_call(self, request, handler):
+        if any(
+            isinstance(m, ToolMessage) and m.name == "ask_user" and getattr(m, "status", "success") != "error"
+            for m in request.messages
+        ):
+            model_settings = (
+                {"options": {"num_ctx": settings.get("num_ctx"), "num_predict": ASK_USER_FINALIZE_NUM_PREDICT}}
+                if isinstance(request.model, ChatOllama)
+                else {"max_tokens": ASK_USER_FINALIZE_NUM_PREDICT}
+            )
+            return await handler(request.override(model_settings=model_settings))
         return await handler(request)
 
 

@@ -212,6 +212,23 @@ JUDGE_NUM_PREDICT = int(os.getenv("JUDGE_NUM_PREDICT", "200"))
 # несколько сотен токенов мусора, а не 4096.
 CASUAL_NUM_PREDICT = int(os.getenv("CASUAL_NUM_PREDICT", "1024"))
 
+# ask_user_tool.py:_AskUserFinalizeNumPredictMiddleware — Planner's turn
+# right after ask_user returns must only RESTATE the plan it already put
+# in the ask_user question (prompts.py's planner prompt), never derive a
+# new one — it's plain text, not tool-call args, so it never needs
+# Coder-length output (full file rewrites). Live incident (2026-08-19,
+# glm-4.7-flash:q4_K_M/expert-streaming): instead of restating, Planner
+# re-derived a new plan from scratch and rambled for ~1900 tokens/~2min
+# with OLLAMA_NUM_PREDICT's full 4096 budget, until the user killed the
+# run thinking it had hung (same "small model + big budget = incoherent
+# runaway" failure CASUAL_NUM_PREDICT's docstring above already documents
+# for router.py:answer_casual, verified there via raw curl against the
+# backend). Same fix, same caveat: this limits the damage (worst case a
+# few hundred tokens more, not 4096) — it does not cure the re-deriving
+# itself, see the middleware's own docstring for the mechanical guard
+# that targets that part.
+ASK_USER_FINALIZE_NUM_PREDICT = int(os.getenv("ASK_USER_FINALIZE_NUM_PREDICT", "1536"))
+
 # Без явного лимита create_agent's ReAct-луп может звать тулы неограниченно
 # много раз за один ainvoke(), если модель не сходится к финальному ответу —
 # на медленной локальной модели это может означать реальное ожидание в

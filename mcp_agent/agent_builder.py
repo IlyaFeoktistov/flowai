@@ -28,6 +28,7 @@ from mcp_agent import ollama_kv_cache
 from ui.console import console
 from mcp_agent.ask_user_tool import (
     _AskUserFinalizeMiddleware,
+    _AskUserFinalizeNumPredictMiddleware,
     _AskUserGuardMiddleware,
     _OutOfProjectWriteApprovalMiddleware,
     _ToolErrorGuardMiddleware,
@@ -1044,6 +1045,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
         # подтверждения, см. её докстринг в ask_user_tool.py про живой
         # инцидент с 8 циклами "готов ли я...?".
         agent_middleware.append(_AskUserFinalizeMiddleware())
+        agent_middleware.append(_AskUserFinalizeNumPredictMiddleware())
     if role == "verifier":
         # Только Verifier держит bash БЕЗ единого write-тула рядом —
         # единственная роль, где bash реально способен подменить
