@@ -11,6 +11,17 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 
+# Тулы-проверки — типичный источник "трэшинга": модель меняет подход
+# (другой каст, другая правка), но раз за разом гоняет ОДНУ И ТУ ЖЕ
+# команду проверки, получая каждый раз чуть другой (но всё равно
+# неудачный) результат — см. докстринг _dedupe_identical_tool_results.
+# read_file/grep_search сюда не входят — их дедуп идёт отдельным путём
+# (_dedupe_read_tool), они идемпотентны и блокируются целиком, а не только
+# нуджатся хинтом.
+_LOOP_PRONE_TOOL_NAMES = frozenset({"bash", "bash_bg", "bash_bg_check"})
+_SAME_ARGS_LOOP_THRESHOLD = 3
+
+
 def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -104,7 +115,19 @@ def _dedupe_identical_tool_results(messages: list) -> list:
     раньше — старая копия заменяется плейсхолдером вместо повторной отправки
     того же текста. Если контент отличается (состояние реально изменилось
     между вызовами) — обе копии остаются нетронутыми: это не дубликат, а
-    полезная разница, которую нельзя терять."""
+    полезная разница, которую нельзя терять.
+
+    Ключ дедупа выше — ПОЛНЫЙ (name, args, content): если Coder меняет
+    подход между попытками (другой каст, другая правка), `go build`/`go
+    test` каждый раз отдаёт слегка другой текст ошибки — контент не
+    совпадает byte-в-byte, этот дедуп не срабатывает и хинт не всплывает,
+    хотя по сути это тот же самый неудачный check в N-й раз подряд. Второй,
+    более грубый счётчик ниже (только по name+args, без content) ловит
+    именно этот случай для тулов-проверок (_LOOP_PRONE_TOOL_NAMES) — не
+    блокирует и не заменяет вызов (та же причина, что и выше: состояние
+    легитимно может меняться), только навешивает хинт "стоп, подумай" на
+    самую свежую копию, если один и тот же bash-check провалился N раз
+    подряд с разным выводом."""
     call_info: dict[str, tuple[str, str]] = {}
     for m in messages:
         if isinstance(m, AIMessage):
@@ -115,13 +138,18 @@ def _dedupe_identical_tool_results(messages: list) -> list:
                 )
 
     total_count: dict[tuple, int] = {}
+    total_args_count: dict[tuple, int] = {}
     for m in messages:
         if isinstance(m, ToolMessage) and m.tool_call_id in call_info:
             name, args_json = call_info[m.tool_call_id]
             key = (name, args_json, _content_text(m.content))
             total_count[key] = total_count.get(key, 0) + 1
+            if name in _LOOP_PRONE_TOOL_NAMES:
+                akey = (name, args_json)
+                total_args_count[akey] = total_args_count.get(akey, 0) + 1
 
     seen_count: dict[tuple, int] = {}
+    seen_args_count: dict[tuple, int] = {}
     result = []
     for m in messages:
         if isinstance(m, ToolMessage) and m.tool_call_id in call_info:
@@ -168,6 +196,32 @@ def _dedupe_identical_tool_results(messages: list) -> list:
                     # that's wrong for anything the model has to actually
                     # read); _content_text stays fine for the dedup KEY above
                     # since equality doesn't care about escaping.
+                    m = m.model_copy(update={"content": _tool_text(m.content) + hint})
+            elif name in _LOOP_PRONE_TOOL_NAMES:
+                akey = (name, args_json)
+                seen_args_count[akey] = seen_args_count.get(akey, 0) + 1
+                # bash_server.py always prefixes a non-zero exit with
+                # "Error (exit N):" — only nudge while the LATEST attempt
+                # still looks like a failure; if it just turned into a
+                # clean pass (real progress, not thrashing), don't tack a
+                # "you're not converging" hint onto a result that just
+                # succeeded.
+                still_failing = _tool_text(m.content).lstrip().lower().startswith("error (exit")
+                if (
+                    still_failing
+                    and total_args_count.get(akey, 0) >= _SAME_ARGS_LOOP_THRESHOLD
+                    and seen_args_count[akey] == total_args_count[akey]
+                ):
+                    hint = (
+                        f"\n\n[You've now run `{name}` with these exact arguments "
+                        f"{total_args_count[akey]} times this turn, getting a "
+                        "DIFFERENT result each time — that means the underlying "
+                        "problem isn't actually being fixed, just changing shape "
+                        "with each guess. Stop iterating blindly: re-read the "
+                        "latest error carefully and reconsider your approach, or "
+                        "stop and report this as a blocker instead of trying "
+                        "another variant.]"
+                    )
                     m = m.model_copy(update={"content": _tool_text(m.content) + hint})
         result.append(m)
     return result

@@ -277,6 +277,26 @@ def _format_duration(seconds: float) -> str:
         return f"{secs}с"
 
 
+# Reserve room for _ai_header's fixed-shape suffix after the label —
+# " · {tok} tok · {duration}" — worst case something like
+# " · 999999 tok · 23ч 59м 59с" (~28 chars) plus a margin; used by
+# _footer_loop's raw-terminal fallback to truncate the variable label so
+# the WHOLE rendered line can never exceed the terminal width (see its own
+# comment on why an overflow there leaves stale digits on screen).
+_FOOTER_FIXED_SUFFIX_WIDTH = 32
+
+
+def _truncate_label_to_width(label: str, cols: int) -> str:
+    """Caps `label` so `label` + _ai_header's fixed suffix fits within
+    `cols` terminal columns — see _FOOTER_FIXED_SUFFIX_WIDTH and
+    _footer_loop's raw-terminal branch for why an overflow there is worse
+    than a truncated label."""
+    budget = max(cols - _FOOTER_FIXED_SUFFIX_WIDTH, 8)
+    if len(label) <= budget:
+        return label
+    return label[: budget - 1] + "…"
+
+
 def _ai_header(tok: int, elapsed: float, label: str = "") -> str:
     """'[label ]N tok · X.Xs' in raw ANSI — needed for re-render without
     Rich. No "AI ›" prefix here — that marker already exists inline before
@@ -469,13 +489,22 @@ class StreamDisplay:
                 frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
                 elapsed = time.monotonic() - self._t_wall
                 stage_prefix = f"{self._current_stage} · " if self._current_stage else ""
-                header = _ai_header(self._tok_approx, elapsed, f"{frame} {stage_prefix}{self._phase_label}")
+                label = f"{frame} {stage_prefix}{self._phase_label}"
                 if self._app is not None:
-                    self._app.set_stats(header)
+                    self._app.set_stats(_ai_header(self._tok_approx, elapsed, label))
                 else:
                     try:
                         import os
-                        rows = os.get_terminal_size().lines
+                        cols, rows = os.get_terminal_size()
+                        # Cap the variable part of the line so the WHOLE
+                        # render can never exceed the terminal width and
+                        # wrap onto the row below — `\033[K` below only
+                        # clears the SINGLE row the cursor sits on, so if a
+                        # longer earlier frame wrapped onto the next row,
+                        # its leftover tail never gets cleared and can bleed
+                        # into a later, shorter render (garbled digits in
+                        # the token/duration suffix).
+                        header = _ai_header(self._tok_approx, elapsed, _truncate_label_to_width(label, cols))
                         safe_write(f"\033[s\033[{rows};1H\r\033[K{header}\033[u")
                     except Exception:
                         break

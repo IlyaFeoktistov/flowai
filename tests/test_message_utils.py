@@ -1,8 +1,11 @@
 """mcp_agent/message_utils.py — _calls_by_id (single home for the
-tool_call_id -> tc join, previously copy-pasted in 4 places) and the
-repeated-identical-tool-call nudge in _dedupe_identical_tool_results, which
-stops a role from looping on an identical failing call (e.g. `go get`)
-with no progress — see message_utils.py's comment on the nudge branch."""
+tool_call_id -> tc join, previously copy-pasted in 4 places) and the two
+repeated-tool-call nudges in _dedupe_identical_tool_results: the
+exact-content one, which stops a role from looping on an identical failing
+call (e.g. `go get`) with no progress, and the args-only "thrashing" one,
+which catches the same command failing DIFFERENTLY each time (e.g. `go
+build` after a different bad cast each round) — see message_utils.py's
+comments on both branches."""
 from conftest import ai_message, tool_message
 
 from mcp_agent.message_utils import _calls_by_id, _dedupe_identical_tool_results, _find_call_by_id
@@ -101,3 +104,63 @@ def test_different_results_for_same_call_are_not_flagged_as_repeats():
     tool_msgs = [m for m in out if hasattr(m, "tool_call_id")]
     assert tool_msgs[0].content == "fail"
     assert tool_msgs[1].content == "pass"
+
+
+def test_same_command_failing_differently_each_time_gets_a_thrashing_hint():
+    # Coder tries a different cast each round, `go build` fails with a
+    # DIFFERENT error every time — the exact-content dedup above never
+    # matches (content differs), so this needs the separate name+args-only
+    # counter to catch it.
+    msgs = (
+        _bash_round(0, "Error (exit 2): cannot use x (int)")
+        + _bash_round(1, "Error (exit 2): cannot use x (float64)")
+        + _bash_round(2, "Error (exit 2): cannot use x (string)")
+    )
+    out = _dedupe_identical_tool_results(msgs)
+    tool_msgs = [m for m in out if hasattr(m, "tool_call_id")]
+    assert "cannot use x (string)" in tool_msgs[-1].content  # real content kept
+    assert "3 times this turn" in tool_msgs[-1].content
+    assert "getting a DIFFERENT result" in tool_msgs[-1].content
+    # earlier, differently-failing attempts are untouched by this nudge —
+    # only exact-content dedup (a different mechanism) ever rewrites those
+    assert "cannot use x (int)" in tool_msgs[0].content
+    assert "cannot use x (float64)" in tool_msgs[1].content
+
+
+def test_thrashing_hint_does_not_fire_below_the_threshold():
+    msgs = (
+        _bash_round(0, "Error (exit 2): cannot use x (int)")
+        + _bash_round(1, "Error (exit 2): cannot use x (float64)")
+    )
+    out = _dedupe_identical_tool_results(msgs)
+    tool_msgs = [m for m in out if hasattr(m, "tool_call_id")]
+    assert tool_msgs[1].content == "Error (exit 2): cannot use x (float64)"
+
+
+def test_thrashing_hint_does_not_fire_once_the_command_finally_passes():
+    # Real convergence, not thrashing — the third attempt succeeds, so no
+    # "you're not converging" hint should be tacked onto a clean result.
+    msgs = (
+        _bash_round(0, "Error (exit 2): cannot use x (int)")
+        + _bash_round(1, "Error (exit 2): cannot use x (float64)")
+        + _bash_round(2, "build succeeded")
+    )
+    out = _dedupe_identical_tool_results(msgs)
+    tool_msgs = [m for m in out if hasattr(m, "tool_call_id")]
+    assert tool_msgs[-1].content == "build succeeded"
+
+
+def test_thrashing_hint_is_scoped_to_loop_prone_tools_only():
+    # write_file/edit_file already have their own failure-classification
+    # path (self_heal.py) — this nudge must not double up on those.
+    msgs = [
+        ai_message([{"id": "w0", "name": "write_file", "args": {"path": "a.py"}}]),
+        tool_message("write_file", content="Error: old_string not found", tool_call_id="w0"),
+        ai_message([{"id": "w1", "name": "write_file", "args": {"path": "a.py"}}]),
+        tool_message("write_file", content="Error: old_string not unique", tool_call_id="w1"),
+        ai_message([{"id": "w2", "name": "write_file", "args": {"path": "a.py"}}]),
+        tool_message("write_file", content="Error: still not found", tool_call_id="w2"),
+    ]
+    out = _dedupe_identical_tool_results(msgs)
+    tool_msgs = [m for m in out if hasattr(m, "tool_call_id")]
+    assert tool_msgs[-1].content == "Error: still not found"
