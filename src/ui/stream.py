@@ -386,7 +386,7 @@ class StreamDisplay:
                     return
                 on = not on
                 style = "bold white" if on else "bright_black"
-                self._app._output._lines[line_idx] = _render_markup(f"[{style}]  ●[/][bright_black] {_escape_markup(header)}[/]")
+                self._app._output._lines[line_idx] = _render_markup(f"[{style}]  ●[/] {_escape_markup(header)}")
                 self._app.invalidate()
         except asyncio.CancelledError:
             pass
@@ -583,7 +583,7 @@ class StreamDisplay:
             if self._app is not None:
                 line_idx = len(self._app._output._lines) - 1
             header = _format_tool_call(name, args)
-            console.print(f"[bright_black]  ● {_escape_markup(header)}[/]")
+            console.print(f"[bright_black]  ●[/] {_escape_markup(header)}")
             blink_task = (
                 asyncio.create_task(self._blink_tool_dot(line_idx, header))
                 if line_idx is not None else None
@@ -688,7 +688,7 @@ class StreamDisplay:
             # line_idx from before that would otherwise crash the whole turn
             # on an IndexError over a purely cosmetic status dot.
             if line_idx is not None and self._app is not None and 0 <= line_idx < len(self._app._output._lines):
-                self._app._output._lines[line_idx] = _render_markup(f"[bold white]  ●[/][bright_black] {_escape_markup(header)}[/]")
+                self._app._output._lines[line_idx] = _render_markup(f"[bold white]  ●[/] {_escape_markup(header)}")
                 self._app.invalidate()
 
             diffish = _format_file_edit_result(name, pending_args, result) if name in _FILE_EDIT_TOOL_NAMES and result else None
