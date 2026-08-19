@@ -186,13 +186,25 @@ def on_commit(command: str, repo_path: str) -> str | None:
 `pre_commit` триггерится только по ПЕРВОМУ сегменту команды до `&&`/`;`/`|`
 — хук не может проверить коммит, который ему не показали.
 
-## Рабочий пример
+## Рабочие примеры
 
-`examples/plugins/hello-world/` в репозитории — все три механизма разом
-(команда, MCP-тул, оба хука), проверен вживую. Установить:
+- `examples/plugins/hello-world/` — глобальный плагин, все три механизма
+  разом (команда, MCP-тул, оба хука), проверен вживую:
 
-```bash
-cp -r examples/plugins/hello-world plugins/hello-world
-```
+  ```bash
+  cp -r examples/plugins/hello-world plugins/hello-world
+  ```
 
-Перезапустить flowai, `/plugin` покажет `hello-world` в списке.
+  Перезапустить flowai, `/plugin` покажет `hello-world` в списке.
+
+- `examples/project-skills-hooks/` — тот же набор возможностей (команда +
+  хуки, без MCP-сервера — `.flowai/` их не поддерживает), но per-project
+  механизмом, отдельно от плагинов:
+
+  ```bash
+  cp -r examples/project-skills-hooks/.flowai /path/to/your/project/.flowai
+  ```
+
+  Перезапустить flowai в ЭТОМ проекте (не в самом flowAI). `/todo текст`
+  и грубая проверка на секреты в `post_file_edit`/`pre_commit` — см. его
+  README.
