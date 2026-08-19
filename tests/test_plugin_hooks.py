@@ -21,7 +21,7 @@ async def _passthrough_handler(request):
 @pytest.mark.asyncio
 async def test_post_file_edit_hook_runs_after_a_successful_write(monkeypatch):
     calls = []
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [lambda path, repo: calls.append((kind, path, repo))] if kind == "post_file_edit" else [])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [lambda path, repo: calls.append((kind, path, repo))] if kind == "post_file_edit" else [])
 
     middleware = plugin_hooks.PluginHookMiddleware("/repo")
     result = await middleware.awrap_tool_call(_request("write_file", {"path": "a.py"}), _passthrough_handler)
@@ -33,7 +33,7 @@ async def test_post_file_edit_hook_runs_after_a_successful_write(monkeypatch):
 @pytest.mark.asyncio
 async def test_post_file_edit_hook_does_not_run_after_a_failed_write(monkeypatch):
     calls = []
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [lambda path, repo: calls.append(path)])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [lambda path, repo: calls.append(path)])
 
     async def _failing_handler(request):
         return ToolMessage(content="boom", name="write_file", tool_call_id="1", status="error")
@@ -49,7 +49,7 @@ async def test_post_file_edit_hook_raising_does_not_break_the_tool_result(monkey
     def _boom(path, repo):
         raise RuntimeError("plugin bug")
 
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [_boom])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [_boom])
 
     middleware = plugin_hooks.PluginHookMiddleware("/repo")
     result = await middleware.awrap_tool_call(_request("edit_file", {"path": "a.py"}), _passthrough_handler)
@@ -60,7 +60,7 @@ async def test_post_file_edit_hook_raising_does_not_break_the_tool_result(monkey
 @pytest.mark.asyncio
 async def test_non_edit_tool_calls_are_not_touched_by_post_file_edit_hooks(monkeypatch):
     calls = []
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [lambda *a: calls.append(a)])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [lambda *a: calls.append(a)])
 
     middleware = plugin_hooks.PluginHookMiddleware("/repo")
     await middleware.awrap_tool_call(_request("read_file", {"path": "a.py"}), _passthrough_handler)
@@ -70,7 +70,7 @@ async def test_non_edit_tool_calls_are_not_touched_by_post_file_edit_hooks(monke
 
 @pytest.mark.asyncio
 async def test_pre_commit_hook_blocks_when_it_returns_a_reason(monkeypatch):
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [lambda cmd, repo: "secrets detected"] if kind == "pre_commit" else [])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [lambda cmd, repo: "secrets detected"] if kind == "pre_commit" else [])
     handler_called = []
 
     async def _handler(request):
@@ -87,7 +87,7 @@ async def test_pre_commit_hook_blocks_when_it_returns_a_reason(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_pre_commit_hook_allows_when_it_returns_nothing(monkeypatch):
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [lambda cmd, repo: None] if kind == "pre_commit" else [])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [lambda cmd, repo: None] if kind == "pre_commit" else [])
 
     middleware = plugin_hooks.PluginHookMiddleware("/repo")
     result = await middleware.awrap_tool_call(_request("bash", {"command": "git commit -m x"}), _passthrough_handler)
@@ -98,7 +98,7 @@ async def test_pre_commit_hook_allows_when_it_returns_nothing(monkeypatch):
 @pytest.mark.asyncio
 async def test_pre_commit_hook_not_triggered_by_unrelated_git_commands(monkeypatch):
     calls = []
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [lambda *a: calls.append(a)])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [lambda *a: calls.append(a)])
 
     middleware = plugin_hooks.PluginHookMiddleware("/repo")
     await middleware.awrap_tool_call(_request("bash", {"command": "git status"}), _passthrough_handler)
@@ -112,7 +112,7 @@ async def test_pre_commit_hook_ignores_git_commit_hidden_later_in_a_chain(monkey
     commit it was never shown, and there's no reliable way to tell "this
     chain WILL run git commit" from "this string merely mentions it"."""
     calls = []
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [lambda *a: calls.append(a)])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [lambda *a: calls.append(a)])
 
     middleware = plugin_hooks.PluginHookMiddleware("/repo")
     await middleware.awrap_tool_call(_request("bash", {"command": "echo hi && git commit -m x"}), _passthrough_handler)
@@ -127,7 +127,7 @@ async def test_pre_commit_hook_raising_does_not_block_the_commit(monkeypatch):
     def _boom(cmd, repo):
         raise RuntimeError("plugin bug")
 
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [_boom] if kind == "pre_commit" else [])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [_boom] if kind == "pre_commit" else [])
 
     middleware = plugin_hooks.PluginHookMiddleware("/repo")
     result = await middleware.awrap_tool_call(_request("bash", {"command": "git commit -m x"}), _passthrough_handler)
@@ -142,7 +142,7 @@ async def test_async_hooks_are_awaited(monkeypatch):
     async def _async_hook(path, repo):
         calls.append((path, repo))
 
-    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind: [_async_hook] if kind == "post_file_edit" else [])
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda kind, repo=None: [_async_hook] if kind == "post_file_edit" else [])
 
     middleware = plugin_hooks.PluginHookMiddleware("/repo")
     await middleware.awrap_tool_call(_request("write_file", {"path": "a.py"}), _passthrough_handler)

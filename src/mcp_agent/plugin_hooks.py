@@ -16,9 +16,15 @@ at two points every role's tool loop already passes through:
   explaining why, the same shape every other approval-style rejection in
   this codebase already uses (see ask_user_tool.py's guard middlewares).
 
-Both hook kinds accept a plain function or an async one — plugins/plugins.py
-callers already run in an async context here, so no code should need to
-know which kind a given plugin author chose to write.
+Both hook kinds accept a plain function or an async one — this middleware
+already runs in an async context, so no code should need to know which
+kind a given plugin/skill author chose to write.
+
+Hooks come from two sources, both surfaced through mcp_agent/plugins.py's
+load_hooks(hook_name, repo_path): global plugins (<repo_root>/plugins/)
+and, since repo_path is always known here, the current project's own
+<repo_path>/.flowai/hooks/*.py files — see that module's docstring for
+the full story on why the two are loaded so differently.
 """
 import re
 
@@ -55,7 +61,7 @@ class PluginHookMiddleware(AgentMiddleware):
             command = args.get("command") or ""
             first_segment = re.split(r"&&|;|\|", command, maxsplit=1)[0]
             if _GIT_COMMIT_RE.match(first_segment):
-                for hook in load_hooks("pre_commit"):
+                for hook in load_hooks("pre_commit", self._repo_path):
                     try:
                         reason = await _call_hook(hook, command, self._repo_path)
                     except Exception as e:
@@ -74,7 +80,7 @@ class PluginHookMiddleware(AgentMiddleware):
         if arg_name and isinstance(result, ToolMessage) and getattr(result, "status", "success") != "error":
             path = args.get(arg_name)
             if path:
-                for hook in load_hooks("post_file_edit"):
+                for hook in load_hooks("post_file_edit", self._repo_path):
                     try:
                         await _call_hook(hook, path, self._repo_path)
                     except Exception as e:

@@ -1086,7 +1086,7 @@ async def main() -> None:
             return
 
         if cmd and cmd != "/plugin":
-            plugin_command = plugins.load_commands().get(cmd.lstrip("/"))
+            plugin_command = plugins.load_commands(os.getcwd()).get(cmd.lstrip("/"))
             if plugin_command is not None:
                 outcome = plugin_command["func"](cmd_args, console)
                 if hasattr(outcome, "__await__"):
@@ -1095,7 +1095,7 @@ async def main() -> None:
 
         if cmd == "/plugin":
             console.print(Panel(
-                plugins.describe_installed(), title="[bright_black]plugin[/]",
+                plugins.describe_installed(os.getcwd()), title="[bright_black]plugin[/]",
                 border_style="bright_black", padding=(0, 2),
             ))
             console.print()

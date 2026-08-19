@@ -9,16 +9,16 @@ smallest form each takes:
 
 ## Install
 
-Plugins live under flowAI's data directory, not inside the flowAI repo
-itself. Copy this whole folder there:
+Plugins live in `plugins/` at the root of the flowAI checkout (tracked in
+git as an empty, always-present directory — see its `.gitkeep` — but
+anything you put inside is git-ignored). Copy this whole folder there:
 
 ```bash
-cp -r examples/plugins/hello-world ~/.local/share/flowai/plugins/hello-world
+cp -r examples/plugins/hello-world plugins/hello-world
 ```
 
-(or `$XDG_DATA_HOME/flowai/plugins/` / `$FLOWAI_DATA_DIR/plugins/` if
-either is set — see `storage.py`). Restart flowai — plugins load once at
-startup. Run `/plugin` to confirm it was picked up.
+Restart flowai — plugins load once at startup. Run `/plugin` to confirm
+it was picked up.
 
 ## Uninstall / disable
 
@@ -26,10 +26,13 @@ Delete the folder to remove it, or drop an empty `.disabled` file inside
 it to turn it off without deleting anything:
 
 ```bash
-touch ~/.local/share/flowai/plugins/hello-world/.disabled
+touch plugins/hello-world/.disabled
 ```
 
 ## Manifest format
 
-See `mcp_agent/plugins.py`'s module docstring in the flowAI source for
-the full `plugin.json` schema and exactly what each hook receives.
+See `src/mcp_agent/plugins.py`'s module docstring for the full
+`plugin.json` schema and exactly what each hook receives — and for the
+simpler, manifest-free `.flowai/skills/`/`.flowai/hooks/` convention if
+what you want is a one-off extension for a single project rather than a
+shareable plugin.

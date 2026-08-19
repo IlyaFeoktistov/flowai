@@ -1,20 +1,23 @@
-"""mcp_agent/plugins.py — a plugin is a directory under
-storage.data_dir()/plugins/<name>/ with a plugin.json manifest declaring
-some mix of slash commands, MCP servers, and hooks. Isolated from the
-real ~/.local/share/flowai/ by monkeypatching storage.data_dir(), same
-pattern as tests/test_clean.py."""
+"""mcp_agent/plugins.py — two independent layers:
+
+- Global plugins: <repo_root>/plugins/<name>/plugin.json, isolated here
+  by monkeypatching plugins._REPO_ROOT to a tmp_path (plugins_dir()
+  derives from it) rather than the real flowAI checkout.
+- Per-project skills/hooks: <repo_path>/.flowai/{skills,hooks}/*.py, no
+  manifest — isolated by using a separate tmp_path as "the project" and
+  passing it explicitly as repo_path, never touching the real cwd.
+"""
 import json
 import sys
 
 import pytest
 
-import storage
 from mcp_agent import plugins
 
 
 @pytest.fixture(autouse=True)
 def isolated_plugins_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(storage, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(plugins, "_REPO_ROOT", tmp_path)
     plugins.invalidate_cache()
     yield tmp_path
     plugins.invalidate_cache()
@@ -165,3 +168,128 @@ def test_describe_installed_lists_what_each_plugin_provides(isolated_plugins_dir
 def test_describe_installed_with_no_plugins():
     report = plugins.describe_installed()
     assert "не найдено" in report
+
+
+# ---------------------------------------------------------------------------
+# Per-project skills/hooks — <repo_path>/.flowai/{skills,hooks}/*.py
+# ---------------------------------------------------------------------------
+
+
+def test_discovers_a_project_skill_by_filename(tmp_path):
+    project = tmp_path / "some-project"
+    skills_dir = project / ".flowai" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "greet.py").write_text("def run(args, console):\n    return f'hi {args}'\n")
+
+    skills = plugins.discover_project_skills(str(project))
+    assert set(skills) == {"greet"}
+    assert skills["greet"]["func"]("world", None) == "hi world"
+
+
+def test_project_with_no_flowai_dir_has_no_skills(tmp_path):
+    assert plugins.discover_project_skills(str(tmp_path)) == {}
+
+
+def test_broken_project_skill_does_not_raise(tmp_path):
+    skills_dir = tmp_path / ".flowai" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "broken.py").write_text("this is not valid python(((\n")
+    assert plugins.discover_project_skills(str(tmp_path)) == {}
+
+
+def test_discovers_project_hooks_by_well_known_function_name(tmp_path):
+    hooks_dir = tmp_path / ".flowai" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "checks.py").write_text(
+        "def post_file_edit(path, repo_path):\n    return 'edited'\n"
+        "def pre_commit(command, repo_path):\n    return None\n"
+    )
+    edit_hooks = plugins.discover_project_hooks(str(tmp_path), "post_file_edit")
+    commit_hooks = plugins.discover_project_hooks(str(tmp_path), "pre_commit")
+    assert len(edit_hooks) == 1 and edit_hooks[0]("f.py", str(tmp_path)) == "edited"
+    assert len(commit_hooks) == 1 and commit_hooks[0]("git commit", str(tmp_path)) is None
+
+
+def test_project_hook_file_without_the_requested_function_contributes_nothing(tmp_path):
+    hooks_dir = tmp_path / ".flowai" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "checks.py").write_text("def pre_commit(command, repo_path):\n    return None\n")
+    assert plugins.discover_project_hooks(str(tmp_path), "post_file_edit") == []
+
+
+def test_two_projects_with_same_named_skill_files_do_not_collide(tmp_path):
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    for project, word in ((project_a, "a"), (project_b, "b")):
+        skills_dir = project / ".flowai" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "greet.py").write_text(f"def run(args, console):\n    return '{word}'\n")
+
+    skills_a = plugins.discover_project_skills(str(project_a))
+    skills_b = plugins.discover_project_skills(str(project_b))
+    assert skills_a["greet"]["func"](None, None) == "a"
+    assert skills_b["greet"]["func"](None, None) == "b"
+
+
+def test_load_commands_merges_global_plugins_and_project_skills(isolated_plugins_dir, tmp_path):
+    _write_plugin(
+        isolated_plugins_dir, "global-plugin",
+        {"name": "global-plugin", "version": "1.0", "commands": {"fromglobal": {"module": "c.py", "function": "run"}}},
+        files={"c.py": "def run(args, console):\n    return 'global'\n"},
+    )
+    project = tmp_path / "project"
+    skills_dir = project / ".flowai" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "fromproject.py").write_text("def run(args, console):\n    return 'project'\n")
+
+    commands = plugins.load_commands(str(project))
+    assert set(commands) == {"fromglobal", "fromproject"}
+
+
+def test_project_skill_shadows_a_global_plugin_command_of_the_same_name(isolated_plugins_dir, tmp_path):
+    _write_plugin(
+        isolated_plugins_dir, "global-plugin",
+        {"name": "global-plugin", "version": "1.0", "commands": {"hello": {"module": "c.py", "function": "run"}}},
+        files={"c.py": "def run(args, console):\n    return 'global'\n"},
+    )
+    project = tmp_path / "project"
+    skills_dir = project / ".flowai" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "hello.py").write_text("def run(args, console):\n    return 'project'\n")
+
+    commands = plugins.load_commands(str(project))
+    assert commands["hello"]["func"](None, None) == "project"
+
+
+def test_load_hooks_merges_global_plugins_and_project_hooks(isolated_plugins_dir, tmp_path):
+    _write_plugin(
+        isolated_plugins_dir, "global-plugin",
+        {"name": "global-plugin", "version": "1.0", "hooks": {"post_file_edit": ["h.py:on_edit"]}},
+        files={"h.py": "def on_edit(path, repo_path):\n    return 'global'\n"},
+    )
+    project = tmp_path / "project"
+    hooks_dir = project / ".flowai" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "h.py").write_text("def post_file_edit(path, repo_path):\n    return 'project'\n")
+
+    results = [h("f.py", str(project)) for h in plugins.load_hooks("post_file_edit", str(project))]
+    assert results == ["global", "project"]
+
+
+def test_load_commands_without_repo_path_is_global_only(isolated_plugins_dir):
+    _write_plugin(
+        isolated_plugins_dir, "global-plugin",
+        {"name": "global-plugin", "version": "1.0", "commands": {"fromglobal": {"module": "c.py", "function": "run"}}},
+        files={"c.py": "def run(args, console):\n    return 'global'\n"},
+    )
+    assert set(plugins.load_commands()) == {"fromglobal"}
+
+
+def test_describe_installed_mentions_project_skills_and_hooks(tmp_path):
+    project = tmp_path / "project"
+    skills_dir = project / ".flowai" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "greet.py").write_text("def run(args, console):\n    pass\n")
+
+    report = plugins.describe_installed(str(project))
+    assert "/greet" in report
