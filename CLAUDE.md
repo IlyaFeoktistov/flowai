@@ -22,7 +22,7 @@ install time, so imports everywhere else still read as top-level `import
 cli`/`import mcp_agent`/...).
 
 - `mcp_agent/agent.py` — legacy agentic loop (voice_mode/`pipeline_mode=off`); `mcp_agent/pipeline.py` — the default Analyzer→Planner→Coder→Verifier pipeline
-- `mcp_agent/plugins.py` — plugin loader (slash commands, MCP servers, hooks) for user-installed plugins under `~/.local/share/flowai/plugins/`; `mcp_agent/plugin_hooks.py` — the post_file_edit/pre_commit hook middleware; `examples/plugins/hello-world/` — reference plugin
+- `mcp_agent/plugins.py` — plugin loader: global plugins (slash commands, MCP servers, hooks) under `<repo root>/plugins/`, plus manifest-free per-project skills/hooks under `<open project>/.flowai/{skills,hooks}/`; `mcp_agent/plugin_hooks.py` — the post_file_edit/pre_commit hook middleware; `examples/plugins/hello-world/` and `examples/project-skills-hooks/` — reference examples; see `docs/plugins.md` for the full mechanism
 - `tools/` — tool handlers: bash_exec, file_ops, web_search, read_page, image_gen, memory
 - `ui/` — terminal UI: stream display, prompt_toolkit input, Rich console
 - `settings.py` — model selection, GPU routing (persisted in SQLite, `~/.local/share/flowai/`)
@@ -59,6 +59,17 @@ request) — see `_MEASURED_GPU_SHARE` in `ui/tui/settings.py` for the current
 measured values, and its comment for how to re-measure after changing
 `OLLAMA_NUM_CTX` or the model set. Don't state a model "fits"/"doesn't fit"
 from weight size alone.
+
+## Comment style
+
+Comments explain WHY — the goal a piece of code serves, the constraint it
+works around, the invariant it protects — not the specific debugging
+session that led to it. Don't narrate a "live run"/incident as a story
+("on 2026-08-11 the model did X, then Y happened, log showed Z..."); state
+the resulting rule/reasoning directly ("X must happen before Y, otherwise
+Z" — no need to say how that was discovered). If a concrete number or
+threshold genuinely needs a data point to justify it, give the number
+itself, not the narrative around measuring it.
 
 ## Live test runs
 

@@ -2,9 +2,8 @@
 langchain composes middleware "first = outermost" (langchain.agents.
 factory._chain_tool_call_wrappers's own docstring), so a mechanical
 rejector meant to short-circuit BEFORE the human approval prompt must sit
-earlier in the list than hitl_middleware, not later. A live run: Verifier's
-`cat > file <<EOF` self-fix attempt sat through a real 41-second approval
-wait, then got denied anyway regardless of the answer."""
+earlier in the list than hitl_middleware, not later — otherwise a command
+doomed to be rejected still makes the user approve it first for nothing."""
 from mcp_agent.agent_builder import _base_agent_middleware
 
 

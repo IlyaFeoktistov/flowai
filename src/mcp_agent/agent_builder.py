@@ -588,11 +588,9 @@ _READ_ONLY_OLLAMA_SUBCOMMANDS = {"show", "list", "ps"}
 _VERSION_QUERY_INTERPRETERS = {"node", "php", "python", "python3", "ruby", "go", "java", "perl"}
 _VERSION_QUERY_FLAGS = {"--version", "-v", "-V", "version"}
 
-# Live-run gap: Analyzer investigating a "why doesn't this work" report had
-# no way to actually SEE the failure — `go run platformer.go` was denied by
-# the version-query-only rule above, forcing a whole extra Planner/Coder
-# round just to reproduce something that should have been observable
-# during investigation. This tier allows RUNNING the project's own code to
+# Debugging a report of broken behavior requires REPRODUCING it, not just
+# reading code that might cause it — the version-query-only rule above has
+# no room for that. This tier allows RUNNING the project's own code to
 # reproduce/observe behavior — still no package installs, no `-m
 # pip`/`-c`/`-e` interpreter flags, no build tools with side-writing
 # subcommands. NOT a sandbox against what the script itself does once
@@ -841,18 +839,13 @@ def _base_agent_middleware(
     `pre_hitl` (role-specific mechanical bash-content rejectors —
     _VerifierNoSelfFixMiddleware/_InvestigationReadOnlyBashMiddleware, see
     _build_role_agent's own tail) MUST be inserted BEFORE hitl_middleware,
-    not appended after it as the pre-fix code used to: langchain's
-    middleware order is outermost-first (langchain.agents.factory.
-    _chain_tool_call_wrappers's own docstring, "first = outermost" —
-    request flows through them in list order before ever reaching the
-    tool), so a middleware appended AFTER hitl_middleware only runs once
-    hitl_middleware's own approval interrupt has already fired and been
-    answered. Live-run consequence of the old order: Verifier's `cat >
-    file <<EOF` self-fix attempt sat on a real 41-SECOND human approval
-    wait (the whole file content shown in the prompt), then got denied
-    anyway by _VerifierNoSelfFixMiddleware regardless of the answer — the
-    mechanical rejection should short-circuit before ever asking, not
-    after.
+    not appended after it: langchain's middleware order is outermost-first
+    (langchain.agents.factory._chain_tool_call_wrappers's own docstring,
+    "first = outermost" — request flows through them in list order before
+    ever reaching the tool), so a middleware appended after hitl_middleware
+    only runs once its approval interrupt has already fired and been
+    answered — a command doomed to be mechanically rejected must never
+    make the user sit through approving it first.
 
     PluginHookMiddleware is unconditional (not gated behind whether any
     plugin is even installed) — mcp_agent.plugins.load_hooks() is itself
