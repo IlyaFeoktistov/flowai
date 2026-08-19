@@ -349,22 +349,27 @@ class StreamDisplay:
     # static "... N more lines" line instead of the full dump.
     _FOLD_PREVIEW = 20
 
-    def _fill_tool_result(self, fold, trigger_text: str, markup_lines: list[str]) -> None:
+    def _fill_tool_result(self, fold, trigger_text: str, markup_lines: list[str], start_expanded: bool = False) -> None:
         """Supplies a reserved fold's real content once its tool call
         finishes (ui/app.py:_OutputControl.reserve_fold/fill_fold) — the
         fold's buffer POSITION was already fixed back at tool_start, not
         here, specifically so several tools started together each land
         their result under THEIR OWN header instead of all grouping after
         whichever header happened to print last (see _ToolFold's own
-        docstring). Even a one-line result stays fully hidden until the
-        user clicks the tool's "● phrase" line; click again to hide it
-        back. Falls back to the old static, size-capped, always-visible
-        print in legacy-terminal mode (no mouse, `fold` is None) or if the
-        caller has no fold at all (defensive — a tool_end with no matching
-        tool_start)."""
+        docstring). A plain result stays fully hidden until the user
+        clicks the tool's "● phrase" line; click again to hide it back.
+        `start_expanded` skips that — used for write_file/edit_file's diff
+        (see tool_end below) so the actual code change is visible right
+        away, not one extra click away, since that's the thing most worth
+        seeing without being asked. Falls back to the old static,
+        size-capped, always-visible print in legacy-terminal mode (no
+        mouse, `fold` is None) or if the caller has no fold at all
+        (defensive — a tool_end with no matching tool_start)."""
         if fold is not None:
             expanded = [_render_markup(ln) for ln in markup_lines]
             self._app._output.fill_fold(fold, trigger_text, expanded)
+            if start_expanded:
+                self._app._output.toggle_fold(fold)
             return
         total = len(markup_lines)
         if total <= self._FOLD_PREVIEW:
@@ -721,7 +726,7 @@ class StreamDisplay:
             if diffish:
                 diff_header, body = diffish
                 lines = [f"[bright_black]     └ {_escape_markup(diff_header)}[/]", *body]
-                self._fill_tool_result(fold, trigger_text, lines)
+                self._fill_tool_result(fold, trigger_text, lines, start_expanded=True)
             elif result:
                 lines = result.splitlines()
                 if len(lines) > 1:
