@@ -581,6 +581,7 @@ class _CompactResearchMiddleware(AgentMiddleware):
         pending: list = []
         pending_calls = 0
         digest_count = 0
+        fresh_digest_count = 0
         chunk_index = 0
 
         for group in groups:
@@ -594,12 +595,17 @@ class _CompactResearchMiddleware(AgentMiddleware):
 
             chunk_index += 1
             cache_key = _prefix_cache_key(pending)
-            digest = self._periodic_cache.get(cache_key, _MISSING)
-            if digest is _MISSING:
+            cached = self._periodic_cache.get(cache_key, _MISSING)
+            is_fresh = cached is _MISSING
+            if is_fresh:
                 digest = await _summarize_research(self._judge_model, task_frame + pending)
                 self._periodic_cache[cache_key] = digest
+            else:
+                digest = cached
             if digest:
                 digest_count += 1
+                if is_fresh:
+                    fresh_digest_count += 1
                 middle.append(HumanMessage(content=(
                     f"(Earlier read-only investigation, part {chunk_index} — "
                     "summarized below; nothing was written yet at this "
@@ -619,7 +625,12 @@ class _CompactResearchMiddleware(AgentMiddleware):
 
         if digest_count == 0:
             return await handler(request)
-        if DEBUG:
+        # Same reasoning as the write-triggered path's is_fresh guard above
+        # — a chunk already packed in an earlier round hits
+        # self._periodic_cache every time it's re-walked, so digest_count
+        # alone (cache hits included) made this print every round for as
+        # long as the SAME already-summarized chunks kept being reapplied.
+        if fresh_digest_count and DEBUG:
             console.print(
                 f"[dim][MCP-AGENT] periodic research compaction: "
                 f"{chunk_index} chunk(s) attempted -> {digest_count} "
@@ -653,13 +664,25 @@ class _CompactResearchMiddleware(AgentMiddleware):
             return await handler(request)
 
         cache_key = _prefix_cache_key(prefix)
-        digest = self._cache.get(cache_key, _MISSING)
-        if digest is _MISSING:
+        cached = self._cache.get(cache_key, _MISSING)
+        is_fresh = cached is _MISSING
+        if is_fresh:
             digest = await _summarize_research(self._judge_model, prefix)
             self._cache[cache_key] = digest
+        else:
+            digest = cached
         if not digest:
             return await handler(request)
-        if DEBUG:
+        # awrap_model_call runs before EVERY model call (LangChain resends
+        # the full history each round, and request.override doesn't persist
+        # into the stored state) — but the digest itself is cache-keyed by
+        # the exact prefix content, so once `prefix` stops changing (no NEW
+        # write yet) every later round just re-applies the SAME cached
+        # digest, no fresh judge-model call. Printing unconditionally here
+        # made every one of those reapplications look like a brand new
+        # compaction in the debug log, even though only `is_fresh` rounds
+        # actually paid for a summarization call.
+        if is_fresh and DEBUG:
             console.print(
                 f"[dim][MCP-AGENT] compacted history: {len(prefix)} messages "
                 f"-> digest ({len(digest)} chars) + {len(rest)} kept verbatim[/]"

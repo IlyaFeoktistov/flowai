@@ -57,6 +57,34 @@ async def test_failed_write_is_rejected_before_reaching_the_judge(judge_stub):
 
 
 @pytest.mark.asyncio
+async def test_earlier_failed_write_retried_and_fixed_later_in_the_round_reaches_the_judge(judge_stub):
+    # old_string mismatch on the first attempt, model re-reads and gets it
+    # right on the second edit_file call within the SAME round — live-run
+    # false positive: this used to reject the whole round outright with
+    # "nothing was actually written", before ever reaching the judge, even
+    # though the fix was genuinely applied and verified. No deterministic
+    # rule declares a round "done" — successfully clearing the failed-write
+    # trap must let it fall through to the semantic judge like any other
+    # round with no other red flags, not resolve it as instant success.
+    calls = judge_stub({"relevant": True, "reason": "looks correct"})
+    round_msgs = [
+        ai_message([{"id": "1", "name": "edit_file", "args": {"path": "x.go"}}]),
+        tool_message("edit_file", content="Error: old_string not found", status="error", tool_call_id="1"),
+        ai_message([{"id": "2", "name": "read_file", "args": {"path": "x.go"}}]),
+        tool_message("read_file", content="package main", tool_call_id="2"),
+        ai_message([{"id": "3", "name": "edit_file", "args": {"path": "x.go"}}]),
+        tool_message("edit_file", content="Edited 'x.go' (1 replacement).", tool_call_id="3"),
+        ai_message([{"id": "4", "name": "bash", "args": {"command": "go build ./..."}}]),
+        tool_message("bash", content="(no output)", tool_call_id="4"),
+    ]
+    new_tool_msgs = [m for m in round_msgs if hasattr(m, "tool_call_id")]
+    verdict_fn = make_legacy_verdict("JUDGE", "fix the bug", on_event=None)
+    v = await verdict_fn(round_msgs, new_tool_msgs, "fixed it")
+    assert v["relevant"] is True
+    assert calls  # reached the judge instead of being rejected earlier
+
+
+@pytest.mark.asyncio
 async def test_execution_failure_kind_set_when_bash_check_fails(judge_stub):
     judge_stub({"relevant": False, "reason": "unused"})
     round_msgs = [

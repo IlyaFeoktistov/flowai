@@ -164,7 +164,19 @@ async def bash(command: str, timeout: int = TIMEOUT) -> str:
     instead of retrying the same call against the default and hitting the
     same wall. For anything open-ended or likely to run past a few
     minutes, use bash_bg instead — it doesn't block this turn at
-    all."""
+    all.
+
+    There is no real controlling terminal here (stdin is /dev/null, and
+    there's no allocated tty at all) — an interactive TUI/game/ncurses-style
+    program (tcell, termbox, curses, readline prompts, ...) that opens
+    /dev/tty directly or reads live keypresses WILL fail here with
+    something like "failed to initialize terminal: open /dev/tty: no such
+    device or address" or hang waiting for input that will never arrive.
+    That failure is about THIS environment lacking a tty, not evidence the
+    program's own logic is broken — don't chase it as a code bug. Verify
+    this kind of program by building it (go build / npm run build / etc.),
+    running its own non-interactive test suite, or reading the code path
+    in question — not by trying to run the interactive program directly."""
     if not command.strip():
         return "Error: no command specified"
     effective_timeout = max(1, min(int(timeout), MAX_TIMEOUT))
@@ -358,7 +370,10 @@ async def bash_bg(command: str) -> str:
     bash_bg_check(job_id) later — there's no automatic notification
     when it's done, so don't call bash_bg_check in a tight loop right
     after starting it; do other useful work (or finish your response) and
-    check back after a plausible amount of time has passed."""
+    check back after a plausible amount of time has passed. Same no-tty
+    environment as bash — don't use this to run an interactive TUI/game
+    "in the background" expecting it to work, it will just fail the same
+    way (see bash's own docstring)."""
     if not command.strip():
         return "Error: no command specified"
 

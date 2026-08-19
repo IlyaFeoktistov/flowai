@@ -525,7 +525,28 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     # так что следующий вызов stream_chat просто перезапишет значение своим
     # — оставлять старое между ходами безопасно, тул всё равно не читает
     # его вне активного astream() этого же хода.
-    on_event = _suppress_during_subagent_tools(on_event)
+    # delegate_tokens — mutable cell, not a plain int: the wrapper below is
+    # a closure that needs to WRITE into it from inside on_event(), and the
+    # updated total needs to still be readable here after _stream_round
+    # returns (see its use further down, added into this turn's own
+    # tokens_in/tokens_out). delegate's own model calls run inside a tool
+    # call, on a completely separate LangGraph state this turn's own
+    # _stream_round never scans — without this, a delegate call that spent
+    # real tokens investigating showed up in the visible running counter as
+    # zero (see delegate_tool.py:_run_subagent_streaming's docstring).
+    delegate_tokens = {"in": 0, "out": 0}
+
+    def _track_delegate_tokens(inner_on_event):
+        async def wrapped(event: dict) -> None:
+            if event.get("type") == "tokens_add":
+                delegate_tokens["in"] += event.get("tokens_in", 0) or 0
+                delegate_tokens["out"] += event.get("tokens_out", 0) or 0
+                return
+            if inner_on_event:
+                await inner_on_event(event)
+        return wrapped
+
+    on_event = _track_delegate_tokens(_suppress_during_subagent_tools(on_event))
     _delegate_on_event.set(on_event)
 
     agent, model, judge_model, tools_by_name, read_history, compact_research = await _get_agent()
@@ -606,6 +627,11 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     )
 
     tokens_in, tokens_out, llm_calls = stage_result.tokens_in, stage_result.tokens_out, stage_result.llm_calls
+    # Any delegate() calls this turn spent tokens on their own investigation
+    # inside a separate LangGraph state stage_result never scanned — see
+    # the on_event wrapper above that accumulated them via "tokens_add".
+    tokens_in += delegate_tokens["in"]
+    tokens_out += delegate_tokens["out"]
     gen_duration_ms = stage_result.gen_duration_ms
     hit_recursion_limit = stage_result.hit_recursion_limit
     hit_generation_error = stage_result.hit_generation_error
@@ -637,6 +663,12 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
             "tokens_in_content": tokens_in_content,
             "duration_ms": int((time.monotonic() - turn_start) * 1000),
             "gen_duration_ms": gen_duration_ms,
+            # Already folded into tokens_in/tokens_out above (the real
+            # total this turn cost) — reported again here separately so
+            # the UI can show "of which delegate: N" instead of leaving
+            # delegate's share invisible inside one merged number.
+            "delegate_tokens_in": delegate_tokens["in"],
+            "delegate_tokens_out": delegate_tokens["out"],
         })
         await on_event({"type": "done"})
 

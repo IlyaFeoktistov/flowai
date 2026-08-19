@@ -916,15 +916,26 @@ class StreamDisplay:
             # для legacy-путей без этого поля (fallback на dur) — иначе
             # "скорость" в usage_screen делилась бы на 0/None.
             gen_dur = self.pending_stats.get("gen_duration_ms") or dur
+            # Already folded into tok_in/tok_out above (the real total this
+            # turn cost) — tracked separately too so delegate's share
+            # doesn't disappear into one merged number (see
+            # mcp_agent/agent.py's "tokens_add" plumbing).
+            delegate_in = self.pending_stats.get("delegate_tokens_in", 0)
+            delegate_out = self.pending_stats.get("delegate_tokens_out", 0)
             self._stats["tokens_in"]  += tok_in
             self._stats["tokens_in_content"] += tok_in_content
             self._stats["tokens_out"] += tok_out
             self._stats["duration_ms"] += dur
             self._stats["gen_duration_ms"] += gen_dur
             self._stats["messages"]   += 1
+            if delegate_in or delegate_out:
+                self._stats["delegate_tokens_in"] = self._stats.get("delegate_tokens_in", 0) + delegate_in
+                self._stats["delegate_tokens_out"] = self._stats.get("delegate_tokens_out", 0) + delegate_out
 
             elapsed = dur / 1000.0
             stats_ansi = _ai_header(tok_out, elapsed)
+            if delegate_in or delegate_out:
+                stats_ansi += f" \033[2m(из них делегат: {delegate_in + delegate_out} tok)\033[0m"
 
             if self._app is not None:
                 # Update stats footer

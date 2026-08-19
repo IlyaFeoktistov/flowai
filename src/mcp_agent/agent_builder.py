@@ -334,6 +334,20 @@ async def _build_tools(repo_path: str | None = None):
     plugin_server_names = frozenset(plugins.load_mcp_servers().keys())
     tools, plugin_tool_names = await _load_tools_resilient(client, list(connections.keys()), plugin_server_names)
     tools = [_cap_tool_output(t, TOOL_OUTPUT_CHAR_CAP) for t in tools]
+    # Snapshot of the UNWRAPPED read_file, taken before _dedupe_read_tool
+    # wraps it below with THIS role's read_history — build_delegate_tool
+    # (delegate_tool.py) needs to wrap its own copy with an INDEPENDENT
+    # read_history, not share this one. delegate runs as a fresh, isolated
+    # sub-agent conversation; if it shared this dict, an EARLIER read the
+    # outer agent already did (before delegate was ever called) would make
+    # delegate's own first read of that same path hit "(You already read
+    # `path`... reuse that earlier result)" — a stub telling it to reuse
+    # content it never actually saw, since that read happened in a
+    # DIFFERENT conversation. The model then has nothing real to reuse and
+    # answers from nothing, reading as confident analysis of a file it
+    # never actually looked at (live-run: delegate reported analysis that
+    # didn't match the file's actual current content).
+    raw_read_file_tool = next((t for t in tools if t.name == "read_file"), None)
     # read_history — {path: [key, ...]} для read_file, очищается в начале
     # каждого stream_chat (см. там же) и на каждом self-heal retry.
     read_history: dict = {}
@@ -369,7 +383,7 @@ async def _build_tools(repo_path: str | None = None):
         console.print(f"[dim][MCP-AGENT] Loaded {len(tools)} tools: {[t.name for t in tools]}[/]")
     log_event("tools_loaded", names=[t.name for t in tools])
 
-    return tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names
+    return tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, raw_read_file_tool
 
 
 async def _get_tools(repo_path: str | None = None):
@@ -879,7 +893,7 @@ def _base_agent_middleware(
 
 
 async def _build_agent(repo_path: str | None = None):
-    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names = await _get_tools(repo_path)
+    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, raw_read_file_tool = await _get_tools(repo_path)
 
     # Модель берётся из settings.py ("тяжёлая модель" — chat_model), а не из
     # отдельных SPIKE_*-переменных, как было раньше (см. историю: этот файл
@@ -1029,7 +1043,7 @@ async def _build_agent(repo_path: str | None = None):
     # списка — тот же эффект, что подтолкнул write_file быть overused —
     # здесь стоит развернуть в пользу delegate, а не оставлять его в самом
     # невыгодном месте.
-    agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools)] + tools
+    agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools, raw_read_file_tool)] + tools
 
     # Отдельный от "tools_loaded" в _build_tools лог — тот пишется ДО
     # optimized_tools/voice_mode/delegate, то есть показывает "что подняли из
@@ -1108,7 +1122,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     Никакой voice_mode-развилки здесь нет: роли пайплайна не участвуют в
     голосовом режиме — тот идёт по легаси _get_agent (пустой tools=[],
     отдельный _build_voice_system_prompt)."""
-    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names = await _get_tools(repo_path)
+    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, _raw_read_file_tool = await _get_tools(repo_path)
 
     MAIN_MODEL = settings.get("chat_model")
 

@@ -131,6 +131,12 @@ _STATS: dict = {
     "duration_ms": 0,
     "gen_duration_ms": 0,
     "tools_called": 0,
+    # Already folded into tokens_in/tokens_out above — kept separately too
+    # so delegate's own share of a turn's cost is visible on its own
+    # instead of disappearing into one merged number (ui/stream.py's
+    # flush_stats).
+    "delegate_tokens_in": 0,
+    "delegate_tokens_out": 0,
 }
 
 

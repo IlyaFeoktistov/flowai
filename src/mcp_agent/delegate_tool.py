@@ -44,6 +44,7 @@ from mcp_agent.self_heal import (
     _leaked_tool_call_syntax,
     _parse_leaked_tool_calls,
 )
+from mcp_agent.tool_wrappers import _dedupe_read_tool
 import settings
 from ui.console import console
 
@@ -197,7 +198,7 @@ def _suppress_during_subagent_tools(on_event):
     return wrapped
 
 
-async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -> dict:
+async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -> tuple[dict, int, int]:
     """Замена sub_agent.ainvoke(...) с тем же возвращаемым значением (dict с
     ключом "messages"), но эмитящая tool_start/tool_end наружу через
     current_on_event ПО МЕРЕ того, как сабагент реально вызывает свои тулы —
@@ -209,14 +210,30 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
     answer_start во внешний stream_mode=["values","messages"] при *любом*
     вызове сабагента на том же shared model — использование astream здесь
     для ЗНАЧЕНИЙ графа, не для токенов, не трогает эту утечку сильнее, чем
-    раньше делал ainvoke."""
+    раньше делал ainvoke.
+
+    Возвращает (final_state, tokens_in, tokens_out) — the sub-agent's OWN
+    model calls happen entirely inside this astream loop, invisible to the
+    outer stream_chat's own tokens_in/tokens_out accounting (that scans ITS
+    OWN agent.astream() messages — delegate's internal AIMessages live in a
+    completely separate graph/state, so a delegate call that burned real
+    tokens investigating showed up in the visible running token count as
+    zero). Every AIMessage's usage_metadata (populated by the underlying
+    ChatOllama call, same field the outer loop already reads) is summed
+    here; delegate() below forwards the total to the outer loop via a
+    "tokens_add" event on the same current_on_event channel already used
+    for tool_start/tool_end."""
     on_event = current_on_event.get()
     prev_len = 0
     final_state: dict = {}
+    tokens_in = tokens_out = 0
     async for state in sub_agent.astream({"messages": conversation}, config, stream_mode="values"):
         final_state = state
         msgs = state.get("messages") or []
         for m in msgs[prev_len:]:
+            if isinstance(m, AIMessage) and m.usage_metadata:
+                tokens_in += m.usage_metadata.get("input_tokens", 0) or 0
+                tokens_out += m.usage_metadata.get("output_tokens", 0) or 0
             if on_event is None:
                 continue
             if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
@@ -233,15 +250,39 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
                     "result": _tool_text(m.content)[:2000],
                 })
         prev_len = len(msgs)
-    return final_state
+    return final_state, tokens_in, tokens_out
 
 
-def build_delegate_tool(model, tools: list):
+def build_delegate_tool(model, tools: list, raw_read_file_tool=None):
     """Собирает delegate как closure над уже поднятыми model/tools этой
     сессии — никакой второй подгрузки весов, никакого нового MCP-сервера.
     Вызывается из agent_builder._build_agent, где и model, и tools уже
-    есть в области видимости."""
+    есть в области видимости.
+
+    raw_read_file_tool — read_file ДО того, как agent_builder.py обернул
+    его в _dedupe_read_tool с ОБЩИМ read_history внешней роли. Заново
+    оборачиваем его тут с СОБСТВЕННЫМ, изолированным read_history —
+    delegate — свежий, отдельный sub-agent разговор; если бы он делил
+    read_history с внешней ролью, более раннее чтение файла, сделанное
+    ВНЕШНИМ агентом (до вызова delegate), заставило бы первое же чтение
+    ТОГО ЖЕ пути внутри delegate попасть в "(You already read `path`...
+    reuse that earlier result)" — а реального результата, который можно
+    бы переиспользовать, у delegate нет: то чтение было в ДРУГОМ
+    разговоре. Модели тогда нечем ответить кроме как выдумать анализ,
+    выглядящий как разбор файла, который она на самом деле не видела."""
+    # Cleared at the start of every delegate() call below (same convention
+    # as the outer role's read_history.clear() at the start of every
+    # stream_chat) — otherwise this would just move the SAME cross-
+    # conversation leak one level down: a SECOND delegate() call later in
+    # the same session would hit "(You already read...)" stubs left by the
+    # FIRST call's own, now-finished conversation. delegate() calls are
+    # strictly sequential (module docstring), never concurrent, so
+    # clearing on entry is safe.
+    own_read_history: dict = {}
     delegate_tools = [t for t in tools if t.name in _ALLOWED_TOOLS]
+    if raw_read_file_tool is not None:
+        wrapped_read_file = _dedupe_read_tool(raw_read_file_tool, own_read_history)
+        delegate_tools = [wrapped_read_file if t.name == "read_file" else t for t in delegate_tools]
     delegate_tools_by_name = {t.name: t for t in delegate_tools}
     sub_agent = create_agent(
         model,
@@ -270,8 +311,22 @@ def build_delegate_tool(model, tools: list):
         mutations) and can't ask the user anything — write `task` as a
         complete, self-contained question with whatever context it needs;
         it does not see the rest of this conversation."""
+        own_read_history.clear()
         conversation = [HumanMessage(content=task)]
         final_text = ""
+        tokens_in_total = tokens_out_total = 0
+
+        async def _emit_token_usage() -> None:
+            # Reported ONCE, right before delegate() actually returns —
+            # not per-round — so the outer loop's running counter jumps by
+            # this call's real total exactly when the visible tool_end for
+            # "delegate" fires, not piecemeal mid-investigation.
+            on_event = current_on_event.get()
+            if on_event and (tokens_in_total or tokens_out_total):
+                await on_event({
+                    "type": "tokens_add",
+                    "tokens_in": tokens_in_total, "tokens_out": tokens_out_total,
+                })
 
         # До _MAX_LEAK_RECOVERIES+1 попыток: каждая — свежий invoke графа со
         # своим ПОЛНЫМ recursion_limit'ом (не растягиваем один и тот же
@@ -284,8 +339,20 @@ def build_delegate_tool(model, tools: list):
                 "recursion_limit": DELEGATE_RECURSION_LIMIT,
             }
             try:
-                result = await _run_subagent_streaming(sub_agent, conversation, config)
+                result, round_tokens_in, round_tokens_out = await _run_subagent_streaming(
+                    sub_agent, conversation, config
+                )
+                tokens_in_total += round_tokens_in
+                tokens_out_total += round_tokens_out
             except GraphRecursionError:
+                # Steps already spent before hitting the limit still cost
+                # real tokens — GraphRecursionError aborts _run_subagent_
+                # streaming before it returns its (partial) totals, so
+                # this one attempt's usage is lost here; accepted as a
+                # rare-path gap rather than restructuring around a
+                # mid-stream partial-total capture for an already-failing
+                # call.
+                await _emit_token_usage()
                 return (
                     f"Sub-agent used its full {DELEGATE_RECURSION_LIMIT}-step "
                     "budget without reaching a final answer. Either delegate "
@@ -298,8 +365,10 @@ def build_delegate_tool(model, tools: list):
             final_text = _tool_text(final.content) if isinstance(final, AIMessage) else ""
 
             if not final_text:
+                await _emit_token_usage()
                 return "Sub-agent finished without producing a final answer."
             if not _leaked_tool_call_syntax(final_text):
+                await _emit_token_usage()
                 return final_text
 
             # Модель слила вызов тула текстом вместо настоящего structured
@@ -336,6 +405,7 @@ def build_delegate_tool(model, tools: list):
                 )),
             ]
 
+        await _emit_token_usage()
         return (
             "Sub-agent kept generating malformed tool-call markup instead of "
             "real tool calls after multiple recovery attempts — giving up. "

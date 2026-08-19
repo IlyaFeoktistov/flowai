@@ -32,6 +32,7 @@ from mcp_agent.self_heal import (
     _git_status_reports_changes,
     _has_diff_evidence,
     _has_execution_evidence,
+    _has_successful_write,
     _has_truncated_output,
     _retried_after_rejection,
     _semantic_check,
@@ -71,7 +72,17 @@ def make_legacy_verdict(judge_model, task_text: str, on_event):
             return await _judge([], False, round_final_text)
 
         failed_writes = _failed_write_messages(new_tool_msgs)
-        if failed_writes:
+        # _has_successful_write guard — same fix as coder_verdict/
+        # quick_fix_verdict's shared _write_stage_outcome (self_heal.py):
+        # an earlier edit_file/write_file attempt that failed (e.g.
+        # old_string not found) and was then retried and got RIGHT later
+        # in this same round must not fail the whole round — only reject
+        # here when EVERY write attempt failed. Without this, a round that
+        # actually applied the fix (and even verified it with a real bash
+        # run) still got rejected with "nothing was actually written",
+        # because an earlier, since-corrected mismatch was the only thing
+        # this check looked at.
+        if failed_writes and not _has_successful_write(new_tool_msgs):
             return {
                 "relevant": False,
                 "reason": (
