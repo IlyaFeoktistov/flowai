@@ -1,14 +1,21 @@
 """
 Полный, всегда включённый (не под DEBUG) лог происходящего за один запуск
-flowai — один JSONL-файл на процесс в системном temp, для быстрого чтения
-человеком/другим инструментом (grep/tail/cat) вместо ad-hoc SQL-запросов к
-episodic_messages или скроллбека терминала, где сейчас теряются DEBUG-принты
+flowai — один JSONL-файл на процесс, для быстрого чтения человеком/другим
+инструментом (grep/tail/cat) вместо ad-hoc SQL-запросов к episodic_messages
+или скроллбека терминала, где сейчас теряются DEBUG-принты
 (console.print(f"[dim][...] ...")) из mcp_agent/agent.py и self_heal.py.
 
-Файл в /tmp, а не в постоянном data_dir() — это диагностический выхлоп, а не
-данные, которые нужно хранить бессрочно; retention (_prune_old_logs) чистит
-его сам, той же логикой, что уже применена к MCP-подпроцессным логам
-(config.py:_LOG_DIR), но с добавленным TTL, которого там нет.
+storage.data_dir() (~/.local/share/flowai/), не системный temp — живой
+инцидент, который разбирался именно ПО ЭТОМУ логу (2026-08-19, "found 0
+vulnerabilities"/pydantic ValidationError в mcp/client/stdio), потребовал
+вернуться к нему НА СЛЕДУЮЩИЙ день после перезагрузки: /tmp пережил её
+только потому, что машину в тот раз не перезагружали, а не потому, что на
+это можно полагаться (systemd's systemd-tmpfiles-clean обычно чистит /tmp
+при каждом старте, retention здесь ни при чём — TTL защищает от
+накопления, а не от исчезновения при перезагрузке). data_dir() — тот же
+каталог, что уже хранит flowai.db, переживает перезагрузки по определению
+и не требует root (в отличие от /var/log, куда обычный пользователь
+писать не может — 0775 root:syslog на большинстве систем).
 
 Использует mcp_agent.snapshots._SESSION_ID (уже существующий per-process
 uuid, см. его собственный докстринг) вместо отдельного идентификатора —
@@ -17,13 +24,13 @@ uuid, см. его собственный докстринг) вместо от�
 """
 import json
 import os
-import tempfile
 import time
 from datetime import datetime
 
+import storage
 from mcp_agent.snapshots import _SESSION_ID
 
-_LOG_DIR = os.path.join(tempfile.gettempdir(), "flowai-run-logs")
+_LOG_DIR = str(storage.data_dir() / "run-logs")
 _LOG_PATH = os.path.join(_LOG_DIR, f"{_SESSION_ID}.jsonl")
 
 _RETENTION_DAYS = 3
@@ -34,9 +41,8 @@ _pruned_once = False
 def _prune_old_logs() -> None:
     """Раз за процесс (перед первой записью) удаляет файлы старше
     _RETENTION_DAYS — единственный способ, которым эти логи вообще
-    исчезают, ни ОС, ни что-либо другое в проекте их не подчищает (в
-    отличие от файлов /tmp, которые переживают до перезагрузки, а не
-    "какое-то время")."""
+    исчезают: data_dir() постоянный (переживает перезагрузки), ни ОС, ни
+    что-либо другое в проекте его не подчищает само."""
     global _pruned_once
     if _pruned_once:
         return
@@ -58,7 +64,7 @@ def _prune_old_logs() -> None:
 def log_event(event_kind: str, **fields) -> None:
     """Дописывает одну JSON-строку. Никогда не поднимает исключение наружу —
     диагностический сайд-канал не должен ронять реальный ход работы агента
-    из-за, например, заполненного /tmp.
+    из-за, например, заполненного диска.
 
     Параметр называется event_kind, а не kind: verdict-словари и событие
     self_heal_reject уже несут свой собственный содержательный ключ "kind"

@@ -16,6 +16,38 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
+# Живой инцидент: где-то посреди хода на экране мелькала и тут же
+# пропадала (следующая же перерисовка TUI её стирала) панель с трейсбеком
+# из mcp/client/stdio/__init__.py:stdout_reader — pydantic не смог
+# разобрать одну строку с сырого stdout уже открытого MCP-сервера как
+# JSONRPCMessage (какой-то сторонний процесс написал туда простой текст).
+# Сам stdout_reader это переживает штатно (ловит исключение, шлёт его
+# дальше по read_stream, не роняя цикл) — но делает это через
+# logger.exception(...), а корневой logging этого процесса оказывается
+# сконфигурирован НЕ нами: mcp_agent.servers.music_server (импортируется
+# напрямую сюда для /music, /music_gen — см. его докстринг) на своём
+# ЖЕ импорте создаёт `FastMCP("music")`, чей __init__ безусловно зовёт
+# configure_logging() -> logging.basicConfig(handlers=[RichHandler(
+# console=Console(stderr=True), ...)]) — собственный Rich Console
+# FastMCP, пишущий прямо в СЫРОЙ stderr, в обход ui/console.py's
+# _AppProxy (которая рендерит в панель FlowAIApp, а не в терминал
+# напрямую) — отсюда и "мелькнуло и пропало": prompt_toolkit просто
+# перерисовал поверх настоящего терминального вывода на следующем кадре.
+# logging.basicConfig() — no-op, если у root logger уже ЕСТЬ хендлер (нет
+# force=True ни у нас, ни у FastMCP) — регистрируем СВОЙ первым, ещё до
+# music_server.py и любого другого места, которое могло бы создать
+# FastMCP(...) в этом же процессе, так что музыкин configure_logging()
+# дальше ничего не переопределяет. RichHandler на НАШЕМ console (та же
+# консоль, что и весь остальной вывод приложения) — та же fastmcp'шная
+# красивая раскладка трейсбека, но теперь она реально попадает в чат, а
+# не в обход него.
+from rich.logging import RichHandler
+from ui.console import console  # noqa: E402 (re-imported again below alongside safe_write/connect_app — harmless, same cached module)
+logging.basicConfig(
+    level=logging.WARNING, format="%(message)s",
+    handlers=[RichHandler(console=console, rich_tracebacks=True, show_time=False, show_path=False)],
+)
+
 # httpx логирует каждый HTTP-запрос на уровне INFO обычным stdlib logging —
 # при первой загрузке модели, вызванной ПРЯМО В ЭТОМ процессе (/gen, /music,
 # /music_gen — в отличие от MCP-тулов, у которых stdout/stderr подпроцесса
