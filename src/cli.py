@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import traceback
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -73,6 +74,7 @@ from gen3d.model_refs import resolve_model
 from mcp_agent.servers.music_server import generate_music
 from ui.app import FlowAIApp
 from ui.console import console, safe_write, connect_app
+from ui.error_reporting import install_background_exception_handler
 from ui.header import print_header
 from ui.images import get_clipboard_image, load_image_file, store_image, resolve_image_paths, clear_store as _clear_images
 from ui.paste_store import resolve_pastes, clear_store as _clear_pastes
@@ -291,6 +293,7 @@ async def _reload_recap(app: FlowAIApp) -> None:
 async def main() -> None:
     app = FlowAIApp()
     connect_app(app)
+    install_background_exception_handler()
     connect_confirm_app(app)
     print_header(app)
 
@@ -1331,6 +1334,16 @@ def run() -> None:
         asyncio.run(main())
     except (KeyboardInterrupt, asyncio.CancelledError):
         sys.stdout.write("\n")
+    except Exception:
+        # main() itself died (not the per-turn try/except further up, which
+        # already handles the common case of a chat turn failing without
+        # taking the whole app down with it) — the TUI is gone by this
+        # point, so there's no output pane left to print into; log_event
+        # still gives it a permanent record instead of just a raw traceback
+        # that scrolls off and is gone once the terminal is closed.
+        detail = traceback.format_exc()
+        log_event("fatal_exception", detail=detail)
+        sys.stdout.write(f"\n{detail}\n[flowai] Приложение упало — подробности выше и в логе сессии (/tmp/flowai-run-logs/).\n")
 
 
 if __name__ == "__main__":
