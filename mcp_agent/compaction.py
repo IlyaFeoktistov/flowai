@@ -138,6 +138,7 @@ stage_runner.py:run_stage (реактивный перехват РЕАЛЬНО�
 """
 import hashlib
 import json
+from typing import Any
 
 import settings
 from langchain.agents.middleware import AgentMiddleware
@@ -277,6 +278,22 @@ def _estimate_message_tokens(m) -> int:
     return n // 4
 
 
+# id(tool) -> (tool, token_count) — _needs_compaction runs before EVERY
+# model call in a stage's ReAct loop (_CompactResearchMiddleware.
+# awrap_model_call), but the bound tool list is the same fixed
+# `agent_tools` set once per (role, tool_names) in _build_role_agent and
+# reused for every round until _role_agent_cache evicts it — re-deriving
+# each tool's json_schema()/json.dumps() from scratch on every single
+# round was pure repeated work for a value that can't have changed since
+# the previous round. StructuredTool isn't hashable (pydantic model, not
+# frozen) so the tool itself can't be a dict key directly; keying on
+# id(tool) alone would risk a GC'd-and-reused id silently matching an
+# unrelated later object once a role-agent gets evicted, so the cached
+# tuple keeps a strong ref to the original tool and an `is` check on
+# lookup treats an id collision as a miss instead of a wrong hit.
+_tool_token_cache: dict[int, tuple[Any, int]] = {}
+
+
 def _estimate_tool_tokens(tool) -> int:
     """Same chars//4 heuristic as _estimate_message_tokens, for one bound
     tool's OWN schema (name + description + parameters) — this is real
@@ -285,12 +302,17 @@ def _estimate_tool_tokens(tool) -> int:
     `messages` entry. `tool` here is whatever LangChain's ModelRequest.tools
     holds — usually BaseTool instances, but accept a plain dict too (an
     already-converted OpenAI-style tool spec) since middleware ordering
-    isn't guaranteed to leave that conversion for later."""
+    isn't guaranteed to leave that conversion for later — the dict case is
+    rare enough (and dicts aren't hashable anyway) that it's never cached,
+    just recomputed each time."""
     if isinstance(tool, dict):
         try:
             return len(json.dumps(tool, ensure_ascii=False)) // 4
         except TypeError:
             return 50
+    cached = _tool_token_cache.get(id(tool))
+    if cached is not None and cached[0] is tool:
+        return cached[1]
     n = len(getattr(tool, "name", "") or "") + len(getattr(tool, "description", "") or "")
     schema = getattr(tool, "args_schema", None)
     if schema is not None:
@@ -298,7 +320,9 @@ def _estimate_tool_tokens(tool) -> int:
             n += len(json.dumps(schema.model_json_schema(), ensure_ascii=False))
         except Exception:
             pass
-    return n // 4
+    result = n // 4
+    _tool_token_cache[id(tool)] = (tool, result)
+    return result
 
 
 def _needs_compaction(messages: list, system_message=None, tools=None) -> bool:

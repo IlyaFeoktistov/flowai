@@ -11,6 +11,7 @@ judge-модели (Ollama) и собирает всё через create_agent.
 chat_model (voice_mode) без пересоздания подпроцессов — см. docstring
 _get_agent/_get_tools ниже.
 """
+import asyncio
 import os
 import re
 
@@ -295,14 +296,24 @@ async def _load_tools_resilient(client: MultiServerMCPClient, server_names: list
     """client.get_tools() без server_name гребёт ВСЕ сервера через один
     asyncio.gather() без return_exceptions — если хотя бы один не
     поднимается (например npx недоступен), падает вся пачка и агент
-    остаётся без единого тула. Грузим по серверам отдельно: один сбойный
-    сервер лишает нас только своих тулов, а не всех остальных."""
+    остаётся без единого тула. Грузим по серверам ОТДЕЛЬНЫМИ get_tools()
+    вызовами — один сбойный сервер лишает нас только своих тулов, а не
+    всех остальных — но всё равно ПАРАЛЛЕЛЬНО через свой asyncio.gather с
+    return_exceptions=True: изоляция сбоя не требует последовательности,
+    9-12 независимых подпроцессов (fetch/bash/web_search/memory/knowledge/
+    rag/file_ops/vision/lsp/+gen*) не имеют друг с другом никакой data
+    dependency — раньше каждый спавн+stdio-handshake+schema-fetch ждал
+    предыдущий целиком, хотя мог идти рядом с ним."""
+    results = await asyncio.gather(
+        *(client.get_tools(server_name=name) for name in server_names),
+        return_exceptions=True,
+    )
     tools = []
-    for name in server_names:
-        try:
-            tools.extend(await client.get_tools(server_name=name))
-        except Exception as e:
-            console.print(f"[yellow]⚠ MCP-сервер '{name}' не запустился — его инструменты недоступны: {e}[/]")
+    for name, result in zip(server_names, results):
+        if isinstance(result, Exception):
+            console.print(f"[yellow]⚠ MCP-сервер '{name}' не запустился — его инструменты недоступны: {result}[/]")
+        else:
+            tools.extend(result)
     return tools
 
 
