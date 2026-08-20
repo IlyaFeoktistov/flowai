@@ -14,6 +14,7 @@ MCP-серверы из mcp_agent/config.py).
 """
 import os
 import shutil
+import subprocess
 
 import expert_streaming
 import settings
@@ -67,25 +68,88 @@ def _check_chat_model(installed_models: list | None) -> _Check:
     )
 
 
-async def _check_live_gpu_split() -> _Check:
-    """Аналог живого `ollama ps`, на который и так постоянно ссылаются
-    комментарии в model_config.py/ui/tui/settings.py — вместо того чтобы
-    просить пользователя вызвать это руками, отчёт делает это сам."""
+def _nvidia_smi_gpu_memory() -> tuple[float | None, float | None]:
+    """(used_gb, total_gb) для GPU ЦЕЛИКОM, не по процессам — WSL-проходной
+    nvidia-smi этого пользователя (см. CLAUDE.md: Linux .../WSL2) на живой
+    проверке не поддерживает --query-compute-apps (код возврата 0, но ни
+    одной строки), так что разбивка по pid недоступна в его реальном
+    окружении, а не просто "не обработан этот случай" — тотальный
+    used/total — максимум детализации, реально доступный здесь. None, None
+    если nvidia-smi не найден/не ответил."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None, None
+    try:
+        used_mib, total_mib = r.stdout.strip().splitlines()[0].split(",")
+        return int(used_mib.strip()) / 1024, int(total_mib.strip()) / 1024
+    except ValueError:
+        return None, None
+
+
+async def _check_loaded_models() -> _Check:
+    """Сколько инстансов нейросетей сейчас реально резидентны и сколько
+    каждый занимает — не только то, что видно в `ollama ps`. Это НЕ
+    покрывает expert-streaming (свой отдельный процесс llama.cpp, целиком
+    вне демона Ollama, см. expert_streaming.py) — при
+    expert_streaming_enabled=ВКЛ именно он держит чат-модель, а
+    `ollama ps` в этот момент может показывать только nomic-embed-text
+    (эмбеддинги всегда идут через обычный Ollama-демон, см. rag/
+    embeddings.py) и вообще не упоминать чат-модель, из-за чего "сколько
+    моделей сейчас загружено" по одному только `ollama ps` было бы
+    заниженным именно в дефолтной конфигурации этого проекта (см.
+    CLAUDE.md про expert_streaming_enabled=ВКЛ по умолчанию).
+
+    На этом железе (5.9GB VRAM) легко не заметить, что резидентны сразу
+    два инстанса — ровно то, что раньше приводило к дублирующей загрузке
+    модели (см. историю про "нельзя запускать вторую модель рядом")."""
+    ollama_models = []
+    ollama_error = None
     try:
         import ollama
         client = ollama.AsyncClient(host=_ollama_host())
         resp = await client.ps()
+        ollama_models = resp.models
     except Exception as e:
-        return _Check("Загруженные модели (VRAM)", _WARN, f"не удалось получить `ollama ps`: {e}")
-    if not resp.models:
-        return _Check("Загруженные модели (VRAM)", _WARN, "ни одна модель сейчас не резидентна в Ollama")
-    parts = []
-    for m in resp.models:
+        ollama_error = str(e)
+
+    entries = []
+    ollama_vram_gb = 0.0
+    for m in ollama_models:
         size = m.size or 0
         size_vram = m.size_vram or 0
         gpu_pct = round(size_vram / size * 100) if size else 0
-        parts.append(f"{m.model}: {size / (1024**3):.1f}GB · {gpu_pct}% GPU")
-    return _Check("Загруженные модели (VRAM)", _OK, "; ".join(parts))
+        ollama_vram_gb += size_vram / (1024 ** 3)
+        entries.append(f"{m.model}: {size / (1024**3):.1f}GB · {gpu_pct}% GPU (ollama)")
+
+    try:
+        es_state = expert_streaming.live_state()
+    except Exception:
+        es_state = None
+    if es_state:
+        entries.append(f"{es_state.get('model_tag')}: expert-streaming, pid {es_state.get('pid')}, порт {es_state.get('port')}")
+
+    if not entries:
+        if ollama_error:
+            return _Check("Резидентные модели", _WARN, f"не удалось получить `ollama ps`: {ollama_error}")
+        return _Check("Резидентные модели", _WARN, "ни одна модель сейчас не резидентна")
+
+    summary = f"{len(entries)} активно: " + "; ".join(entries)
+    used_gb, total_gb = _nvidia_smi_gpu_memory()
+    if used_gb is not None:
+        summary += f" · GPU занято {used_gb:.1f}/{total_gb:.1f}GB"
+        unaccounted_gb = used_gb - ollama_vram_gb
+        if es_state and unaccounted_gb > 0.1:
+            summary += (
+                f" (~{unaccounted_gb:.1f}GB из них похоже на expert-streaming — "
+                "разбивки по процессам nvidia-smi здесь не даёт)"
+            )
+    return _Check("Резидентные модели", _OK, summary)
 
 
 def _check_expert_streaming() -> _Check | None:
@@ -167,7 +231,7 @@ async def run_doctor() -> str:
     checks = [
         ollama_check,
         _check_chat_model(installed_models),
-        await _check_live_gpu_split(),
+        await _check_loaded_models(),
         _check_expert_streaming(),
         _check_data_dir(),
         _check_mcp_servers(),

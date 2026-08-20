@@ -322,6 +322,25 @@ def is_running() -> bool:
     return _proc is not None and _proc.poll() is None
 
 
+def live_state() -> dict | None:
+    """The currently-serving instance's own recorded {pid, port, model_tag,
+    num_ctx, show_thinking} — regardless of WHETHER this flowai process
+    started it or it was adopted from another one (is_running() only ever
+    reflects the former, see its own one-liner above — doctor.py wants the
+    real answer either way, not just "did I personally launch it").
+    None if there's no state file, it's unreadable, or its pid is no
+    longer alive (a stale leftover from a server that already exited
+    without cleaning up after itself, e.g. killed -9)."""
+    try:
+        state = json.loads(_STATE_PATH.read_text())
+    except (OSError, ValueError):
+        return None
+    pid = state.get("pid")
+    if not isinstance(pid, int) or not _pid_alive(pid):
+        return None
+    return state
+
+
 def _write_state(pid: int, port: int, model_tag: str, num_ctx: int, show_thinking: bool) -> None:
     try:
         _STATE_PATH.write_text(json.dumps({
