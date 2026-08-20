@@ -24,6 +24,20 @@ UnitStarter) агент может закончить шаги ещё до го�
 HumanInTheLoopMiddleware/ask_user: ни один тул в его наборе не требует
 approval, а сам он не может ничего спросить у пользователя — задача (task)
 должна быть самодостаточной, сабагент не видит остального разговора.
+
+compact_research (_CompactResearchMiddleware, mcp_agent/compaction.py) —
+без неё длинное расследование (много раундов read_file/grep_search/
+search_code_semantic) накапливает историю, которую НИКТО не сжимает: у
+внешнего агента compact_research есть, у сабагента не было. Многораундовое
+расследование без неё реально может упереться в 400 "request exceeds the
+available context size" ещё до готового ответа. Тот же judge_model, что и
+у внешнего агента (передаётся в build_delegate_tool) — не отдельная
+загрузка весов. is_context_overflow_error (та же детекция, что
+agent.py:_stream_round) — страховка НА СЛУЧАЙ, если даже компакция не
+спасла (см. delegate() ниже): raw sticky-контент (read_file/grep_search/
+glob_search — см. compaction.py:STICKY_TOOL_NAMES) компакция принципиально
+не трогает, так что чисто от нескольких больших честно прочитанных файлов
+упереться в потолок всё ещё можно.
 """
 import uuid
 from contextvars import ContextVar
@@ -36,6 +50,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 
 from mcp_agent.ask_user_tool import _ToolErrorGuardMiddleware
+from mcp_agent.compaction import _CompactResearchMiddleware, _summarize_research, is_context_overflow_error
 from mcp_agent.message_utils import _DedupeToolResultsMiddleware, _tool_text
 from mcp_agent.model_config import DEBUG, DELEGATE_RECURSION_LIMIT
 from mcp_agent.roles import LEGACY_INVESTIGATION_TOOL_NAMES
@@ -199,7 +214,7 @@ def _suppress_during_subagent_tools(on_event):
     return wrapped
 
 
-async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -> tuple[dict, int, int]:
+async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -> tuple[dict, int, int, bool]:
     """Замена sub_agent.ainvoke(...) с тем же возвращаемым значением (dict с
     ключом "messages"), но эмитящая tool_start/tool_end наружу через
     current_on_event ПО МЕРЕ того, как сабагент реально вызывает свои тулы —
@@ -212,6 +227,16 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
     вызове сабагента на том же shared model — использование astream здесь
     для ЗНАЧЕНИЙ графа, не для токенов, не трогает эту утечку сильнее, чем
     раньше делал ainvoke.
+
+    Возвращает (final_state, tokens_in, tokens_out, hit_recursion_limit).
+    GraphRecursionError ловится ЗДЕСЬ, а не в delegate() (как раньше) —
+    LangGraph поднимает его НА СТАРТЕ шага, который превысил бы лимит (тот
+    же факт, что agent.py:_stream_round уже использует для внешнего
+    агента), то есть final_state к этому моменту уже содержит ПОЛНОЕ
+    состояние всех успешно завершённых шагов — если ловить исключение
+    снаружи этой функции, эти накопленные messages терялись бы вместе с
+    ним, и delegate() не смог бы попросить модель подвести итог того, что
+    уже нашлось (см. delegate() ниже).
 
     Возвращает (final_state, tokens_in, tokens_out) — the sub-agent's OWN
     model calls happen entirely inside this astream loop, invisible to the
@@ -228,39 +253,47 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
     prev_len = 0
     final_state: dict = {}
     tokens_in = tokens_out = 0
-    async for state in sub_agent.astream({"messages": conversation}, config, stream_mode="values"):
-        final_state = state
-        msgs = state.get("messages") or []
-        for m in msgs[prev_len:]:
-            if isinstance(m, AIMessage) and m.usage_metadata:
-                tokens_in += m.usage_metadata.get("input_tokens", 0) or 0
-                tokens_out += m.usage_metadata.get("output_tokens", 0) or 0
-            if on_event is None:
-                continue
-            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-                for tc in m.tool_calls:
+    hit_recursion_limit = False
+    try:
+        async for state in sub_agent.astream({"messages": conversation}, config, stream_mode="values"):
+            final_state = state
+            msgs = state.get("messages") or []
+            for m in msgs[prev_len:]:
+                if isinstance(m, AIMessage) and m.usage_metadata:
+                    tokens_in += m.usage_metadata.get("input_tokens", 0) or 0
+                    tokens_out += m.usage_metadata.get("output_tokens", 0) or 0
+                if on_event is None:
+                    continue
+                if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+                    for tc in m.tool_calls:
+                        await on_event({
+                            "type": "tool_start",
+                            "name": f"delegate → {tc['name']}",
+                            "args": tc.get("args", {}),
+                            "id": tc.get("id"),
+                        })
+                elif isinstance(m, ToolMessage):
                     await on_event({
-                        "type": "tool_start",
-                        "name": f"delegate → {tc['name']}",
-                        "args": tc.get("args", {}),
-                        "id": tc.get("id"),
+                        "type": "tool_end",
+                        "name": f"delegate → {m.name}",
+                        "result": _tool_text(m.content)[:2000],
+                        "id": m.tool_call_id,
                     })
-            elif isinstance(m, ToolMessage):
-                await on_event({
-                    "type": "tool_end",
-                    "name": f"delegate → {m.name}",
-                    "result": _tool_text(m.content)[:2000],
-                    "id": m.tool_call_id,
-                })
-        prev_len = len(msgs)
-    return final_state, tokens_in, tokens_out
+            prev_len = len(msgs)
+    except GraphRecursionError:
+        hit_recursion_limit = True
+    return final_state, tokens_in, tokens_out, hit_recursion_limit
 
 
-def build_delegate_tool(model, tools: list, raw_read_file_tool=None):
+def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model=None):
     """Собирает delegate как closure над уже поднятыми model/tools этой
     сессии — никакой второй подгрузки весов, никакого нового MCP-сервера.
-    Вызывается из agent_builder._build_agent, где и model, и tools уже
-    есть в области видимости.
+    Вызывается из agent_builder._build_agent, где и model, judge_model и
+    tools уже есть в области видимости. judge_model — тот же самый,
+    которым внешний агент судит свои self-heal раунды (_build_chat_model
+    с format="json", reasoning=False), не отдельная модель под сабагент —
+    используется здесь ТОЛЬКО для _CompactResearchMiddleware, той же
+    комбинации, что уже проверена в agent_builder.py:_build_role_agent.
 
     raw_read_file_tool — read_file ДО того, как agent_builder.py обернул
     его в _dedupe_read_tool с ОБЩИМ read_history внешней роли. Заново
@@ -294,11 +327,18 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None):
     # so this is not gated on anything per-call.
     delegate_tools.append(build_web_read_tool(model))
     delegate_tools_by_name = {t.name: t for t in delegate_tools}
+    # See module docstring — without this, a long enough investigation
+    # (many read_file/grep_search/search_code_semantic rounds) accumulates
+    # an ever-growing, never-compacted history and can hit a real 400
+    # "exceeds the available context size" before ever producing an
+    # answer. clear_cache() runs at the start of every delegate() call
+    # below, same reason own_read_history.clear() does.
+    compact_research = _CompactResearchMiddleware(judge_model)
     sub_agent = create_agent(
         model,
         delegate_tools,
         system_prompt=_DELEGATE_SYSTEM_PROMPT,
-        middleware=[_ToolErrorGuardMiddleware(), _DedupeToolResultsMiddleware()],
+        middleware=[_ToolErrorGuardMiddleware(), _DedupeToolResultsMiddleware(), compact_research],
         checkpointer=InMemorySaver(),
     )
 
@@ -322,6 +362,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None):
         complete, self-contained question with whatever context it needs;
         it does not see the rest of this conversation."""
         own_read_history.clear()
+        compact_research.clear_cache()
         conversation = [HumanMessage(content=task)]
         final_text = ""
         tokens_in_total = tokens_out_total = 0
@@ -349,20 +390,61 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None):
                 "recursion_limit": DELEGATE_RECURSION_LIMIT,
             }
             try:
-                result, round_tokens_in, round_tokens_out = await _run_subagent_streaming(
+                result, round_tokens_in, round_tokens_out, hit_recursion_limit = await _run_subagent_streaming(
                     sub_agent, conversation, config
                 )
                 tokens_in_total += round_tokens_in
                 tokens_out_total += round_tokens_out
-            except GraphRecursionError:
-                # Steps already spent before hitting the limit still cost
-                # real tokens — GraphRecursionError aborts _run_subagent_
-                # streaming before it returns its (partial) totals, so
-                # this one attempt's usage is lost here; accepted as a
-                # rare-path gap rather than restructuring around a
-                # mid-stream partial-total capture for an already-failing
-                # call.
+            except Exception as e:
+                # Same detector agent.py:_stream_round already uses for the
+                # outer agent — compact_research above shrinks the odds of
+                # this a lot, but doesn't eliminate them (raw sticky content
+                # — read_file/grep_search/glob_search, see compaction.py:
+                # STICKY_TOOL_NAMES — is never compacted, so several
+                # genuinely large files alone can still do it). Everything
+                # ELSE (a real network/model failure) must keep propagating
+                # as before, not get silently swallowed as if it were this.
+                if not is_context_overflow_error(e):
+                    raise
                 await _emit_token_usage()
+                return (
+                    "Sub-agent's own investigation grew too large for the "
+                    "model's context window before it could finish (too many "
+                    "large files/wide searches in one investigation). Split "
+                    "the task into narrower delegate() calls covering one "
+                    "part of the investigation each, or investigate the "
+                    "remainder yourself."
+                )
+
+            messages = result.get("messages") or []
+
+            if hit_recursion_limit:
+                # Steps ran out mid-investigation — the sub-agent never got
+                # to write its own considered final answer (see
+                # _DELEGATE_SYSTEM_PROMPT). _summarize_research (same
+                # digest-writer compact_research above uses periodically)
+                # gets ONE extra shot at turning whatever raw
+                # read_file/grep_search/... results DID accumulate into a
+                # dense, file:line-cited digest instead of handing back
+                # nothing — this is the ONLY path that calls it directly
+                # rather than through the middleware, exactly because
+                # there's no next round left for the middleware to run in.
+                digest = await _summarize_research(judge_model, messages) if messages else ""
+                await _emit_token_usage()
+                if digest:
+                    return (
+                        f"Sub-agent used its full {DELEGATE_RECURSION_LIMIT}-step "
+                        "budget without reaching its own considered final answer "
+                        "— but here's a dense summary of what it found before "
+                        f"running out:\n\n{digest}\n\nTreat this as partial and "
+                        "unverified (the sub-agent itself never confirmed these "
+                        "are its real conclusions). Delegate again with a "
+                        "narrower task to fill the gaps, or investigate the "
+                        "remainder yourself."
+                    )
+                # _summarize_research failed too (fail-open, see its own
+                # except-clause) — no digest to fall back on, same bare
+                # message as before this existed.
                 return (
                     f"Sub-agent used its full {DELEGATE_RECURSION_LIMIT}-step "
                     "budget without reaching a final answer. Either delegate "
@@ -370,7 +452,6 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None):
                     "yourself — don't delegate the exact same task again."
                 )
 
-            messages = result.get("messages") or []
             final = messages[-1] if messages else None
             final_text = _tool_text(final.content) if isinstance(final, AIMessage) else ""
 

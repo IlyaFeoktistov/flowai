@@ -1051,7 +1051,10 @@ async def _build_agent(repo_path: str | None = None):
     # tools/full_tools only ever hold what _get_tools returned, and that
     # cache is built before any model is chosen. voice_mode gets neither
     # (empty agent_tools — nothing web-related to add web_read alongside).
-    agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools, raw_read_file_tool), build_web_read_tool(model)] + tools
+    # judge_model passed into delegate — see build_delegate_tool's own
+    # docstring on why (compact_research, same judge_model as this agent's
+    # own self-heal, not a second one).
+    agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools, raw_read_file_tool, judge_model), build_web_read_tool(model)] + tools
 
     # Отдельный от "tools_loaded" в _build_tools лог — тот пишется ДО
     # optimized_tools/voice_mode/delegate, то есть показывает "что подняли из
