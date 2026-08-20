@@ -45,6 +45,35 @@ def format_knowledge(knowledge: dict, category: str = "") -> str:
         if not entries:
             return f"No knowledge recorded under category '{category}'"
         return f"[{category}]\n" + "\n".join(f"- {k}: {v}" for k, v in entries.items())
+    return format_all_knowledge(knowledge)
+
+
+def search_knowledge(knowledge: dict, query: str) -> str:
+    """Case-insensitive substring match across every stored entry's
+    category/key/value — lets the model find relevant knowledge without
+    already knowing a real category name first. get_knowledge's plain
+    category= filter (format_knowledge above) needs an EXACT match against
+    however update_knowledge originally categorized it; a model calling
+    get_knowledge for the first time on a topic has no way to know that
+    name in advance and would otherwise have to call it once with no
+    filter just to see what categories exist, then again to actually
+    filter — this collapses that into one call. Matches against the VALUE
+    text too, not just category/key, so a fact filed under an unrelated
+    category (e.g. 'architecture') is still found by a keyword that only
+    appears in its text (e.g. 'hook')."""
+    q = query.lower()
+    hits = [
+        (cat, k, v)
+        for cat, entries in knowledge.items()
+        for k, v in entries.items()
+        if q in f"{cat} {k} {v}".lower()
+    ]
+    if not hits:
+        return f"No knowledge found matching {query!r}"
+    return "\n".join(f"[{cat}] {k}: {v}" for cat, k, v in hits)
+
+
+def format_all_knowledge(knowledge: dict) -> str:
     lines = []
     for cat, entries in knowledge.items():
         lines.append(f"[{cat}]")

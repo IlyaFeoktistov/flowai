@@ -24,7 +24,7 @@ sys.path.insert(0, _PROJECT_ROOT)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from mcp_agent.knowledge import format_knowledge, load_knowledge, save_knowledge_entry  # noqa: E402
+from mcp_agent.knowledge import format_knowledge, load_knowledge, save_knowledge_entry, search_knowledge  # noqa: E402
 
 mcp = FastMCP("knowledge")
 
@@ -47,10 +47,24 @@ async def update_knowledge(category: str, key: str, value: str) -> str:
 
 
 @mcp.tool()
-async def get_knowledge(category: str = "") -> str:
-    """Get structured knowledge about the project. Pass category to filter,
-    or leave empty to get everything across all categories."""
+async def get_knowledge(category: str = "", query: str = "") -> str:
+    """Get structured knowledge about the project — call this FIRST,
+    before investigating anything from scratch. Two independent ways to
+    use it:
+    - `category` — EXACT match against however update_knowledge originally
+      filed it (e.g. 'architecture', 'decisions', 'conventions'). Use this
+      only if you already know the real category name from a previous
+      call or an update_knowledge you made yourself.
+    - `query` — free-text search instead: case-insensitive substring match
+      across EVERY stored entry's category, key, AND value text, matches
+      returned regardless of which category they're actually filed under.
+      Use this whenever you don't already know exact category names —
+      there's no need to call get_knowledge once to list categories and
+      again to filter; one query call does both.
+    Leave both empty to get everything across all categories."""
     knowledge = await load_knowledge(_REPO_PATH)
+    if query.strip():
+        return search_knowledge(knowledge, query.strip())
     return format_knowledge(knowledge, category)
 
 
