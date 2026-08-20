@@ -1,3 +1,4 @@
+import asyncio
 import fnmatch
 import os
 from pathlib import Path
@@ -228,3 +229,37 @@ async def reindex_code(repo_path: str, store: VectorStore, targets: list[str] | 
         "chunks": len(ids), "truncated": truncated, "missing": missing,
         "scoped": roots is not None, "referenced": len(discovered_children),
     }
+
+
+# One lock per repo_path, not global — several read_file/write_file/
+# edit_file calls in quick succession each fire their OWN independent
+# background auto-reindex (see mcp_agent/plugin_hooks.py) against the
+# SAME on-disk store; without serializing them, two overlapping calls
+# would each load the CURRENT on-disk file independently, both add their
+# own file's chunks in memory, and whichever finishes saving LAST wins —
+# silently discarding whatever the other one had already added. A lock
+# per repo_path (not a single global one) still lets unrelated projects'
+# background reindexes proceed independently.
+_reindex_locks: dict[str, asyncio.Lock] = {}
+
+
+def _reindex_lock(repo_path: str) -> asyncio.Lock:
+    lock = _reindex_locks.get(repo_path)
+    if lock is None:
+        lock = asyncio.Lock()
+        _reindex_locks[repo_path] = lock
+    return lock
+
+
+async def reindex_code_from_disk(repo_path: str, targets: list[str] | None = None) -> dict:
+    """reindex_code, but owns the full load-from-disk -> reindex -> save-
+    to-disk cycle itself, serialized per repo_path (see _reindex_lock) —
+    for callers that don't already hold a live VectorStore in hand:
+    cli.py's /reindex command and plugin_hooks.py's background
+    auto-reindex-on-file-touch both go through this instead of managing
+    their own load/save around reindex_code directly, so the same lock
+    protects BOTH a manual /reindex and any auto-reindex background tasks
+    racing it."""
+    async with _reindex_lock(repo_path):
+        store = VectorStore.load(code_store_path(repo_path))
+        return await reindex_code(repo_path, store, targets=targets)

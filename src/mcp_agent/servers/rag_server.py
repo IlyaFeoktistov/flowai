@@ -33,31 +33,60 @@ _REPO_PATH = os.getcwd()
 _INDEX_DIR = str(project_dir(_REPO_PATH, "rag_index"))
 
 _code_store: VectorStore | None = None
+_code_store_mtime: float | None = None
 _dialog_store: VectorStore | None = None
+_dialog_store_mtime: float | None = None
 _external_store: VectorStore | None = None
+_external_store_mtime: float | None = None
+
+
+def _mtime(path: str) -> float | None:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None  # не существует (ещё) — не "не изменился", а "нечего сравнивать"
 
 
 def _get_code_store() -> VectorStore:
     # code_store_path (not _INDEX_DIR/"code.json" directly) — the ONE
     # place cli.py's /reindex command and this read path agree on where
     # the file actually lives, see that function's own docstring.
-    global _code_store
-    if _code_store is None:
-        _code_store = VectorStore.load(code_store_path(_REPO_PATH), model=EMBED_MODEL)
+    #
+    # mtime-инвалидация, а не "загрузили один раз и на весь процесс" —
+    # теперь этот файл может обновляться не только пользовательским
+    # /reindex, но и фоновым авто-реиндексом на каждый read_file/
+    # write_file/edit_file (см. plugin_hooks.py:_auto_reindex_file),
+    # запущенным из ГЛАВНОГО процесса, а не из этого подпроцесса. Без
+    # проверки mtime search_code_semantic в этой же сессии видел бы
+    # снимок на момент первого вызова навечно, даже когда на диске давно
+    # лежит более свежий индекс — тот самый разрыв, который раньше был
+    # документирован только как известное ограничение ручного /reindex.
+    global _code_store, _code_store_mtime
+    path = code_store_path(_REPO_PATH)
+    mtime = _mtime(path)
+    if _code_store is None or mtime != _code_store_mtime:
+        _code_store = VectorStore.load(path, model=EMBED_MODEL)
+        _code_store_mtime = mtime
     return _code_store
 
 
 def _get_dialog_store() -> VectorStore:
-    global _dialog_store
-    if _dialog_store is None:
-        _dialog_store = VectorStore.load(os.path.join(_INDEX_DIR, "dialog.json"), model=EMBED_MODEL)
+    global _dialog_store, _dialog_store_mtime
+    path = os.path.join(_INDEX_DIR, "dialog.json")
+    mtime = _mtime(path)
+    if _dialog_store is None or mtime != _dialog_store_mtime:
+        _dialog_store = VectorStore.load(path, model=EMBED_MODEL)
+        _dialog_store_mtime = mtime
     return _dialog_store
 
 
 def _get_external_store() -> VectorStore:
-    global _external_store
-    if _external_store is None:
-        _external_store = VectorStore.load(os.path.join(_INDEX_DIR, "external.json"), model=EMBED_MODEL)
+    global _external_store, _external_store_mtime
+    path = os.path.join(_INDEX_DIR, "external.json")
+    mtime = _mtime(path)
+    if _external_store is None or mtime != _external_store_mtime:
+        _external_store = VectorStore.load(path, model=EMBED_MODEL)
+        _external_store_mtime = mtime
     return _external_store
 
 

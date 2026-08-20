@@ -97,7 +97,7 @@ from compress import compress_history
 from episodic import EpisodicWriter
 from memory import get_store, DEFAULT_USER
 from rag import EMBED_MODEL, VectorStore
-from rag.index_code import code_store_path, reindex_code
+from rag.index_code import reindex_code_from_disk
 from rag.index_dialog import index_episodic_entry
 from tools.confirm import _reset_session, connect_app as connect_confirm_app
 from tools.image_gen import generate_image
@@ -664,16 +664,17 @@ async def main() -> None:
             return
 
         if cmd == "/reindex":
-            # Explicit, user-only action — the model can no longer trigger
-            # this itself (search_code_semantic just reports "not built
-            # yet, ask the user to run /reindex" and falls back to grep/
-            # glob instead). Same store path rag_server.py's
-            # search_code_semantic reads (code_store_path) — if flowai's
-            # own MCP `rag` subprocess already loaded that file into memory
-            # THIS session (i.e. search_code_semantic already ran once),
-            # it won't see a reindex done afterward until the process
-            # restarts (that subprocess caches its VectorStore in a module
-            # global, loaded once — see rag_server.py:_get_code_store).
+            # Explicit, user-only action for a FULL/scoped project walk —
+            # the model can't trigger this itself (search_code_semantic
+            # just reports "not built yet" and falls back to grep/glob
+            # instead). Individual file reads/writes/edits ALSO keep the
+            # index fresh incrementally, in the background, regardless of
+            # whether this command was ever run — see plugin_hooks.py's
+            # _auto_reindex_file; reindex_code_from_disk (rag/index_code.py)
+            # is the same load-reindex-save-under-a-lock path both go
+            # through, so a manual /reindex here and a background
+            # auto-reindex triggered by a tool call mid-turn can't race
+            # each other's read-modify-write of the same on-disk file.
             #
             # Bare /reindex — full project, from scratch, as before.
             # /reindex src file.py ... — scoped: only those files/dirs get
@@ -683,8 +684,7 @@ async def main() -> None:
             targets = cmd_args.split() if cmd_args else None
             scope_label = ", ".join(targets) if targets else "весь проект"
             console.print(f"[dim]  📚 переиндексирую: {scope_label} (может занять время)…[/]\n")
-            store = VectorStore.load(code_store_path(os.getcwd()), model=EMBED_MODEL)
-            result = await reindex_code(os.getcwd(), store, targets=targets)
+            result = await reindex_code_from_disk(os.getcwd(), targets=targets)
             if result["missing"]:
                 console.print(f"[red]  ✗ не найдено: {', '.join(result['missing'])}[/]")
             report = f"Индекс обновлён: {result['chunks']} чанков ({scope_label})."

@@ -1,13 +1,22 @@
 """mcp_agent/plugin_hooks.py:PluginHookMiddleware — post_file_edit runs
 AFTER a successful write_file/edit_file (best-effort, a hook raising never
 fails the edit); pre_commit runs BEFORE a `git commit` bash call and can
-block it outright by returning a reason string."""
+block it outright by returning a reason string. Also covers the built-in
+(not plugin-declared) auto-reindex-on-file-touch: read_file/write_file/
+edit_file success schedules a fire-and-forget background task that keeps
+the semantic code index fresh for that ONE file (rag/index_code.py)."""
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import ToolMessage
 
 from mcp_agent import plugin_hooks
+# Captured before the autouse _stub_auto_reindex fixture below replaces
+# plugin_hooks._auto_reindex_file with a no-op for every OTHER test — the
+# two tests that exercise _auto_reindex_file itself need the real
+# function, not whatever the module attribute currently points to.
+from mcp_agent.plugin_hooks import _auto_reindex_file as _real_auto_reindex_file
 
 
 def _request(name, args, tool_call_id="1"):
@@ -16,6 +25,20 @@ def _request(name, args, tool_call_id="1"):
 
 async def _passthrough_handler(request):
     return ToolMessage(content="ok", name=request.tool_call["name"], tool_call_id=request.tool_call["id"])
+
+
+@pytest.fixture(autouse=True)
+def _stub_auto_reindex(monkeypatch):
+    """Every test in this file except the ones that specifically exercise
+    auto-reindex gets a harmless no-op here — without this, the tests
+    above (fake paths like "/repo"/"a.py") would schedule a REAL
+    background task that tries to resolve those paths on disk and, absent
+    _resolve_targets's "path doesn't exist" early-out, could reach all the
+    way to a live Ollama embedding call. Tests that DO want to verify the
+    scheduling itself override this again locally."""
+    async def _noop(path, repo_path):
+        pass
+    monkeypatch.setattr(plugin_hooks, "_auto_reindex_file", _noop)
 
 
 @pytest.mark.asyncio
@@ -148,3 +171,87 @@ async def test_async_hooks_are_awaited(monkeypatch):
     await middleware.awrap_tool_call(_request("write_file", {"path": "a.py"}), _passthrough_handler)
 
     assert calls == [("a.py", "/repo")]
+
+
+async def _run_and_let_background_tasks_run(middleware, request, handler=_passthrough_handler):
+    result = await middleware.awrap_tool_call(request, handler)
+    await asyncio.sleep(0)  # let the scheduled asyncio.create_task actually execute
+    return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["read_file", "write_file", "edit_file"])
+async def test_auto_reindex_scheduled_after_successful_read_or_edit(monkeypatch, tool_name):
+    calls = []
+
+    async def _fake_auto_reindex(path, repo_path):
+        calls.append((path, repo_path))
+    monkeypatch.setattr(plugin_hooks, "_auto_reindex_file", _fake_auto_reindex)
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda *a, **k: [])
+
+    middleware = plugin_hooks.PluginHookMiddleware("/repo")
+    await _run_and_let_background_tasks_run(middleware, _request(tool_name, {"path": "a.py"}))
+
+    assert calls == [("a.py", "/repo")]
+
+
+@pytest.mark.asyncio
+async def test_auto_reindex_not_scheduled_for_unrelated_tools(monkeypatch):
+    calls = []
+
+    async def _fake_auto_reindex(path, repo_path):
+        calls.append((path, repo_path))
+    monkeypatch.setattr(plugin_hooks, "_auto_reindex_file", _fake_auto_reindex)
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda *a, **k: [])
+
+    middleware = plugin_hooks.PluginHookMiddleware("/repo")
+    await _run_and_let_background_tasks_run(middleware, _request("bash", {"command": "ls"}))
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_reindex_not_scheduled_after_a_failed_write(monkeypatch):
+    calls = []
+
+    async def _fake_auto_reindex(path, repo_path):
+        calls.append((path, repo_path))
+    monkeypatch.setattr(plugin_hooks, "_auto_reindex_file", _fake_auto_reindex)
+    monkeypatch.setattr(plugin_hooks, "load_hooks", lambda *a, **k: [])
+
+    async def _failing_handler(request):
+        return ToolMessage(content="boom", name="write_file", tool_call_id="1", status="error")
+
+    middleware = plugin_hooks.PluginHookMiddleware("/repo")
+    await _run_and_let_background_tasks_run(middleware, _request("write_file", {"path": "a.py"}), _failing_handler)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_reindex_file_delegates_to_reindex_code_from_disk(monkeypatch):
+    calls = []
+
+    async def _fake_reindex_from_disk(repo_path, targets=None):
+        calls.append((repo_path, targets))
+        return {"chunks": 1}
+    monkeypatch.setattr(plugin_hooks, "reindex_code_from_disk", _fake_reindex_from_disk)
+
+    await _real_auto_reindex_file("a.py", "/repo")
+
+    assert calls == [("/repo", ["a.py"])]
+
+
+@pytest.mark.asyncio
+async def test_auto_reindex_file_failure_is_logged_not_raised(monkeypatch):
+    logged = []
+
+    async def _boom(repo_path, targets=None):
+        raise ConnectionError("ollama unreachable")
+    monkeypatch.setattr(plugin_hooks, "reindex_code_from_disk", _boom)
+    monkeypatch.setattr(plugin_hooks, "log_event", lambda event, **kw: logged.append((event, kw)))
+
+    await _real_auto_reindex_file("a.py", "/repo")  # must not raise
+
+    assert logged[0][0] == "auto_reindex_failed"
+    assert logged[0][1]["path"] == "a.py"
