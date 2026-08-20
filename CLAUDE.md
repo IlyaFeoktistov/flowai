@@ -71,6 +71,21 @@ Z" — no need to say how that was discovered). If a concrete number or
 threshold genuinely needs a data point to justify it, give the number
 itself, not the narrative around measuring it.
 
+## Keep docs in sync
+
+Any change that adds/removes/renames a slash command, MCP tool, setting,
+or on-disk storage location — or changes what one of those does in a way
+a user or another contributor would need to know — must also update the
+relevant file(s) in `docs/` and `README.md`, in the SAME change, not as a
+follow-up. Check `docs/commands.md` (slash commands), `docs/tools-and-
+mcp-servers.md` (MCP tools/servers), `docs/persistence.md` (storage
+layout, `/clean` categories), `docs/models.md`/`docs/architecture.md`/
+`docs/development.md` (whichever applies), and `README.md`'s own command
+examples/structure tree. A behavior change that's invisible from outside
+the code (an internal refactor, a bugfix with no new user-facing surface)
+doesn't need a docs update — this is about keeping docs from silently
+drifting out of date whenever the user-facing surface actually moves.
+
 ## Live test runs
 
 Qwen3 models think by default — on this machine that turned a single short
