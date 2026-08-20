@@ -82,6 +82,38 @@ async def test_reapplying_the_same_cached_digest_does_not_reprint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_submitted_plan_survives_compaction_verbatim(monkeypatch):
+    """submit_plan's own AIMessage (and everything after it, up to the
+    write cut) must never be folded into the digest — see
+    _last_plan_message_index's docstring. Research BEFORE the plan was
+    submitted is still fair game for summarization."""
+    conversation = [
+        HumanMessage(content="fix the bug"),
+        AIMessage(content="", tool_calls=[{"id": "r1", "name": "read_file", "args": {"path": "a.go"}}]),
+        ToolMessage(name="read_file", content="package main", tool_call_id="r1"),
+        AIMessage(content="1. Fix the loop in a.go", tool_calls=[
+            {"id": "p1", "name": "submit_plan", "args": {"steps": ["Fix the loop in a.go"]}},
+        ]),
+        ToolMessage(name="submit_plan", content="Registered plan with 1 step(s).", tool_call_id="p1"),
+        AIMessage(content="", tool_calls=[{"id": "w1", "name": "write_file", "args": {"path": "a.go"}}]),
+        ToolMessage(name="write_file", content="Created 'a.go' (1 lines).", tool_call_id="w1", status="success"),
+    ]
+    middleware = _CompactResearchMiddleware(judge_model=None)
+
+    result = await middleware.awrap_model_call(_make_request(conversation), _handler)
+
+    plan_call_names = [
+        tc["name"]
+        for m in result.messages
+        if isinstance(m, AIMessage)
+        for tc in (m.tool_calls or [])
+    ]
+    assert "submit_plan" in plan_call_names
+    assert any("1. Fix the loop in a.go" == m.content for m in result.messages)
+    assert any("DIGEST TEXT" in str(m.content) for m in result.messages)
+
+
+@pytest.mark.asyncio
 async def test_a_genuinely_new_write_moves_the_cut_and_prints_again(monkeypatch):
     printed = []
     monkeypatch.setattr(compaction_module, "debug_print", lambda msg: printed.append(msg))

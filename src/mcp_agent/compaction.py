@@ -178,7 +178,17 @@ PERIODIC_CHUNK_TOOL_CALLS = 8
 # path+params, telling it to "reuse that earlier result" — which no longer
 # exists anywhere in what the model can see (see the read_file note in the
 # module docstring).
-STICKY_TOOL_NAMES = {"read_file", "lsp", "grep_search", "glob_search"}
+# submit_plan (ask_user_tool.py, legacy agent's own numbered-plan
+# registration) is sticky for a different reason than the names above: not
+# because its RESULT is worth re-reading, but because its ARGUMENTS are
+# the plan itself, the target task for the rest of this turn — losing the
+# exact wording to a paraphrased digest risks the same
+# re-derive-and-duplicate-steps failure mode the pipeline's Planner prompt
+# warns about. This covers the periodic (pre-write) compaction path via
+# _group_is_sticky below; the write-triggered path in awrap_model_call
+# doesn't consult STICKY_TOOL_NAMES at all, so it has its own handling
+# further down (see _last_plan_message_index).
+STICKY_TOOL_NAMES = {"read_file", "lsp", "grep_search", "glob_search", "submit_plan"}
 
 _COMPACT_SYSTEM_PROMPT = (
     "You compress a coding agent's own history in the current task into a "
@@ -487,6 +497,25 @@ def _last_write_result_index(messages: list) -> int | None:
     return last_ok
 
 
+def _last_plan_message_index(messages: list) -> int | None:
+    """Index of the AIMessage that most recently called submit_plan (see
+    ask_user_tool.py) — that message and everything after it must survive
+    compaction unchanged, the same guarantee the pipeline gets for free by
+    seeding the Planner's plan into the untouchable task frame
+    (_task_frame_len) instead of ordinary history. The legacy agent has no
+    such frame — the plan is just another AIMessage in the middle of the
+    conversation — so awrap_model_call's write-triggered path (which
+    doesn't consult STICKY_TOOL_NAMES at all, unlike the periodic path)
+    needs this to know where to stop summarizing."""
+    last = None
+    for i, m in enumerate(messages):
+        if isinstance(m, AIMessage) and any(
+            tc.get("name") == "submit_plan" for tc in (m.tool_calls or [])
+        ):
+            last = i
+    return last
+
+
 async def _summarize_research(judge_model, prefix: list) -> str:
     task_len = _task_frame_len(prefix) if prefix else 0
     task_text = "\n\n".join(str(m.content) for m in prefix[:task_len])
@@ -658,16 +687,30 @@ class _CompactResearchMiddleware(AgentMiddleware):
             return await self._compact_periodic_research(request, handler, messages)
         prefix, rest = messages[:cut], messages[cut:]
         task_len = _task_frame_len(prefix)
-        if len(prefix) <= task_len + 1:
-            # Barely anything happened before this write — not worth an
-            # extra LLM call and a cache entry to save a couple of messages.
+
+        # The plan (submit_plan, ask_user_tool.py) is the target task for
+        # the rest of this turn, not exploration safe to paraphrase away —
+        # see _last_plan_message_index's own docstring. protected_from is
+        # where summarization must stop; everything from there to `cut`
+        # rides along with `rest` completely unchanged, digest or no
+        # digest, the same way the task frame itself already does.
+        plan_idx = _last_plan_message_index(prefix)
+        protected_from = len(prefix) if plan_idx is None else max(task_len, plan_idx)
+        digest_slice = prefix[task_len:protected_from]
+        protected_tail = prefix[protected_from:]
+
+        if len(digest_slice) <= 1:
+            # Barely anything (or nothing) between the task frame and the
+            # protected plan/tail — not worth an extra LLM call and a cache
+            # entry to save a couple of messages.
             return await handler(request)
 
-        cache_key = _prefix_cache_key(prefix)
+        digest_source = prefix[:protected_from]
+        cache_key = _prefix_cache_key(digest_source)
         cached = self._cache.get(cache_key, _MISSING)
         is_fresh = cached is _MISSING
         if is_fresh:
-            digest = await _summarize_research(self._judge_model, prefix)
+            digest = await _summarize_research(self._judge_model, digest_source)
             self._cache[cache_key] = digest
         else:
             digest = cached
@@ -684,16 +727,17 @@ class _CompactResearchMiddleware(AgentMiddleware):
         # actually paid for a summarization call.
         if is_fresh and DEBUG:
             debug_print(
-                f"[dim][MCP-AGENT] compacted history: {len(prefix)} messages "
-                f"-> digest ({len(digest)} chars) + {len(rest)} kept verbatim[/]"
+                f"[dim][MCP-AGENT] compacted history: {len(digest_source)} messages "
+                f"-> digest ({len(digest)} chars) + "
+                f"{len(protected_tail) + len(rest)} kept verbatim[/]"
             )
         log_event(
-            "history_compacted", prefix_messages=len(prefix),
-            digest_chars=len(digest), kept_verbatim=len(rest),
+            "history_compacted", prefix_messages=len(digest_source),
+            digest_chars=len(digest), kept_verbatim=len(protected_tail) + len(rest),
         )
 
         compacted = [
-            *prefix[:_task_frame_len(prefix)],
+            *prefix[:task_len],
             HumanMessage(content=(
                 "(Everything you did up to and including your last "
                 "successful edit is summarized below instead of replayed "
@@ -702,6 +746,7 @@ class _CompactResearchMiddleware(AgentMiddleware):
                 "content. What follows this digest, if anything, is kept "
                 "verbatim.)\n\n" + digest
             )),
+            *protected_tail,
         ]
         return await handler(request.override(messages=compacted + rest))
 

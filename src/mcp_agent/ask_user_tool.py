@@ -125,6 +125,28 @@ async def mark_plan_step_current(step_number: int) -> str:
     return f"Marked step {step_number} as current."
 
 
+@tool
+async def submit_plan(steps: list[str]) -> str:
+    """Register the numbered plan you just stated, VERBATIM, right after
+    stating it — one entry per step, same wording as the numbered list in
+    your own text (no need to include the leading "1."/"2." — just the
+    step text itself). Two things this buys you that stating the plan in
+    plain text alone does not:
+    (1) it draws the same persistent checklist panel the pipeline's Coder
+    stage uses (mark_plan_step_current then updates which one is
+    current) — the user sees your plan and its progress the whole time,
+    not just at the end;
+    (2) the plan becomes exempt from history compaction — it is the
+    target task for the rest of this turn, and must survive completely
+    unchanged even if the conversation grows long enough that older
+    tool-call history gets summarized away. Call this ONCE per plan,
+    right after stating it and before starting step 1 — call it again
+    only if the plan itself genuinely changes (e.g. the user picked a
+    different option). Not MCP-backed, same reason as mark_plan_step_current
+    — needs ui/app.py's plan checklist panel directly."""
+    return f"Registered plan with {len(steps)} step(s)."
+
+
 def _sibling_tool_names(state: Any, tool_call_id: str) -> set[str]:
     messages = state["messages"] if isinstance(state, dict) else getattr(state, "messages", [])
     m = _find_call_by_id(messages, tool_call_id)

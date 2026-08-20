@@ -595,6 +595,23 @@ class StreamDisplay:
             else:
                 console.print(f"[green]  ✅ Шаг {index + 1} выполнен[/]")
 
+        # ── PLAN SUBMITTED (mcp_agent/ask_user_tool.py:submit_plan, legacy
+        # agent only — the pipeline gets its checklist from pipeline.py's
+        # own "plan_steps" event above instead, seeded from the Planner's
+        # approved plan) — same rendering as "plan_steps", just triggered
+        # by the model's OWN tool call instead of pipeline control code.
+        elif t == "tool_start" and event.get("name") == "submit_plan":
+            steps = (event.get("args") or {}).get("steps") or []
+            if self._app is not None:
+                self._app.set_plan_steps(steps)
+            else:
+                console.print(f"[bright_black]  📝 План ({len(steps)} шагов):[/]")
+                for i, step in enumerate(steps):
+                    console.print(f"[dim]  ☐ {i + 1}. {step}[/]")
+
+        elif t == "tool_end" and event.get("name") == "submit_plan":
+            pass
+
         # ── PLAN CURRENT STEP (mcp_agent/ask_user_tool.py:
         # mark_plan_step_current, Coder-only) — a pure status ping, not a
         # real tool call worth showing as its own "🔧 name {...}" box;

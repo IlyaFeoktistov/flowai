@@ -217,13 +217,12 @@ def _build_system_prompt(repo_path: str) -> str:
     ход, прежде чем добраться до настоящего пути."""
     global _SYSTEM_PROMPT_TOKENS_ESTIMATE
     # Вставляем через плейсхолдер В СЕРЕДИНУ шаблона (сразу после абзаца про
-    # repo_path), а НЕ дописываем в конец готового промпта: конец промпта —
-    # это специально спроектированная секция KEY REMINDERS, заканчивающаяся
-    # "Respond in the same language..." (см. её собственный комментарий про
-    # lost-in-the-middle: LLM меньше всего внимания уделяет середине
-    # длинного контекста, поэтому этот пункт нарочно держат последним).
-    # Дописывание солидного куска английского текста ПОСЛЕ этой секции
-    # сдвигает её в середину промпта, и модель начинает отвечать
+    # repo_path), а НЕ дописываем в конец готового промпта: промпт нарочно
+    # заканчивается пунктом "Respond in the language..." (см. её собственный
+    # комментарий про lost-in-the-middle: LLM меньше всего внимания уделяет
+    # середине длинного контекста, поэтому этот пункт держат последним).
+    # Дописывание солидного куска английского текста ПОСЛЕ него
+    # сдвигает его в середину промпта, и модель начинает отвечать
     # по-английски.
     env_block = _detect_system_tools()
     env_info = _detect_environment_info(repo_path)
@@ -505,37 +504,26 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "NUMBERED plan — one line per concrete step, each naming the exact "
     "file and the exact change (which function/class, what specifically "
     "changes in it), in the order you'll apply them. State that numbered "
-    "plan in your response now, in the same language as the task. This "
-    "plan doubles as your checklist for the rest of the task: as you "
-    "complete each numbered step in steps 3-4 below, say so explicitly "
+    "plan in your response now, in the same language as the task, THEN "
+    "call submit_plan(steps=[...]) with that same plan, VERBATIM, before "
+    "doing anything else — this draws a persistent checklist for the user "
+    "and makes the plan immune to later history compaction (see its own "
+    "description). This plan doubles as your checklist for the rest of "
+    "the task: call mark_plan_step_current(step_number) right as you "
+    "start each step, and as you complete it say so explicitly "
     "(e.g. \"done: step 2\") before moving to the next one, and never "
     "silently skip, merge, or reorder a step. If drafting this plan "
     "surfaces a genuine judgment call you haven't already resolved (see "
     "the judgment-call rule above), resolve it NOW via ask_user, with "
     "this plan and any real alternative(s) as the options — do not "
     "proceed to step 3 until ask_user returns. If the task is "
-    "unambiguous and narrowly scoped, just state the plan and continue "
-    "immediately — no need to stop for confirmation on a plan nobody "
-    "could reasonably object to.\n"
-    "  3. Write the code, following your plan's numbered steps in order. "
-    "Two tools:\n"
-    "     * edit_file(path, old_string, new_string, replace_all) — "
-    "PREFERRED for any targeted change. old_string must match the file's "
-    "CURRENT text byte-for-byte (copy it from your own read_file/"
-    "grep_search output, don't retype from memory) and must be unique in "
-    "the file — include enough surrounding lines for that, not just the "
-    "one word changing; the tool rejects a non-unique old_string outright "
-    "rather than guessing which one you meant. Pass replace_all=true only "
-    "when every occurrence should change (e.g. a rename). Because matching "
-    "is by TEXT, not by line number, an earlier edit to the same file in "
-    "this same turn never invalidates a later one's old_string the way "
-    "line-based edits would — no need to re-read and recompute positions "
-    "between edits to the same file.\n"
-    "     * write_file(path, content) — for a change spanning most of a "
-    "file, or a brand-new file (creates missing parent directories "
-    "itself). Never reconstruct a large existing file from memory just to "
-    "change one part of it — that risks silently dropping content you "
-    "didn't mean to touch; use edit_file for a targeted change instead.\n"
+    "unambiguous and narrowly scoped, just state the plan, call "
+    "submit_plan, and continue immediately — no need to stop for "
+    "confirmation on a plan nobody could reasonably object to.\n"
+    "  3. Write the code, following your plan's numbered steps in order, "
+    "with edit_file (preferred for a targeted change) or write_file (a "
+    "change spanning most of a file, or a brand-new one) — each tool's "
+    "own description covers its exact mechanics/gotchas.\n"
     "    If the change has multiple parts (moving code, updating several "
     "call sites, a rename across files), make EVERY one of those edits "
     "before moving on to step 4 — do not stop to verify after only the "
@@ -620,64 +608,6 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "keep proposing the same or a related next step (analyzing the project, "
     "picking a framework, etc.) right after they just said no to it — that "
     "reads as not listening, not as being helpful.\n\n"
-    "- Respond in the same language the user wrote in, "
-    "addressing them directly.\n\n"
-    # LLM'ы уделяют меньше внимания середине длинного контекста, чем началу
-    # и концу ("lost in the middle") — а этот системный промпт уже
-    # ~3000 токенов. Правила ниже — самые частые ошибки (edit_file формат,
-    # пропущенная верификация, повтор отклонённого тула) — уже
-    # сформулированы выше подробно, здесь просто краткий повтор в самой
-    # последней, максимально заметной позиции промпта, а не замена той
-    # версии.
-    "KEY REMINDERS (the most common live mistakes — see the fuller "
-    "explanation above for each):\n"
-    "- For a change to this project, state a numbered plan BEFORE writing "
-    "any code, resolve any genuine judgment call via ask_user before "
-    "finalizing it, then follow that plan as your checklist while writing/"
-    "verifying — mark each step done, never skip or silently reorder one.\n"
-    "- edit_file's old_string must match the file's CURRENT text "
-    "byte-for-byte and be unique in the file — include enough surrounding "
-    "context, don't retype from memory. Pass replace_all=true only when "
-    "every occurrence should change.\n"
-    "- write_file/edit_file succeeding is NOT verification. "
-    "Always run bash (the code, its tests, or at least an import/parse "
-    "check) before reporting success.\n"
-    "- A multi-part change (delete here, add there; several call sites) "
-    "means ALL parts get edited first, THEN you verify once — not verify "
-    "after each individual edit.\n"
-    "- To undo/revert a file: bash(\"git checkout <ref> -- <path>\") "
-    "discards ALL uncommitted changes at once (back to a git ref); "
-    "restore_file_snapshot (after list_file_snapshots) undoes just the "
-    "latest uncommitted edit(s), keeping earlier ones. Never reconstruct "
-    "content yourself with write_file — that silently corrupts the file "
-    "instead of failing.\n"
-    "- To delete a file or directory, use delete_path — never bash "
-    "rm/rm -rf. delete_path is recoverable (restore_deleted_path); rm is "
-    "permanent.\n"
-    "- Check get_knowledge before investigating project structure/"
-    "architecture from scratch — a past session may have already worked "
-    "it out. Save non-trivial findings to update_knowledge afterward so "
-    "the next session doesn't re-read the same files.\n"
-    "- Task already names a specific file/function/module? Only follow "
-    "OTHER files that are provably connected to it (imports it, is "
-    "imported by it, is named in its own docstring/comments as a related "
-    "module) — reading sibling files in the same directory with no import/"
-    "call relationship to the named target (e.g. unrelated tool-server "
-    "implementations, unrelated features) is scope creep, not "
-    "investigation.\n"
-    "- A tool result telling you not to retry means don't retry it, ever, "
-    "unless the user explicitly asks again.\n"
-    "- Fixing review/audit feedback means implementing what was actually "
-    "asked for, not deleting the flagged code and calling it done. If the "
-    "code you're removing has a stated reason to exist, either preserve "
-    "that guarantee differently or say plainly you dropped it — never "
-    "describe a deletion as if it added error handling/background "
-    "processing/anything else that isn't literally in your diff. If the "
-    "feedback names a direction (background, notify the user, retry), "
-    "search for an existing mechanism for that direction before writing a "
-    "new one in place.\n"
-    "- A genuine judgment call needs a committed answer or an ask_user "
-    "call — never a hedge or a question left in plain text.\n"
     "- Never open a response by calling the user's question/idea good, "
     "great, fascinating, interesting, or any other flattering adjective — "
     "skip it and answer directly.\n"
@@ -696,9 +626,9 @@ _SYSTEM_PROMPT_TEMPLATE = (
     # докстринг _build_system_prompt и _VOICE_SYSTEM_PROMPT про lost-in-the-
     # middle: слабая/перегруженная модель теряет именно эту инструкцию и
     # срывается отвечать по-английски, если после неё идёт ещё текст.
-    # Никогда не переставлять её в середину KEY REMINDERS с другими
-    # пунктами после неё — это противоречило бы собственному докстрингу
-    # модуля, который утверждает, что промпт заканчивается именно ей.\n"
+    # Никогда не дописывать что-либо ПОСЛЕ неё — это противоречило бы
+    # собственному докстрингу модуля, который утверждает, что промпт
+    # заканчивается именно ей.\n"
     "- Respond in the language the user wrote in — this "
     "applies to your ENTIRE final answer, not just the intro sentence. "
     "THIS IS THE LAST LINE OF THIS PROMPT FOR A REASON — it's the rule "

@@ -35,6 +35,7 @@ from mcp_agent.ask_user_tool import (
     _ToolErrorGuardMiddleware,
     ask_user,
     mark_plan_step_current,
+    submit_plan,
 )
 from mcp_agent.build_cache import BuildCache
 from mcp_agent.compaction import _CompactResearchMiddleware, _DropStaleReadsMiddleware
@@ -372,6 +373,7 @@ async def _build_tools(repo_path: str | None = None):
     # общего прохода _wrap_read_invalidation по остальным тулам выше.
     tools.append(ask_user)
     tools.append(mark_plan_step_current)
+    tools.append(submit_plan)
     tools.append(list_file_snapshots)
     tools.append(_wrap_read_invalidation(restore_file_snapshot, read_history))
     # Для _execute_leaked_tool_call (см. выше) — те же самые объекты тулов,
