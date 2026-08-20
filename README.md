@@ -1,6 +1,6 @@
 # flowAI
 
-Python CLI AI-ассистент на базе локальных моделей через Ollama. Без внешних API — всё работает на твоей машине: чат с инструментами (агент читает/пишет файлы, гоняет git, ищет в интернете), генерация и редактирование картинок, голосовой ввод/ответ, генерация музыки.
+Python CLI AI-ассистент на базе локальных моделей через Ollama. По сути — агентский харнес (harness) вокруг Ollama: обвязка, которая превращает голую модель в работающего агента (цикл вызова тулов, управление контекстом, ретраи/self-heal, память между сессиями), а не сама модель. Без внешних API — всё работает на твоей машине: чат с инструментами (агент читает/пишет файлы, гоняет git, ищет в интернете), генерация и редактирование картинок, голосовой ввод/ответ, генерация музыки.
 
 Вся конфигурация в этом репозитории (параметры модели, лимиты контекста, тайминги ретраев, устройство промптов и тулов и так далее) — не взята из общих рекомендаций, а получена эмпирически, на реальных прогонах на реальных задачах. В коде (в основном `mcp_agent/*.py`) это оставлено намеренно как комментарий прямо рядом с константой/решением — объясняет, какую именно проблему она решает и почему выбрано именно это значение, а не общий совет "по умолчанию так принято". Если меняешь одну из таких настроек, стоит сначала прочитать комментарий рядом с ней.
 
@@ -33,6 +33,8 @@ Python CLI AI-ассистент на базе локальных моделей
 ---
 
 ## Установка
+
+> **Windows:** шаги ниже — для Linux/WSL2 (`apt`/`snap`/`sudo`). Для установки на чистой Windows (без WSL) есть отдельный скрипт — см. [`windows/README.md`](windows/README.md), устанавливается в несколько кликов через `windows/setup.bat`, без ручной сборки `torch`/CUDA-зависимостей.
 
 Один скрипт ставит всё — основной `.venv`, опциональные генерация/редактирование
 картинок, голосовой ввод/ответ и весь `/gen_model`-пайплайн (каждый компонент в
@@ -328,6 +330,35 @@ uvicorn main:app --reload
 
 ---
 
+## Документация
+
+**Как этим пользоваться:** flowAI работает с той директорией, откуда его запустили — `repo_path` берётся из текущей рабочей директории, а не из каталога, где установлен сам flowAI. Обычный сценарий:
+
+```bash
+cd /path/to/your/project   # открыть нужный проект
+flowai                      # или ./flowai / python3 src/cli.py, см. «Запуск» выше
+```
+
+Дальше — обычный чат: `/help` покажет полный список команд, включая слэш-команды плагинов и скилов текущего проекта, если они установлены.
+
+Подробности по темам — в `docs/`:
+
+| Файл | Что внутри |
+|---|---|
+| [`docs/commands.md`](docs/commands.md) | Полный список слэш-команд и горячих клавиш |
+| [`docs/plugins.md`](docs/plugins.md) | Глобальные плагины и project-скилы/хуки — форматы, как написать свой, рабочие примеры |
+| [`docs/architecture.md`](docs/architecture.md) | Пайплайн Router→Analyzer→Planner→Coder→Verifier vs легаси-агент |
+| [`docs/tools-and-mcp-servers.md`](docs/tools-and-mcp-servers.md) | Как устроены MCP-тулы модели |
+| [`docs/models.md`](docs/models.md) | Выбор модели, `expert_streaming`, `/settings` |
+| [`docs/persistence.md`](docs/persistence.md) | Что и где хранится на диске, `/clean` |
+| [`docs/generative-features.md`](docs/generative-features.md) | Картинки/музыка/3D/голос |
+| [`docs/dnd-mode.md`](docs/dnd-mode.md) | Изолированный режим `/dnd` |
+| [`docs/development.md`](docs/development.md) | Для разработки самого flowai |
+
+Стоит начать с [`docs/architecture.md`](docs/architecture.md), если незнакомо общее устройство приложения, или сразу с нужной темы, если ищется что-то конкретное.
+
+---
+
 ## Работа с изображениями
 
 ### В CLI: прочитать/вставить картинку
@@ -574,93 +605,121 @@ if __name__ == "__main__":
 
 ```
 flowAI/
-├── flowai                  — лончер (bash), сам находит .venv
-├── cli.py                  — консольный TUI-чат
-├── main.py                 — FastAPI HTTP-сервер, POST /chat (SSE)
-├── settings.py             — все настройки (SQLite), читается /settings
-├── expert_streaming.py     — свой llama-server-форк (см. «Модели») вместо Ollama
-├── compress.py             — сжатие истории при приближении к лимиту контекста
-├── usage.py                — статистика токенов/сессий
-├── storage.py              — общая точка SQLite-хранилища (память, знания, usage)
-├── model_lifecycle.py      — выгрузка/подгрузка Ollama-моделей (evict, ожидание готовности)
-├── memory_admin.py         — CLI-обслуживание памяти (просмотр/чистка фактов)
-├── version.py              — версия приложения
+├── flowai                  — лончер (bash), сам находит .venv, exec'ает src/cli.py
 ├── setup.py                — ставит всё приложение: main .venv, image-gen, whisper,
 │                             tts, vendor/* (клонирует, ставит venv'ы, патчит),
 │                             expert-streaming (собственный форк llama.cpp)
-├── pyproject.toml          — `pip install -e .` → команда `flowai` в PATH (см. «Запуск»)
-├── mcp_agent/
-│   ├── agent.py            — легаси: монолитный self-heal цикл, стриминг (_stream_round)
-│   ├── agent_builder.py    — сборка LangGraph-агента/роли, кеш тулов/модели, миддлвари
-│   ├── pipeline.py         — дефолтный путь (`pipeline_mode`, см. settings.py):
-│   │                         Router → Analyzer → Planner → Coder → Verifier
-│   ├── router.py           — классифицирует ход (нужен ли проект/shell/правка)
-│   ├── roles.py            — тулы/промпты/лимиты для каждой роли пайплайна
-│   ├── stage_runner.py     — retry-механика ОДНОЙ стадии пайплайна (общая для всех ролей)
-│   ├── compaction.py       — сжатие истории/исследования при приближении к num_ctx
-│   ├── self_heal.py        — детерминированные verdict-проверки, судья, разбор leaked tool-calls
-│   ├── delegate_tool.py    — сабагент delegate для больших/незнакомых деревьев кода
-│   ├── model_config.py     — константы (лимиты Ollama, MAX_ATTEMPTS, сэмплинг)
-│   ├── prompts.py          — системный промпт + инъекция FLOWAI.md
-│   ├── config.py           — реестр MCP-серверов, permission-политика
-│   ├── message_utils.py    — дедуп ToolMessage, конвертация сообщений
-│   ├── snapshots.py        — снимки файлов, auto-revert при провале проверки
-│   ├── tool_wrappers.py    — обёртки над MCP-тулами (обрезка вывода, дедуп чтений)
-│   ├── ollama_kv_cache.py  — автопереключение OLLAMA_KV_CACHE_TYPE под модель
-│   ├── optimized_tools.py  — урезанный набор тулов для легаси-агента (без pipeline_mode)
-│   ├── ask_user_tool.py    — тул ask_user, HITL-мидлвари
-│   ├── debug_log.py        — сквозной JSONL-лог одного прогона (диагностика)
-│   ├── dnd_*.py            — режим /dnd (текстовая настольная игра)
-│   └── servers/            — тул-серверы: bash_exec, git_extra, fs_extra,
-│                             code_search, web_search, memory, knowledge,
-│                             rag, image_gen, vision, music, gen_model, lsp
-├── gen3d/                  — /gen_model, /anim, /gen_texture: генерация/риг/
-│   │                         анимация/перетекстуровка 3D
-│   ├── pipeline.py         — subprocess-оркестрация всего пайплайна
-│   ├── hunyuan_wrapper.py  — параметризованный запуск Hunyuan3D-2GP (mesh+текстура)
-│   ├── texture_wrapper.py  — то же, но только текстура на готовый mesh (/gen_texture)
-│   ├── material_wrapper.py — AI-оценка roughness/metallic (SuperMat, gen_model AI PBR)
-│   ├── animato_client.py   — Animato-сервер + локальная Ollama вместо Gemini
-│   ├── img_refs.py / model_refs.py — резолвинг `@имя` из img-refs/ и generated/models/
-│   └── blender_scripts/    — retopo, rebake_texture (albedo+normal+AO+плоские
-│                             roughness/metallic), render_multiview + project_material_to_uv
-│                             (AI PBR: рендер ракурсов + обратная проекция на UV),
-│                             auto_weight, convert, strip_glb_extras (headless, `blender --python`)
+├── pyproject.toml          — `pip install -e .` → команда `flowai` в PATH (см. «Запуск»);
+│                             sources = ["src"] снимает префикс src/ при установке
+├── requirements.txt
+├── .env.example
+├── .env                    — локальный конфиг (не коммитить)
+├── docker-compose.yml      — запуск SearXNG
+├── searxng/settings.yml    — конфиг SearXNG
+├── CLAUDE.md               — правила стека/стиля для агента-разработчика
+├── src/                    — весь код физически здесь, плоским layout (см. CLAUDE.md
+│   │                         про sources=["src"] — импорты снаружи выглядят как top-level)
+│   ├── cli.py              — консольный TUI-чат, entry point лончера
+│   ├── main.py             — FastAPI HTTP-сервер, POST /chat (SSE)
+│   ├── settings.py         — все настройки (SQLite), читается /settings
+│   ├── expert_streaming.py — свой llama-server-форк (см. «Модели») вместо Ollama
+│   ├── compress.py         — сжатие истории при приближении к лимиту контекста
+│   ├── usage.py            — статистика токенов/сессий
+│   ├── storage.py          — общая точка SQLite-хранилища (память, знания, usage)
+│   ├── model_lifecycle.py  — выгрузка/подгрузка Ollama-моделей (evict, ожидание готовности)
+│   ├── memory_admin.py     — CLI-обслуживание памяти (просмотр/чистка фактов)
+│   ├── version.py          — версия приложения
+│   ├── clean.py            — /clean: чистка накопленного мусора (debug-логи, delete_path-трэш, ...)
+│   ├── doctor.py           — /doctor: единый health-check (жив ли Ollama, что реально загружено)
+│   ├── update.py           — /update: автообновление поверх git, а не пакетного менеджера
+│   ├── mcp_agent/
+│   │   ├── agent.py            — легаси: монолитный self-heal цикл, стриминг (_stream_round)
+│   │   ├── agent_builder.py    — сборка LangGraph-агента/роли, кеш тулов/модели, миддлвари
+│   │   ├── pipeline.py         — дефолтный путь (`pipeline_mode`, см. settings.py):
+│   │   │                         Router → Analyzer → Planner → Coder → Verifier
+│   │   ├── router.py           — классифицирует ход (нужен ли проект/shell/правка)
+│   │   ├── roles.py            — тулы/промпты/лимиты для каждой роли пайплайна
+│   │   ├── stages/             — per-роль verdict_fn/guidance_fn для stage_runner,
+│   │   │                         по модулю на роль (Router/Analyzer/Planner/Coder/Verifier)
+│   │   ├── stage_runner.py     — retry-механика ОДНОЙ стадии пайплайна (общая для всех ролей)
+│   │   ├── compaction.py       — сжатие истории/исследования при приближении к num_ctx
+│   │   ├── self_heal.py        — детерминированные verdict-проверки, судья, разбор leaked tool-calls
+│   │   ├── delegate_tool.py    — сабагент delegate для больших/незнакомых деревьев кода
+│   │   ├── build_cache.py      — общий get-or-build-with-freshness-key кеш (снял 4 копипасты)
+│   │   ├── knowledge.py        — общая логика knowledge-хранилища (общая для agent.py и
+│   │   │                         servers/knowledge_server.py, без похода через MCP-подпроцесс)
+│   │   ├── model_config.py     — константы (лимиты Ollama, MAX_ATTEMPTS, сэмплинг)
+│   │   ├── prompts.py          — системный промпт + инъекция FLOWAI.md
+│   │   ├── config.py           — реестр MCP-серверов, permission-политика
+│   │   ├── message_utils.py    — дедуп ToolMessage, конвертация сообщений
+│   │   ├── snapshots.py        — снимки файлов, auto-revert при провале проверки
+│   │   ├── tool_wrappers.py    — обёртки над MCP-тулами (обрезка вывода, дедуп чтений)
+│   │   ├── ollama_kv_cache.py  — автопереключение OLLAMA_KV_CACHE_TYPE под модель
+│   │   ├── optimized_tools.py  — урезанный набор тулов для легаси-агента (без pipeline_mode)
+│   │   ├── ask_user_tool.py    — тул ask_user, HITL-мидлвари
+│   │   ├── debug_log.py        — сквозной JSONL-лог одного прогона (диагностика)
+│   │   ├── plugins.py          — загрузчик плагинов (slash-команды, MCP-сервера, хуки) +
+│   │   │                         манифест-free project skills/hooks (см. `docs/plugins.md`)
+│   │   ├── plugin_hooks.py     — миддлварь post_file_edit/pre_commit
+│   │   ├── run_cli.py          — раннер для сравнения mcp_agent/agent.py со старым пайплайном
+│   │   ├── dnd_agent.py / dnd_store.py / dnd_tools.py — режим /dnd: изолированный агент,
+│   │   │                         SQLite-стейт, прямые (не MCP) тулы
+│   │   └── servers/            — MCP тул-серверы: bash_server, file_ops_server (read/write/edit
+│   │                             /grep_search/glob_search + delete_path/restore_deleted_path),
+│   │                             web_search_server, memory_server, knowledge_server, rag_server,
+│   │                             image_gen_server, vision_server, music_server, gen_model_server,
+│   │                             lsp_server, guide_server (self-описание на «что ты умеешь»)
+│   ├── gen3d/                  — /gen_model, /anim, /gen_texture: генерация/риг/
+│   │   │                         анимация/перетекстуровка 3D
+│   │   ├── pipeline.py         — subprocess-оркестрация всего пайплайна
+│   │   ├── hunyuan_wrapper.py  — параметризованный запуск Hunyuan3D-2GP (mesh+текстура)
+│   │   ├── texture_wrapper.py  — то же, но только текстура на готовый mesh (/gen_texture)
+│   │   ├── material_wrapper.py — AI-оценка roughness/metallic (SuperMat, gen_model AI PBR)
+│   │   ├── animato_client.py   — Animato-сервер + локальная Ollama вместо Gemini
+│   │   ├── img_refs.py / model_refs.py — резолвинг `@имя` из img-refs/ и generated/models/
+│   │   └── blender_scripts/    — retopo, rebake_texture (albedo+normal+AO+плоские
+│   │                             roughness/metallic), render_multiview + project_material_to_uv
+│   │                             (AI PBR: рендер ракурсов + обратная проекция на UV),
+│   │                             auto_weight, convert, strip_glb_extras (headless, `blender --python`)
+│   ├── ui/
+│   │   ├── app.py              — prompt_toolkit TUI, кейбинды (Alt+V, Alt+R, ...)
+│   │   ├── audio.py            — голосовой ввод/вывод, мост на powershell.exe
+│   │   ├── tts_worker.py       — синтез речи, запускается ИЗ venv-tts
+│   │   ├── images.py           — вставка/хранение картинок ([Image-N])
+│   │   ├── stream.py           — отображение потокового ответа
+│   │   ├── music_stream.py     — потоковая генерация музыки (/music), continuation между кусками
+│   │   ├── paste_store.py      — сворачивание длинных вставок в плейсхолдер
+│   │   ├── error_reporting.py  — фоновые asyncio-исключения — в консоль, а не в сырой stderr
+│   │   ├── console.py / header.py / suggestions.py — Rich-консоль, шапка, автокомплит
+│   │   └── tui/                — curses-меню: settings.py (/settings), memory_view.py, usage.py
+│   ├── episodic/               — writer.py: история диалога (SQLite)
+│   ├── memory/                 — base.py / sqlite_store.py: факты о пользователе между сессиями
+│   ├── rag/                    — chunking/embeddings/store + index_code/index_dialog/
+│   │                             index_external: семантический поиск по коду/диалогам/страницам
+│   ├── tools/                  — base.py (общий каркас тула), confirm.py (approval-диалоги),
+│   │                             image_gen.py (для /gen), gen_model.py (для /gen_model,
+│   │                             /anim, /gen_texture)
+│   └── utils/                  — parsing.py (parse_json_loose), proc.py (subprocess-хелперы)
 ├── vendor/                 — gitignored, создаётся setup.py: hunyuan3d-2gp/, unirig/,
 │                             animato/, supermat/ (свои venv), llama-expert-streaming/
 │                             (собственный форк llama.cpp, собирается из исходников)
-├── ui/
-│   ├── app.py              — prompt_toolkit TUI, кейбинды (Alt+V, Alt+R, ...)
-│   ├── audio.py            — голосовой ввод/вывод, мост на powershell.exe
-│   ├── tts_worker.py       — синтез речи, запускается ИЗ venv-tts
-│   ├── images.py           — вставка/хранение картинок ([Image-N])
-│   ├── stream.py           — отображение потокового ответа
-│   ├── console.py / header.py / suggestions.py — Rich-консоль, шапка, автокомплит
-│   └── tui/settings.py     — curses-меню /settings
-├── episodic/               — история диалога (SQLite)
-├── memory/                 — факты о пользователе между сессиями
-├── rag/                    — семантический поиск по коду/диалогам/страницам
-├── finetune/                — LoRA-дообучение на реальной истории (episodic_messages);
-│                             self-heal (agent.py) отклоняет раунды семантической
-│                             проверкой И РАБОТАЕТ КАК ФИЛЬТР КАЧЕСТВА ДАТАСЕТА —
-│                             отклонённые раунды исключаются из позитивных примеров
-│                             независимо от настройки self_heal_enabled (ретраи
-│                             можно выключить, сама проверка/self_heal_reject всё
-│                             равно считается, см. finetune/README.md)
-├── tools/                  — base.py (общий каркас тула), confirm.py (approval-диалоги),
-│                             image_gen.py (для /gen), gen_model.py (для /gen_model,
-│                             /anim, /gen_texture)
-├── utils/                  — parsing.py (parse_json_loose), proc.py (subprocess-хелперы)
-├── scripts/                — ollama_kv_cache_switch.sh (см. «Установка», sudoers-шаг)
-├── windows/                — setup.bat + README.md: установка на Windows одним скриптом
 ├── venv-tts/               — ОТДЕЛЬНЫЙ venv (Python 3.11) для Chatterbox TTS
 ├── venv-build-tools/       — ОТДЕЛЬНЫЙ venv для cmake/ninja (сборка expert-streaming)
+├── finetune/                — LoRA-дообучение на реальной истории (episodic_messages):
+│                             extract_dataset.py / finetune_cli.py / dataset.jsonl, JOURNAL.md;
+│                             self-heal РАБОТАЕТ КАК ФИЛЬТР КАЧЕСТВА ДАТАСЕТА — отклонённые
+│                             раунды исключаются из позитивных примеров независимо от
+│                             self_heal_enabled (см. finetune/README.md)
+├── docs/                   — architecture.md, commands.md, development.md, dnd-mode.md,
+│                             generative-features.md, models.md, persistence.md, plugins.md,
+│                             tools-and-mcp-servers.md
+├── examples/                — plugins/hello-world (эталонный плагин), project-skills-hooks
+│                             (эталонные project-скиллы/хуки без манифеста)
+├── plugins/                — глобальные плагины пользователя (gitignored, кроме .gitkeep)
+├── tests/                  — pytest: pipeline/stage_runner/plugins/UI-мелочи
+├── scripts/                — ollama_kv_cache_switch.sh (см. «Установка», sudoers-шаг)
+├── windows/                — setup.bat + README.md: установка на Windows одним скриптом
 ├── img-refs/                — исходные картинки для `@имя` в /gen_model, /anim, /gen_texture
-├── generated/               — сгенерированные картинки/музыка/3D-модели
-│   └── models/              — вывод /gen_model, /anim (.glb)
-├── searxng/settings.yml    — конфиг SearXNG
-├── docker-compose.yml      — запуск SearXNG
-├── requirements.txt
-├── .env.example
-└── .env                    — локальный конфиг (не коммитить)
+└── generated/               — сгенерированные картинки/музыка/3D-модели
+    └── models/              — вывод /gen_model, /anim (.glb)
 ```
