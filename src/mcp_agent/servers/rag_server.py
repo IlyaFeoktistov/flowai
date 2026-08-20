@@ -17,7 +17,7 @@ sys.path.insert(0, _PROJECT_ROOT)
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from rag import EMBED_MODEL, VectorStore, embed_texts  # noqa: E402
-from rag.index_code import reindex_code  # noqa: E402
+from rag.index_code import MAX_INDEXED_CHUNKS, reindex_code  # noqa: E402
 from rag.index_external import remember_url as _remember_url  # noqa: E402
 from storage import connect, project_dir  # noqa: E402
 
@@ -83,14 +83,23 @@ async def search_code_semantic(query: str, top_k: int = 5) -> str:
 
 @mcp.tool()
 async def reindex_code_search() -> str:
-    """Rebuild the semantic code/docs index from scratch. Run this once
-    before using search_code_semantic, and again after significant code
-    changes — it does not update automatically."""
+    """Rebuild the semantic code/docs index from scratch. Run this ONCE per
+    project before using search_code_semantic — the index is saved to disk
+    and survives process restarts, so don't call this again in a later
+    session just because it's a new session; only call it again after
+    significant code changes, since it does not update automatically."""
     global _code_store
     store = _get_code_store()
-    n = await reindex_code(_REPO_PATH, store)
+    result = await reindex_code(_REPO_PATH, store)
     _code_store = store
-    return f"Indexed {n} chunks from {_REPO_PATH}"
+    msg = f"Indexed {result['chunks']} chunks from {_REPO_PATH}"
+    if result["truncated"]:
+        msg += (
+            f" (hit the {MAX_INDEXED_CHUNKS}-chunk safety cap — the project "
+            "has more indexable content than that; search results will "
+            "only cover what was indexed before the cap)"
+        )
+    return msg
 
 
 @mcp.tool()
