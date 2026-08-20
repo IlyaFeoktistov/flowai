@@ -315,13 +315,31 @@ async def grep_search(
         flags += [f"--glob={_sh('!' + d + '/**')}" for d in SKIP_DIRS]
         cmd = " ".join(flags) + f" -- {_sh(pattern)} {_sh(path)}"
     else:
-        flags = "grep -rn --color=never"
+        # -E (ERE), not plain BRE: the docstring advertises ripgrep-style
+        # patterns, and ripgrep's regex syntax treats `|`/`+`/`?`/`{}` as
+        # metacharacters natively — GNU grep's BRE default does NOT (a
+        # pattern like "Controller|controller" would search for that
+        # literal string, pipe character included, and silently match
+        # nothing real). Without ripgrep installed, every alternation
+        # pattern the model naturally writes was returning a false
+        # "no matches" instead of erroring, indistinguishable from an
+        # honest empty result.
+        flags = "grep -rnE --color=never"
         if case_insensitive:
             flags += " -i"
         if file_type:
             flags += f" --include={_sh('*.' + file_type)}"
         if glob:
-            flags += f" --include={_sh(glob)}"
+            # GNU grep's --include does a plain fnmatch on the basename
+            # only — it has no concept of ripgrep's recursive "**" glob
+            # syntax, so a leading "**/" (the "any depth" prefix the
+            # docstring's own example, '*.{{ts,tsx}}', and ripgrep's real
+            # --glob both expect) matches no real filename here, silently
+            # returning zero results. -r already recurses on its own, so
+            # the trailing pattern alone (e.g. "*.php") is the correct
+            # equivalent for this fallback.
+            plain_glob = glob[3:] if glob.startswith("**/") else glob
+            flags += f" --include={_sh(plain_glob)}"
         if output_mode == "content" and (effective_before or effective_after):
             flags += f" -B {effective_before} -A {effective_after}"
         skip = " ".join(f"--exclude-dir={d}" for d in SKIP_DIRS)
