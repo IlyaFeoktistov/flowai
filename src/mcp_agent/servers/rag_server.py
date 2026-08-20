@@ -17,7 +17,7 @@ sys.path.insert(0, _PROJECT_ROOT)
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from rag import EMBED_MODEL, VectorStore, embed_texts  # noqa: E402
-from rag.index_code import MAX_INDEXED_CHUNKS, reindex_code  # noqa: E402
+from rag.index_code import code_store_path  # noqa: E402
 from rag.index_external import remember_url as _remember_url  # noqa: E402
 from storage import connect, project_dir  # noqa: E402
 
@@ -38,9 +38,12 @@ _external_store: VectorStore | None = None
 
 
 def _get_code_store() -> VectorStore:
+    # code_store_path (not _INDEX_DIR/"code.json" directly) — the ONE
+    # place cli.py's /reindex command and this read path agree on where
+    # the file actually lives, see that function's own docstring.
     global _code_store
     if _code_store is None:
-        _code_store = VectorStore.load(os.path.join(_INDEX_DIR, "code.json"), model=EMBED_MODEL)
+        _code_store = VectorStore.load(code_store_path(_REPO_PATH), model=EMBED_MODEL)
     return _code_store
 
 
@@ -72,34 +75,19 @@ async def search_code_semantic(query: str, top_k: int = 5) -> str:
     """Semantic (meaning-based) search over the project's code/docs — finds
     relevant files even when your query's wording differs from the actual
     code. Use grep_search for exact strings/patterns; use this for
-    conceptual questions like 'where do we limit tool output size'. Requires
-    reindex_code_search to have been run at least once."""
+    conceptual questions like 'where do we limit tool output size'. Building
+    the index is expensive and NOT something you can trigger — only the
+    user can, by running /reindex themselves, and only they can decide
+    it's worth the time. If this returns the empty-index message below,
+    tell the user so IN YOUR ANSWER (don't just silently fall back) and
+    proceed with grep_search/glob_search/search_symbols instead — don't
+    ask them to run /reindex before you can continue, just say it's an
+    option for next time and keep working."""
     store = _get_code_store()
     if len(store) == 0:
-        return "Code index is empty — run reindex_code_search first"
+        return "Code index has not been built — the user can run /reindex to enable this tool; use grep_search/glob_search for now"
     query_embedding = (await embed_texts([query]))[0]
     return _format_results(store.search(query_embedding, top_k=top_k))
-
-
-@mcp.tool()
-async def reindex_code_search() -> str:
-    """Rebuild the semantic code/docs index from scratch. Run this ONCE per
-    project before using search_code_semantic — the index is saved to disk
-    and survives process restarts, so don't call this again in a later
-    session just because it's a new session; only call it again after
-    significant code changes, since it does not update automatically."""
-    global _code_store
-    store = _get_code_store()
-    result = await reindex_code(_REPO_PATH, store)
-    _code_store = store
-    msg = f"Indexed {result['chunks']} chunks from {_REPO_PATH}"
-    if result["truncated"]:
-        msg += (
-            f" (hit the {MAX_INDEXED_CHUNKS}-chunk safety cap — the project "
-            "has more indexable content than that; search results will "
-            "only cover what was indexed before the cap)"
-        )
-    return msg
 
 
 @mcp.tool()

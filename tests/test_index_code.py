@@ -1,4 +1,5 @@
-"""rag/index_code.py — reindex_code_search's actual implementation.
+"""rag/index_code.py — reindex_code's implementation, now driven only by
+cli.py's /reindex command (the model can no longer trigger this itself).
 
 Live-caught motivation (user report): reindex looked like it could hang
 forever on a real project, with no cap and a real SKIP_DIRS bug —

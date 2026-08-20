@@ -25,7 +25,7 @@ GPU/Ollama-стек; нигде не найдено готового community-�
 | `web_search` | `web_search` | под self-hosted SearXNG |
 | `memory` | `update_memory`, `list_memory` | плоские факты о ПОЛЬЗОВАТЕЛЕ, персистентно между сессиями |
 | `knowledge` | `update_knowledge`, `get_knowledge` | категоризированные знания о ПРОЕКТЕ (архитектура/решения/конвенции), отдельно от памяти о пользователе |
-| `rag` | `search_code_semantic`, `reindex_code_search`, `search_dialog_history`, `list_episodic_sessions`, `read_episodic_session`, `remember_url`, `search_external_sources` | семантический поиск (эмбеддинги + свой векторный индекс) по коду проекта, истории диалогов и сохранённым внешним страницам |
+| `rag` | `search_code_semantic`, `search_dialog_history`, `list_episodic_sessions`, `read_episodic_session`, `remember_url`, `search_external_sources` | семантический поиск (эмбеддинги + свой векторный индекс) по коду проекта, истории диалогов и сохранённым внешним страницам. Код-индекс модель НЕ строит сама (дорогая по времени операция) — только пользователь, командой `/reindex` (`cli.py`); если индекс ещё не собран, `search_code_semantic` прямо об этом говорит и модель переключается на `grep_search`/`glob_search` |
 | `vision` | `analyze_image` | своя локальная vision-модель Ollama (`settings.vision_model`), отдельно от chat_model |
 | `lsp` | `lsp` | настоящий Language Server Protocol (goToDefinition/findReferences/hover/...) вместо grep-угадайки |
 | `guide` | `flowai_guide` | самоописание flowAI — см. ниже |

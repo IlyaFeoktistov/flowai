@@ -110,9 +110,9 @@ def _clean_projects() -> str:
     hashes still correspond to a real, currently-existing directory on
     disk — wiping the whole tree is the only option. Safe to do: every
     project subdirectory is a lazily-rebuilt cache (rag_index/ — code/
-    dialog/external-page search index), rebuilt automatically the next
-    time each project is opened / reindex_code_search runs, never the only
-    copy of anything."""
+    dialog/external-page search index) — dialog/external rebuild
+    automatically as the project is used again, code needs the user to run
+    /reindex once more (cli.py) — never the only copy of anything."""
     projects_dir = storage.data_dir() / "projects"
     total = 0
     count = 0

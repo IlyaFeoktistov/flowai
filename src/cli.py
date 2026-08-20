@@ -95,6 +95,7 @@ from compress import compress_history
 from episodic import EpisodicWriter
 from memory import get_store, DEFAULT_USER
 from rag import EMBED_MODEL, VectorStore
+from rag.index_code import code_store_path, reindex_code
 from rag.index_dialog import index_episodic_entry
 from tools.confirm import _reset_session, connect_app as connect_confirm_app
 from tools.image_gen import generate_image
@@ -263,6 +264,7 @@ def _show_help() -> None:
         "[bold cyan]/talk[/] [dim]текст[/]              — озвучить текст напрямую, без модели\n"
         "[bold cyan]/usage[/]                   — статистика токенов\n"
         "[bold cyan]/doctor[/]                  — проверка Ollama/модели/MCP-серверов/хранилища\n"
+        "[bold cyan]/reindex[/]                 — собрать индекс для семантического поиска по коду проекта (один раз на проект, вручную, вы решаете когда)\n"
         "[bold cyan]/clean[/] [dim]logs|trash|snapshots|projects|all[/] — почистить накопившийся за всё время хлам (логи/корзину/индексы); без аргумента — только отчёт, ничего не удаляет\n"
         "[bold cyan]/update[/]                  — проверить и подтянуть обновления flowAI из git\n"
         "[bold cyan]/settings[/]                — настройки моделей и GPU\n"
@@ -616,6 +618,27 @@ async def main() -> None:
             console.print("[dim]  🩺 проверяю Ollama/модели/MCP/хранилище…[/]\n")
             report = await run_doctor()
             console.print(Panel(report, title="[bright_black]doctor[/]", border_style="bright_black", padding=(0, 2)))
+            console.print()
+            return
+
+        if cmd == "/reindex":
+            # Explicit, user-only action — the model can no longer trigger
+            # this itself (search_code_semantic just reports "not built
+            # yet, ask the user to run /reindex" and falls back to grep/
+            # glob instead). Same store path rag_server.py's
+            # search_code_semantic reads (code_store_path) — if flowai's
+            # own MCP `rag` subprocess already loaded that file into memory
+            # THIS session (i.e. search_code_semantic already ran once),
+            # it won't see a reindex done afterward until the process
+            # restarts (that subprocess caches its VectorStore in a module
+            # global, loaded once — see rag_server.py:_get_code_store).
+            console.print("[dim]  📚 переиндексирую код проекта (может занять время на большом репозитории)…[/]\n")
+            store = VectorStore.load(code_store_path(os.getcwd()), model=EMBED_MODEL)
+            result = await reindex_code(os.getcwd(), store)
+            report = f"Индекс собран: {result['chunks']} чанков."
+            if result["truncated"]:
+                report += " (репозиторий больше лимита — часть кода не попала в индекс)"
+            console.print(Panel(report, title="[bright_black]reindex[/]", border_style="bright_black", padding=(0, 2)))
             console.print()
             return
 
