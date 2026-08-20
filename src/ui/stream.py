@@ -121,7 +121,18 @@ _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 def _shorten(val, limit: int = 80) -> str:
-    s = str(val)
+    """Every caller uses this for a ONE-LINE status header (the "● ..." line
+    a running tool call gets) — a multi-line value (a python -c script with
+    real newlines, a multi-line grep pattern) must not reach this as raw
+    control characters: the header line is meant to be exactly one visual
+    line, but console.print (Rich) happily renders embedded '\\n'/'\\r' as
+    real line breaks, and the styling markup around the "●" only wraps the
+    bullet itself — everything after it, including a leaked embedded
+    newline's continuation, prints unstyled and looks like separate stray
+    lines the tool "wrote directly to output" instead of one tidy header.
+    Collapsing to single-line FIRST, then truncating, keeps every caller's
+    existing limit/behavior for normal single-line values unchanged."""
+    s = str(val).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
     return s if len(s) <= limit else s[:limit] + "…"
 
 

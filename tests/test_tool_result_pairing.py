@@ -70,3 +70,19 @@ async def test_tool_end_without_id_falls_back_to_oldest_pending():
 
     fold_a = app._output._folds[0]
     assert any("content" in ln for ln in fold_a.expanded)
+
+
+def test_shorten_collapses_embedded_newlines():
+    """Live-caught bug: a multi-line bash command (a python -c script with
+    real newlines) leaked raw control characters into the one-line "●
+    выполняю команду ..." status header — rendered as literal "^J" in one
+    display path, and as extra stray unstyled lines in another (the
+    markup around "●" only wraps the bullet itself, so anything after an
+    embedded newline prints unstyled and looks like a separate write)."""
+    from ui.stream import _shorten
+
+    multiline = "import sys\nsys.path.insert(0, '.')\nprint('hi')"
+    result = _shorten(multiline, 150)
+    assert "\n" not in result
+    assert "\r" not in result
+    assert "import sys" in result and "print" in result
