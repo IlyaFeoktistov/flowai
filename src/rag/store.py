@@ -1,6 +1,7 @@
 import base64
 import json
 import math
+import os
 from array import array
 from pathlib import Path
 
@@ -33,11 +34,21 @@ class VectorStore:
     времени. Заводить первую numeric-зависимость в проекте с 8 зависимостями
     ради этого масштаба неоправданно."""
 
-    def __init__(self, path: str, model: str = "", dim: int = 0):
+    def __init__(self, path: str, model: str = "", dim: int = 0, child_indexes: list[dict] | None = None):
         self.path = Path(path)
         self.model = model
         self.dim = dim
         self._chunks: dict[str, dict] = {}
+        # [{"dir": "<path relative to THIS store's own repo root>",
+        #   "index_path": "<code_store_path of that subdirectory>"}, ...] —
+        # populated by rag/index_code.py:reindex_code when a full/scoped
+        # walk finds a subdirectory that ALREADY has its own index (opened
+        # and reindexed as its own project, e.g. a monorepo's subproject)
+        # instead of re-walking/re-embedding it. search() below reads
+        # these lazily and merges their results in — a live reference, not
+        # a copy, so re-running /reindex on that child later needs no
+        # action here to stay correct.
+        self.child_indexes: list[dict] = list(child_indexes or [])
 
     def add(self, id: str, text: str, embedding: list[float], metadata: dict) -> None:
         self._chunks[id] = {"text": text, "embedding": embedding, "metadata": metadata}
@@ -62,11 +73,41 @@ class VectorStore:
     def __len__(self) -> int:
         return len(self._chunks)
 
-    def search(self, query_embedding: list[float], top_k: int = 5) -> list[dict]:
+    def search(self, query_embedding: list[float], top_k: int = 5, _seen: set[str] | None = None) -> list[dict]:
+        """Федеративный поиск — своя коллекция ПЛЮС (рекурсивно) все
+        child_indexes: результат ребёнка помечается его собственным rel-
+        префиксом ("dir"), чтобы метка metadata["source"] осталась
+        осмысленной с точки зрения ЭТОГО (верхнего) индекса, а не только
+        относительно ребёнка. _seen — защита от цикла (сам механизм
+        никогда не создаёт цикл — child_indexes всегда указывают на УЖЕ
+        существующий, независимо построенный индекс, — но повреждённый/
+        руками отредактированный JSON теоретически мог бы), не публичный
+        параметр вызывающего кода."""
+        seen = _seen if _seen is not None else set()
+        key = str(self.path)
+        if key in seen:
+            return []
+        seen.add(key)
+
         scored = [
             {"id": cid, "text": c["text"], "metadata": c["metadata"], "score": _cosine(query_embedding, c["embedding"])}
             for cid, c in self._chunks.items()
         ]
+        for child in self.child_indexes:
+            index_path = child.get("index_path")
+            rel_dir = child.get("dir", "")
+            if not index_path or index_path in seen or not os.path.isfile(index_path):
+                continue
+            try:
+                child_store = VectorStore.load(index_path)
+            except (OSError, ValueError):
+                continue
+            for r in child_store.search(query_embedding, top_k=top_k, _seen=seen):
+                meta = dict(r["metadata"])
+                if rel_dir:
+                    meta["source"] = f"{rel_dir}/{meta.get('source', '')}"
+                scored.append({**r, "metadata": meta})
+
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:top_k]
 
@@ -75,6 +116,7 @@ class VectorStore:
         data = {
             "model": self.model,
             "dim": self.dim,
+            "child_indexes": self.child_indexes,
             "chunks": [
                 {"id": cid, "text": c["text"], "embedding_b64": _encode(c["embedding"]), "metadata": c["metadata"]}
                 for cid, c in self._chunks.items()
@@ -88,7 +130,7 @@ class VectorStore:
         if not p.exists():
             return cls(path, model, dim)
         data = json.loads(p.read_text(encoding="utf-8"))
-        store = cls(path, data.get("model", model), data.get("dim", dim))
+        store = cls(path, data.get("model", model), data.get("dim", dim), data.get("child_indexes"))
         for chunk in data.get("chunks", []):
             store._chunks[chunk["id"]] = {
                 "text": chunk["text"],

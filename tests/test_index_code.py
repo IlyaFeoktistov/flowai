@@ -153,4 +153,4 @@ async def test_reindex_code_all_targets_missing_is_a_no_op(tmp_path):
     store = VectorStore(str(tmp_path / "index.json"))
     result = await reindex_code(str(tmp_path), store, targets=["nope.py"])
 
-    assert result == {"chunks": 0, "truncated": False, "missing": ["nope.py"], "scoped": True}
+    assert result == {"chunks": 0, "truncated": False, "missing": ["nope.py"], "scoped": True, "referenced": 0}

@@ -47,6 +47,10 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _project_hash(repo_path: str) -> str:
+    return hashlib.sha256(os.path.abspath(repo_path).encode()).hexdigest()[:16]
+
+
 def project_dir(repo_path: str, *parts: str) -> Path:
     """A subdirectory under data_dir(), namespaced by an absolute project
     path — for project-scoped local files (e.g. rag_index) that must NOT
@@ -55,7 +59,16 @@ def project_dir(repo_path: str, *parts: str) -> Path:
     regardless of path length/separators. *parts join onto the result as
     subdirectories (all created) — pass a filename yourself on top of the
     returned path instead of as a trailing part."""
-    digest = hashlib.sha256(os.path.abspath(repo_path).encode()).hexdigest()[:16]
-    path = data_dir().joinpath("projects", digest, *parts)
+    path = data_dir().joinpath("projects", _project_hash(repo_path), *parts)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def project_dir_path(repo_path: str, *parts: str) -> Path:
+    """Same path project_dir() would return, WITHOUT creating it — for
+    callers that only want to know/check the path (e.g. rag/index_code.py
+    probing whether some OTHER directory already has its own code index,
+    while walking a project's subdirectories: probing dozens of candidate
+    directories with project_dir() would have created an empty, never-used
+    projects/<hash>/ cache folder for every single one just from looking)."""
+    return data_dir().joinpath("projects", _project_hash(repo_path), *parts)

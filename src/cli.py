@@ -646,6 +646,8 @@ async def main() -> None:
             if result["missing"]:
                 console.print(f"[red]  ✗ не найдено: {', '.join(result['missing'])}[/]")
             report = f"Индекс обновлён: {result['chunks']} чанков ({scope_label})."
+            if result["referenced"]:
+                report += f" {result['referenced']} поддиректори(й/я) уже проиндексированы отдельно — использую как ссылку, без повторной обработки."
             if result["truncated"]:
                 report += " (лимит по объёму — часть содержимого не попала в индекс)"
             console.print(Panel(report, title="[bright_black]reindex[/]", border_style="bright_black", padding=(0, 2)))

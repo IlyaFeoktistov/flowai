@@ -21,9 +21,17 @@ def code_store_path(repo_path: str) -> str:
     (search_code_semantic — читает готовый индекс, сам никогда не пишет)
     должны указывать на ОДИН и тот же файл; отдельное дублирование этой
     строки в двух местах рисковало бы разойтись при следующей правке
-    storage.project_dir's аргументов."""
-    from storage import project_dir
-    return str(project_dir(repo_path, "rag_index") / "code.json")
+    storage.project_dir's аргументов.
+
+    project_dir_path (не project_dir) — эта функция вызывается для КАЖДОЙ
+    поддиректории, встреченной во время обхода (см. _iter_files ниже), просто
+    чтобы проверить "а нет ли там уже своего индекса" — project_dir() создаёт
+    директорию как побочный эффект, а VectorStore.save() и так сама делает
+    mkdir, когда путь реально нужен для записи (см. store.py), так что
+    сама эта функция не должна создавать ничего только от того, что её
+    позвали."""
+    from storage import project_dir_path
+    return str(project_dir_path(repo_path, "rag_index") / "code.json")
 
 # Верхний потолок на общее число чанков за один reindex — не лимит "на
 # нормальный проект" (это ~1.2М строк при 60 строках/чанк, см. chunking.py),
@@ -50,16 +58,40 @@ def _is_skipped_dir(name: str) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in SKIP_DIRS)
 
 
-def _iter_files(root_path: str):
+def _iter_files(root_path: str, repo_path: str, discovered_children: list[dict] | None = None):
     """Yields absolute file paths under root_path — root_path itself if
     it's already a file (a /reindex file.py target), or a SKIP_DIRS-
     filtered recursive walk if it's a directory (whole repo, or a /reindex
-    src target)."""
+    src target).
+
+    A subdirectory ENCOUNTERED DURING the walk (never root_path itself —
+    an explicit /reindex target is always walked for real, see
+    reindex_code's docstring) that already has its OWN code index
+    (code_store_path(that_dir) exists) is skipped instead of re-walked —
+    it's already been opened and reindexed as its own project (e.g. one
+    subproject of a monorepo). Its {dir, index_path} is appended to
+    discovered_children so reindex_code can attach it as a live reference
+    (VectorStore.child_indexes) instead of re-embedding its content from
+    scratch here."""
     if os.path.isfile(root_path):
         yield root_path
         return
     for root, dirs, files in os.walk(root_path):
-        dirs[:] = [d for d in dirs if not _is_skipped_dir(d)]
+        kept_dirs = []
+        for d in dirs:
+            if _is_skipped_dir(d):
+                continue
+            sub = os.path.join(root, d)
+            child_index = code_store_path(sub)
+            if os.path.isfile(child_index):
+                if discovered_children is not None:
+                    discovered_children.append({
+                        "dir": str(Path(sub).relative_to(repo_path)),
+                        "index_path": child_index,
+                    })
+                continue
+            kept_dirs.append(d)
+        dirs[:] = kept_dirs
         for fname in files:
             yield str(Path(root) / fname)
 
@@ -83,7 +115,10 @@ def _chunk_file(fpath: str, repo_path: str):
         yield rel, i, chunk
 
 
-def _iter_chunks(repo_path: str, max_chunks: int, roots: list[str] | None = None):
+def _iter_chunks(
+    repo_path: str, max_chunks: int, roots: list[str] | None = None,
+    discovered_children: list[dict] | None = None,
+):
     """Генератор — обрывает обход на месте, как только достигнут
     max_chunks, вместо того чтобы сначала пройти всё дерево и порезать
     список постфактум (тот же объём файловых чтений всё равно был бы
@@ -91,7 +126,7 @@ def _iter_chunks(repo_path: str, max_chunks: int, roots: list[str] | None = None
     точечного /reindex; None означает «весь repo_path», как раньше."""
     n = 0
     for root_path in (roots if roots is not None else [repo_path]):
-        for fpath in _iter_files(root_path):
+        for fpath in _iter_files(root_path, repo_path, discovered_children):
             for rel, i, chunk in _chunk_file(fpath, repo_path):
                 if n >= max_chunks:
                     return
@@ -130,6 +165,15 @@ async def reindex_code(repo_path: str, store: VectorStore, targets: list[str] | 
     длинной версии (id "file.py:3"/"file.py:4" никогда не перезапишутся,
     если после правки в файле осталось только 3 чанка: 0,1,2).
 
+    Ни полный, ни точечный обход не спускается в поддиректорию, у которой
+    УЖЕ есть собственный индекс (см. _iter_files) — она подключается как
+    живая ссылка (store.child_indexes, см. store.py:search) вместо
+    повторного прохода/эмбеддинга её содержимого. Явно названная цель
+    (targets) — исключение: если она сама уже проиндексирована как чей-то
+    child, всё равно реально переиндексируется НАПРЯМУЮ в ЭТОТ store —
+    "/reindex core" из родителя всегда значит "сделай это по-настоящему
+    прямо здесь", а не "сошлись на то, что уже есть где-то ещё".
+
     Индекс сохраняется на диск (store.save(), см. rag_server.py:_INDEX_DIR)
     и переживает перезапуск процесса — search_code_semantic лениво
     подгружает его заново из файла, а не держит в памяти живого процесса,
@@ -139,13 +183,14 @@ async def reindex_code(repo_path: str, store: VectorStore, targets: list[str] | 
     if targets:
         roots, missing = _resolve_targets(repo_path, targets)
         if not roots:
-            return {"chunks": 0, "truncated": False, "missing": missing, "scoped": True}
+            return {"chunks": 0, "truncated": False, "missing": missing, "scoped": True, "referenced": 0}
 
     ids: list[str] = []
     texts: list[str] = []
     metadatas: list[dict] = []
+    discovered_children: list[dict] = []
 
-    for rel, i, chunk in _iter_chunks(repo_path, MAX_INDEXED_CHUNKS, roots):
+    for rel, i, chunk in _iter_chunks(repo_path, MAX_INDEXED_CHUNKS, roots, discovered_children):
         ids.append(f"{rel}:{i}")
         texts.append(chunk)
         metadatas.append({"source_type": "code", "source": rel, "chunk_idx": i})
@@ -159,9 +204,15 @@ async def reindex_code(repo_path: str, store: VectorStore, targets: list[str] | 
 
     if roots is None:
         store.clear()
+        store.child_indexes = discovered_children
     else:
         touched_sources = {m["source"] for m in metadatas}
         store.remove_by_source(touched_sources)
+        # Точечный обход обходит только targets — не переоткрывает то, что
+        # полный обход когда-то уже нашёл где-то ещё в дереве, поэтому
+        # объединяем, а не заменяем целиком.
+        seen_dirs = {c["dir"] for c in store.child_indexes}
+        store.child_indexes += [c for c in discovered_children if c["dir"] not in seen_dirs]
     for id_, text, embedding, metadata in zip(ids, texts, embeddings, metadatas):
         store.add(id_, text, embedding, metadata)
     store.model = EMBED_MODEL
@@ -171,6 +222,9 @@ async def reindex_code(repo_path: str, store: VectorStore, targets: list[str] | 
     log_event(
         "code_reindexed", repo_path=repo_path, chunks=len(ids),
         truncated=truncated, chunk_cap=MAX_INDEXED_CHUNKS,
-        scoped=roots is not None, missing=len(missing),
+        scoped=roots is not None, missing=len(missing), referenced=len(discovered_children),
     )
-    return {"chunks": len(ids), "truncated": truncated, "missing": missing, "scoped": roots is not None}
+    return {
+        "chunks": len(ids), "truncated": truncated, "missing": missing,
+        "scoped": roots is not None, "referenced": len(discovered_children),
+    }
