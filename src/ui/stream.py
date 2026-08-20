@@ -142,7 +142,26 @@ def _shorten(val, limit: int = 80) -> str:
 # "read_file { path: X, offset: 49, limit: 51 }". Falls back to a generic
 # "name(args)" one-liner for any tool not explicitly covered below, so a new
 # or uncommon tool still shows something reasonable instead of nothing.
+def _tool_line_prefix(header: str) -> str:
+    """Indent + bullet for a tool_start/tool_end header line. delegate's own
+    sub-agent tool calls arrive named "delegate → read_file" etc.
+    (delegate_tool.py) — without this they printed at the SAME left column
+    as every top-level tool, so several delegate() calls' own activity (or
+    just a delegate call sitting among the outer agent's own tools) blurred
+    into one flat, un-scannable column. Extra indent + a distinct bullet
+    (↳ instead of ●) makes which lines belong to a delegate call visible at
+    a glance instead of only readable by parsing the "delegate → " text."""
+    return "      ↳" if " → " in header else "  ●"
+
+
 def _format_tool_call(name: str, args: dict) -> str:
+    if " → " in name:
+        # delegate's own sub-calls (delegate_tool.py: "delegate → grep_search")
+        # — recurse on the REAL inner tool name so it gets the same friendly
+        # Russian phrasing as a top-level call, instead of falling through
+        # to the generic name(args) fallback below for every single one.
+        parent, _, inner_name = name.partition(" → ")
+        return f"{parent} → {_format_tool_call(inner_name, args)}"
     if name == "read_file":
         path = args.get("path", "?")
         offset = args.get("offset") or 0
@@ -448,7 +467,7 @@ class StreamDisplay:
                     return
                 on = not on
                 style = "bold white" if on else "bright_black"
-                self._app._output._lines[line_idx] = _render_markup(f"[{style}]  ●[/] {_escape_markup(header)}")
+                self._app._output._lines[line_idx] = _render_markup(f"[{style}]{_tool_line_prefix(header)}[/] {_escape_markup(header)}")
                 self._app.invalidate()
         except asyncio.CancelledError:
             pass
@@ -678,7 +697,7 @@ class StreamDisplay:
                 line_idx = len(self._app._output._lines) - 1
                 fold = self._app._output.reserve_fold(line_idx)
             header = _format_tool_call(name, args)
-            console.print(f"[bright_black]  ●[/] {_escape_markup(header)}")
+            console.print(f"[bright_black]{_tool_line_prefix(header)}[/] {_escape_markup(header)}")
             blink_task = (
                 asyncio.create_task(self._blink_tool_dot(fold, header))
                 if fold is not None else None
@@ -799,7 +818,7 @@ class StreamDisplay:
             # turn on an IndexError over a purely cosmetic status dot.
             trigger_text = None
             if fold is not None and self._app is not None and 0 <= fold.trigger_line < len(self._app._output._lines):
-                trigger_text = _render_markup(f"[bold white]  ●[/] {_escape_markup(header)}")
+                trigger_text = _render_markup(f"[bold white]{_tool_line_prefix(header)}[/] {_escape_markup(header)}")
                 self._app._output._lines[fold.trigger_line] = trigger_text
                 self._app.invalidate()
             else:

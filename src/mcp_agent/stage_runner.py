@@ -32,7 +32,7 @@ from langgraph.errors import GraphRecursionError
 from tools.confirm import ask_user_question
 from mcp_agent.debug_log import log_event
 from mcp_agent.delegate_tool import _SUBAGENT_TOOLS, _suppress_during_subagent_tools  # noqa: F401 (re-exported, see below)
-from mcp_agent.model_config import MAX_SELF_HEAL_ASKS
+from mcp_agent.model_config import MAX_SELF_HEAL_ASKS, TOOL_OUTPUT_CHAR_CAP
 from mcp_agent.self_heal import (
     _execute_leaked_tool_call,
     _extract_ask_user_shape,
@@ -269,7 +269,8 @@ async def run_stage(
                         await on_event({"type": "tool_start", "name": call["name"], "args": call["args"], "stage": stage_name, "id": call_id})
                     call_result = await _execute_leaked_tool_call(tools_by_name, call["name"], call["args"])
                     if on_event:
-                        await on_event({"type": "tool_end", "name": call["name"], "result": call_result[:2000], "stage": stage_name, "id": call_id})
+                        # Match the model's own output cap instead of a smaller flat cutoff — see agent.py's tool_end.
+                        await on_event({"type": "tool_end", "name": call["name"], "result": call_result[:TOOL_OUTPUT_CHAR_CAP], "stage": stage_name, "id": call_id})
                     result_parts.append(f"`{call['name']}` result:\n{call_result}")
                 verdict = {
                     "relevant": False,
@@ -341,7 +342,7 @@ async def run_stage(
                 await on_event({"type": "tool_start", "name": "ask_user", "args": shape, "stage": stage_name, "id": call_id})
             answer = await ask_user_question(shape["question"], shape["options"], shape["recommended"])
             if on_event:
-                await on_event({"type": "tool_end", "name": "ask_user", "result": answer[:2000], "stage": stage_name, "id": call_id})
+                await on_event({"type": "tool_end", "name": "ask_user", "result": answer[:TOOL_OUTPUT_CHAR_CAP], "stage": stage_name, "id": call_id})
             round_digests.append(f"- asked user: {shape['question']!r}\n- user answered: {answer!r}")
             payload = {"messages": [HumanMessage(content=f"The user's answer: {answer}")]}
             max_attempts += 1  # гарантированный ход на использование ответа, не засчитывается как провал

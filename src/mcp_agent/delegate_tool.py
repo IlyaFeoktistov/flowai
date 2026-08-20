@@ -16,6 +16,20 @@ UnitStarter) агент может закончить шаги ещё до го�
 после каждого круга), выполняется полностью, и только потом возвращает
 управление основному циклу.
 
+Раньше это было ТОЛЬКО предположением в этом комментарии, ничем не
+закреплённым в коде — langgraph/prebuilt/tool_node.py исполняет ВСЕ
+tool_calls одного AIMessage через asyncio.gather разом, так что если
+модель за один раунд решит вызвать delegate несколько раз (наблюдалось
+живьём: 3 одновременных вызова), они реально стартовали бы конкурентно.
+own_read_history/compact_research (см. build_delegate_tool ниже) —
+ОБЩЕЕ на все вызовы состояние, которое каждый delegate() очищает при
+входе, полагаясь именно на строгую последовательность — при реальной
+конкурентности один вызов мог стереть кэш другого посреди его работы.
+_delegate_lock ниже — настоящее принуждение к тому, что до сих пор было
+только описано словами: если модель всё же запустит несколько delegate
+разом, они физически дождутся друг друга по очереди (FIFO у asyncio.Lock),
+а не тронут общее состояние одновременно.
+
 Тулы у сабагента — READ-ONLY подмножество (_ALLOWED_TOOLS): без bash,
 без записи файлов, без git-мутаций. Это осознанное упрощение, а не
 временная заглушка — сабагент здесь только для разведки ("как оно
@@ -39,6 +53,7 @@ glob_search — см. compaction.py:STICKY_TOOL_NAMES) компакция при
 не трогает, так что чисто от нескольких больших честно прочитанных файлов
 упереться в потолок всё ещё можно.
 """
+import asyncio
 import uuid
 from contextvars import ContextVar
 
@@ -52,7 +67,7 @@ from langgraph.errors import GraphRecursionError
 from mcp_agent.ask_user_tool import _ToolErrorGuardMiddleware
 from mcp_agent.compaction import _CompactResearchMiddleware, _summarize_research, is_context_overflow_error
 from mcp_agent.message_utils import _DedupeToolResultsMiddleware, _tool_text
-from mcp_agent.model_config import DEBUG, DELEGATE_RECURSION_LIMIT
+from mcp_agent.model_config import DEBUG, DELEGATE_RECURSION_LIMIT, TOOL_OUTPUT_CHAR_CAP
 from mcp_agent.roles import LEGACY_INVESTIGATION_TOOL_NAMES
 from mcp_agent.self_heal import (
     _execute_leaked_tool_call,
@@ -273,10 +288,11 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
                             "id": tc.get("id"),
                         })
                 elif isinstance(m, ToolMessage):
+                    # Match the model's own output cap instead of a smaller flat cutoff — see agent.py's tool_end.
                     await on_event({
                         "type": "tool_end",
                         "name": f"delegate → {m.name}",
-                        "result": _tool_text(m.content)[:2000],
+                        "result": _tool_text(m.content)[:TOOL_OUTPUT_CHAR_CAP],
                         "id": m.tool_call_id,
                     })
             prev_len = len(msgs)
@@ -342,25 +358,15 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
         checkpointer=InMemorySaver(),
     )
 
-    @tool
-    async def delegate(task: str) -> str:
-        """Delegate an open-ended, multi-file investigation to a fresh
-        sub-agent with its OWN context window and its OWN step budget,
-        separate from this conversation's. Use this instead of digging
-        through the codebase yourself when a question needs tracing
-        something across MANY files/layers (e.g. "how does X's retry logic
-        actually work end to end" spanning a Job -> Service -> Repository ->
-        Persister chain) — that kind of investigation can burn most of THIS
-        conversation's own step budget on file reads alone, and if THAT
-        budget runs out mid-investigation the whole turn is lost with
-        nothing to show for it.
+    # Forces the sequential-only guarantee the module docstring already
+    # claimed but never enforced — see there for why a real conflict is
+    # possible, not just a wasted VRAM slot. One lock per built delegate
+    # tool (i.e. per session), held for the ENTIRE body of a call: if the
+    # model fires several delegate calls in one round, they queue here in
+    # FIFO order and run one at a time, exactly like a single call would.
+    _delegate_lock = asyncio.Lock()
 
-        The sub-agent reports back ONE text summary with concrete
-        file:line citations — you still decide what to do with it, it does
-        not take any action itself. It is READ-ONLY (no writes/bash/git
-        mutations) and can't ask the user anything — write `task` as a
-        complete, self-contained question with whatever context it needs;
-        it does not see the rest of this conversation."""
+    async def _run_delegate(task: str) -> str:
         own_read_history.clear()
         compact_research.clear_cache()
         conversation = [HumanMessage(content=task)]
@@ -502,5 +508,32 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
             "real tool calls after multiple recovery attempts — giving up. "
             f"Its last output was:\n\n{final_text}"
         )
+
+    @tool
+    async def delegate(task: str) -> str:
+        """Delegate an open-ended, multi-file investigation to a fresh
+        sub-agent with its OWN context window and its OWN step budget,
+        separate from this conversation's. Use this instead of digging
+        through the codebase yourself when a question needs tracing
+        something across MANY files/layers (e.g. "how does X's retry logic
+        actually work end to end" spanning a Job -> Service -> Repository ->
+        Persister chain) — that kind of investigation can burn most of THIS
+        conversation's own step budget on file reads alone, and if THAT
+        budget runs out mid-investigation the whole turn is lost with
+        nothing to show for it.
+
+        The sub-agent reports back ONE text summary with concrete
+        file:line citations — you still decide what to do with it, it does
+        not take any action itself. It is READ-ONLY (no writes/bash/git
+        mutations) and can't ask the user anything — write `task` as a
+        complete, self-contained question with whatever context it needs;
+        it does not see the rest of this conversation. Calling this several
+        times in one turn is fine — each call runs to completion before the
+        next one starts, and each result is labeled with its own task so
+        you can tell them apart."""
+        async with _delegate_lock:
+            result = await _run_delegate(task)
+        label = " ".join(task.split())[:80]
+        return f"[delegate: {label}]\n{result}"
 
     return delegate
