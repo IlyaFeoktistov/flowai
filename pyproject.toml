@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 [project]
 name = "flowai"
 # Держать в синхроне с version.py:__version__ вручную — см. его докстринг.
-version = "1.7.6"
+version = "1.7.7"
 description = "Python CLI AI chat application powered by Ollama"
 license = "MIT"
 requires-python = ">=3.12"

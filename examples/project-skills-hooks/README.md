@@ -1,37 +1,52 @@
-# project-skills-hooks — example per-project skills & hooks
+# project-skills-hooks — пример per-project скилов и хуков
 
-Demonstrates the manifest-free `.flowai/skills`/`.flowai/hooks`
-mechanism — distinct from `examples/plugins/hello-world`, which
-demonstrates the global, manifest-based **plugin** format instead. Use
-this shape when the extension is only useful for ONE specific project
-you're working on, not something you'd share as a standalone plugin.
+Демонстрирует безманифестный механизм `.flowai/skills`/`.flowai/hooks` —
+в отличие от `examples/plugins/hello-world`, который демонстрирует
+глобальный, манифест-based формат **плагина**. Используйте эту форму,
+когда расширение полезно только в ОДНОМ конкретном проекте, над которым
+вы сейчас работаете, а не в виде отдельного плагина для распространения.
 
-- **`.flowai/skills/todo.py`** — a `/todo <text>` command, scoped to
-  whichever project has this `.flowai/` folder. The filename (minus
-  `.py`) IS the command name — no manifest entry needed.
-- **`.flowai/hooks/no_secrets.py`** — `post_file_edit` (warns) and
-  `pre_commit` (blocks) hooks, a crude grep for accidentally-committed
-  secrets. Any `.py` file in `.flowai/hooks/` contributes whichever of
-  `post_file_edit`/`pre_commit` it defines.
+- **`.flowai/skills/todo.py`** — команда `/todo <текст>`, привязанная к
+  тому проекту, в котором лежит эта папка `.flowai/`. Имя файла (минус
+  `.py`) И ЕСТЬ имя команды — манифест не нужен. Возвращает `None` —
+  чистая команда с побочным эффектом, как и любая команда глобального
+  плагина.
+- **`.flowai/skills/find-bottlenecks.py`** — `/find-bottlenecks [фокус]`
+  демонстрирует ДРУГОЙ вид скила: вместо `None` он возвращает
+  `mcp_agent.plugins.SkillTask`, который передаёт свою задачу в
+  НАСТОЯЩИЙ ход агента (тот же пайплайн, что и у обычного, вручную
+  введённого сообщения), а не просто что-то печатает. Также показывает
+  два дополнительных поля: `allowed_tools` (этот ход механически
+  ограничен read-only тулами — вызов `bash`/`write_file` будет отклонён
+  напрямую, а не просто отговорен текстом в промпте) и `prefer_delegate`
+  (мягкий намёк использовать `delegate()`, если он доступен в текущей
+  сессии).
+- **`.flowai/hooks/no_secrets.py`** — хуки `post_file_edit` (предупреждает)
+  и `pre_commit` (блокирует), грубый grep на случайно закоммиченные
+  секреты. Любой `.py`-файл в `.flowai/hooks/` даёт тот из
+  `post_file_edit`/`pre_commit`, который в нём определён.
 
-## Try it
+## Попробовать
 
-Copy the `.flowai` folder into the root of the project you have open in
-flowai (not into flowAI's own checkout):
+Скопируйте папку `.flowai` в корень проекта, который у вас открыт через
+flowai (не в сам чекаут flowAI):
 
 ```bash
 cp -r examples/project-skills-hooks/.flowai /path/to/your/project/.flowai
 ```
 
-Restart flowai in that project. `/todo write more tests` appends a line
-to `TODO.local.md`; editing a file that contains something matching
-`api_key = "..."` prints a warning; committing one is blocked.
+Перезапустите flowai в этом проекте. `/todo write more tests` дописывает
+строку в `TODO.local.md`; `/find-bottlenecks the database layer` запускает
+настоящее read-only-ограниченное расследование; редактирование файла с
+чем-то вроде `api_key = "..."` печатает предупреждение; коммит с этим —
+блокируется.
 
-## Uninstall
+## Удалить
 
-Delete `.flowai/skills/todo.py` / `.flowai/hooks/no_secrets.py` (or the
-whole `.flowai/` folder) — no registry, nothing else to clean up.
+Удалите `.flowai/skills/todo.py` / `.flowai/skills/find-bottlenecks.py` /
+`.flowai/hooks/no_secrets.py` (или всю папку `.flowai/`) — никакого
+реестра, больше ничего чистить не нужно.
 
-See [docs/plugins.md](../../docs/plugins.md) for the full mechanism,
-including how a project skill relates to a same-named global plugin
-command.
+Полный механизм — в [docs/plugins.md](../../docs/plugins.md), включая то,
+как per-project скил соотносится с одноимённой командой глобального
+плагина.

@@ -53,15 +53,25 @@ the plugin's own directory are resolved to an absolute path; anything else
 (an installed console script, a bare module name) is passed through
 as-is, same convention as mcp_agent/config.py's own server commands.
 
-Command function signature — `def run(args: str, console) -> None` (sync
-or async, cli.py awaits it only if it returns an awaitable): `args` is the
-raw text after "/hello ", `console` is ui/console.py's Rich console (the
-same one every other command prints through — printing anywhere else
-won't render inside the TUI, see ui/console.py's own docstring). A
-global-plugin or project-skill command can never SHADOW a built-in one —
-cli.py only checks these after every "/xxx" it already knows about; a
-project skill CAN shadow a global plugin's command of the same name
-(checked first — it's the more specific of the two).
+Command function signature — `def run(args: str, console) -> None | str |
+SkillTask` (sync or async, cli.py awaits it only if it returns an
+awaitable): `args` is the raw text after "/hello ", `console` is
+ui/console.py's Rich console (the same one every other command prints
+through — printing anywhere else won't render inside the TUI, see
+ui/console.py's own docstring). A global-plugin or project-skill command
+can never SHADOW a built-in one — cli.py only checks these after every
+"/xxx" it already knows about; a project skill CAN shadow a global
+plugin's command of the same name (checked first — it's the more specific
+of the two).
+
+Returning `None` (or nothing) keeps the original behavior — a pure
+side-effect command that stops right there. Returning a plain `str`, or a
+`SkillTask` (see its own docstring below), hands the text off to a REAL
+agent turn instead — cli.py feeds it into the exact same pipeline a
+manually typed message goes through (stream_chat), so a skill can pre-fetch
+real data (read a file directly, hit an API — whatever it needs) and hand
+back a fully-formed task instead of hoping the model asks for the right
+tool calls itself.
 
 Hook function signatures — mcp_agent/plugin_hooks.py calls these, see its
 own docstring for exactly when and with what arguments.
@@ -79,8 +89,13 @@ isn't worth the complexity here.
 import importlib.util
 import json
 import sys
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import ToolMessage
 
 from ui.console import console
 
@@ -90,6 +105,92 @@ _PLUGINS_DIR_NAME = "plugins"
 _manifests_cache: list[dict] | None = None
 _global_commands_cache: dict[str, dict] | None = None
 _global_hooks_cache: dict[str, list[Callable]] = {}
+
+
+# ---------------------------------------------------------------------------
+# SkillTask — a skill's `run()` returns one of these (or a plain str) to hand
+# its task off to a real agent turn instead of just printing and stopping.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SkillTask:
+    """Richer alternative to returning a plain `str` from a skill's `run()`.
+    A bare `str` return is exactly `SkillTask(task=that_string)` — these
+    two extra fields are opt-in.
+
+    allowed_tools — restricts the tool set for THIS turn only, to the given
+    tool NAMES (e.g. {"read_file", "grep_search", "glob_search"} for a
+    read-only investigation skill). Enforced by SkillToolRestrictionMiddleware
+    below (a disallowed tool call is mechanically rejected, not just asked
+    politely not to happen) — None means no restriction, same as today.
+    This does NOT shrink what the model's schema shows it (that would touch
+    agent_builder.py's cached per-(role, tool_names) agent construction,
+    which lives well outside a single turn) — the model still SEES every
+    tool it normally would, it just gets told no if it calls one outside
+    this set.
+
+    prefer_delegate — soft nudge (prepended text), not an enforced routing
+    rule: flowai has no way to hand a skill's task straight to delegate()
+    without going through the model's own tool-calling decision (delegate
+    only exists in the legacy agent's tool set to begin with, see
+    delegate_tool.py — nothing to route to at all in pipeline_mode). Same
+    class of mechanism as delegate_tool.py's own _DelegateNudgeMiddleware
+    (prompt text, not a hard bypass) — harmless if delegate isn't bound for
+    this session, the sentence just goes unused."""
+
+    task: str
+    allowed_tools: frozenset[str] | None = None
+    prefer_delegate: bool = False
+
+    def render(self) -> str:
+        if not self.prefer_delegate:
+            return self.task
+        return (
+            "(This looks like a broad, read-only investigation spanning "
+            "many files — if delegate() is available, prefer calling it "
+            "for this right away instead of investigating step by step "
+            "yourself.)\n\n" + self.task
+        )
+
+
+# Set once per turn (cli.py, right before handing a skill's task into the
+# normal message pipeline), read by SkillToolRestrictionMiddleware below on
+# every tool call during that same turn. None (the default) means no
+# restriction — reset to None at the top of EVERY _handle_input call in
+# cli.py, not just cleared after a restricted one, so a stray leftover
+# restriction can survive at most one turn even in a bug, never longer.
+current_skill_restriction: ContextVar[frozenset[str] | None] = ContextVar(
+    "skill_tool_restriction", default=None
+)
+
+
+class SkillToolRestrictionMiddleware(AgentMiddleware):
+    """Unconditional in the base middleware stack (agent_builder.py:
+    _base_agent_middleware), like PluginHookMiddleware — current_skill_restriction
+    being unset (the overwhelming common case: no skill in play, or a skill
+    that didn't ask for a restriction) makes every check here a no-op.
+    Placed before HumanInTheLoopMiddleware in the list (see
+    _base_agent_middleware's own docstring on why pre_hitl rejectors go
+    first) — a tool call that's going to be mechanically refused must never
+    make the user sit through approving it first."""
+
+    async def awrap_tool_call(self, request, handler):
+        allowed = current_skill_restriction.get()
+        name = request.tool_call["name"]
+        if allowed is None or name in allowed:
+            return await handler(request)
+        return ToolMessage(
+            content=(
+                f"Tool '{name}' is not allowed for this task — it was "
+                "started by a skill restricted to: " + ", ".join(sorted(allowed)) +
+                ". Work within that set; if you genuinely need something "
+                "outside it, say so in your final answer instead of calling it."
+            ),
+            name=name,
+            tool_call_id=request.tool_call["id"],
+            status="error",
+        )
 
 
 def plugins_dir() -> Path:

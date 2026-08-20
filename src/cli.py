@@ -109,6 +109,7 @@ from ui.app import FlowAIApp
 from ui.console import console, safe_write, connect_app
 from ui.error_reporting import install_background_exception_handler
 from ui.header import print_header
+from ui.at_mentions import resolve_at_mentions
 from ui.images import get_clipboard_image, load_image_file, store_image, resolve_image_paths, clear_store as _clear_images
 from ui.paste_store import resolve_pastes, clear_store as _clear_pastes
 from ui.suggestions import looks_like_question, suggest_reply
@@ -300,7 +301,7 @@ _HELP_ROWS: list[tuple[str, str, str]] = [
     ("/clear", "", "очистить историю"),
     ("/help", "", "эта справка"),
     ("!", "команда", "выполнить shell-команду, вывод сразу уйдёт нейронке"),
-    ("@", "имя_файла", "поиск файлов в текущей директории, автокомплит по имени/пути"),
+    ("@", "имя_файла", "поиск файлов в текущей директории (автокомплит по имени/пути); при отправке содержимое реального файла вкладывается в сообщение целиком"),
 ]
 
 
@@ -586,6 +587,11 @@ async def main() -> None:
         user_input = raw.strip()
         if not user_input:
             return
+        # Reset unconditionally, not just after a restricted skill — bounds
+        # a stray leftover restriction (bug, or an interrupted turn) to at
+        # most one turn instead of silently outliving the skill that set it.
+        # See mcp_agent/plugins.py:current_skill_restriction.
+        plugins.current_skill_restriction.set(None)
 
         # ── "!команда" — выполнить shell-команду напрямую, результат уйдёт
         # нейронке как обычное сообщение ──────────────────────────────────
@@ -1193,8 +1199,40 @@ async def main() -> None:
             if plugin_command is not None:
                 outcome = plugin_command["func"](cmd_args, console)
                 if hasattr(outcome, "__await__"):
-                    await outcome
-                return
+                    outcome = await outcome
+                # None (or nothing returned) — unchanged behavior, a pure
+                # side-effect command that stops here. A str or SkillTask
+                # (mcp_agent/plugins.py) hands its task to a REAL agent
+                # turn instead — falls through to the exact same pipeline
+                # a manually typed message goes through, rather than
+                # returning immediately like every other command above.
+                if outcome is None:
+                    return
+                if isinstance(outcome, plugins.SkillTask):
+                    if outcome.allowed_tools is not None:
+                        plugins.current_skill_restriction.set(outcome.allowed_tools)
+                    user_input = outcome.render()
+                elif isinstance(outcome, str):
+                    user_input = outcome
+                else:
+                    console.print(f"[red] ✗ Скил /{cmd.lstrip('/')} вернул неожиданный тип: {type(outcome).__name__}[/]\n")
+                    return
+                if not user_input.strip():
+                    console.print(f"[red] ✗ Скил /{cmd.lstrip('/')} вернул пустую задачу[/]\n")
+                    return
+                # Echo the command as TYPED, not the (often much longer,
+                # multi-paragraph) expanded task text — same idea as the
+                # "!команда" transcript rewrite above: the user should see
+                # what they invoked, not a wall of prompt text standing in
+                # for their message. Suppresses the later automatic echo
+                # (below, keyed on skip_echo) of the real user_input.
+                console.print(f"\n[green bold] You ›[/] {escape(cmd)}{' ' + escape(cmd_args) if cmd_args else ''}\n")
+                _suppress_echo = True
+                # No longer a command from here on — `cmd` only still
+                # matters below for the "/plugin" and "unknown command"
+                # checks, neither of which should fire now that this
+                # turned into a real task.
+                cmd = ""
 
         if cmd == "/plugin":
             console.print(Panel(
@@ -1219,6 +1257,10 @@ async def main() -> None:
         # process's in-memory image store, so the model needs a real,
         # openable file path instead of the placeholder text.
         model_input = resolve_image_paths(model_input)
+        # @path mentions (ui/app.py:_FileSearchCompleter helps type them) —
+        # resolved to the real file's content here rather than left as a
+        # bare path the model would have to decide to read_file itself.
+        model_input = resolve_at_mentions(model_input)
 
         # 🔒 Защита: не добавлять пустые сообщения
         if not model_input or not model_input.strip():

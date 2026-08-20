@@ -882,10 +882,16 @@ def _base_agent_middleware(
     PluginHookMiddleware is unconditional (not gated behind whether any
     plugin is even installed) — mcp_agent.plugins.load_hooks() is itself
     the check (empty list, no-op, if nothing declared a given hook), so
-    there's no meaningful "role doesn't need it" case to special-case."""
+    there's no meaningful "role doesn't need it" case to special-case.
+    Same reasoning for plugins.SkillToolRestrictionMiddleware — it's a
+    no-op whenever current_skill_restriction is unset (the common case),
+    and placed alongside the other pre_hitl-style mechanical rejectors
+    (before hitl_middleware) for the same reason: a tool call that's going
+    to be refused outright must never make the user approve it first."""
     return [
         _ToolErrorGuardMiddleware(),
         _UnloadImageGenBeforeGenModelMiddleware(),
+        plugins.SkillToolRestrictionMiddleware(),
         *(pre_hitl or ()),
         hitl_middleware,
         _AskUserGuardMiddleware(),

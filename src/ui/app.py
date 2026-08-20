@@ -28,6 +28,8 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.styles import Style
 
+from mcp_agent import plugins
+
 _PERM_LABELS: dict[str, str] = {
     "bash":        "bash-команды",
     "read_file":   "чтение файлов",
@@ -669,6 +671,17 @@ class _CmdCompleter(Completer):
             if cmd.startswith(text):
                 yield Completion(cmd, start_position=-len(text),
                                  display=cmd, display_meta=desc)
+        # Global-plugin/project-skill commands (mcp_agent/plugins.py) aren't
+        # in the static COMMANDS list above (see _KNOWN_CMDS's own comment
+        # on why cli.py checks them separately) — offered here too so a
+        # skill like /find-bottlenecks isn't invisible in the popup just
+        # because it's loaded dynamically instead of built in.
+        for name, info in plugins.load_commands(os.getcwd()).items():
+            full = f"/{name}"
+            if full.startswith(text):
+                meta = info.get("help") or f"скил/плагин: {info.get('plugin', '?')}"
+                yield Completion(full, start_position=-len(text),
+                                 display=full, display_meta=meta)
 
 
 class _ImgRefCompleter(Completer):
@@ -758,6 +771,14 @@ class _FileSearchCompleter(Completer):
 
 class _CmdLexer(Lexer):
     def lex_document(self, document):
+        # Computed once per document (not per line/keystroke-within-render)
+        # — dynamically loaded plugin/project-skill commands (see
+        # _CmdCompleter's own comment above) aren't in the static
+        # _KNOWN_CMDS, so without this a valid command like
+        # /find-bottlenecks would always render as "unknown" (class:cmd.bad)
+        # even though cli.py happily runs it.
+        plugin_cmds = {f"/{name}" for name in plugins.load_commands(os.getcwd())}
+
         def tokenize(line_no: int):
             line = document.lines[line_no]
             if not line.startswith("/"):
@@ -765,7 +786,8 @@ class _CmdLexer(Lexer):
             parts = line.split(maxsplit=1)
             cmd  = parts[0]
             rest = (" " + parts[1]) if len(parts) > 1 else ""
-            style = "class:cmd.ok" if cmd in _KNOWN_CMDS else "class:cmd.bad"
+            known = cmd in _KNOWN_CMDS or cmd in plugin_cmds
+            style = "class:cmd.ok" if known else "class:cmd.bad"
             tokens = [(style, cmd)]
             if rest:
                 tokens.append(("class:cmd.arg", rest))
