@@ -52,7 +52,7 @@ async def test_reindex_code_reports_truncation(tmp_path, monkeypatch):
     monkeypatch.setattr("rag.index_code.chunk_text", lambda text: [text] * 5)
     (tmp_path / "big.py").write_text("x = 1\n")
 
-    async def _fake_embed(texts):
+    async def _fake_embed(texts, **kwargs):
         return [[0.1, 0.2] for _ in texts]
     monkeypatch.setattr("rag.index_code.embed_texts", _fake_embed)
 
@@ -69,7 +69,7 @@ async def test_reindex_code_reports_truncation(tmp_path, monkeypatch):
 async def test_reindex_code_not_truncated_under_cap(tmp_path, monkeypatch):
     (tmp_path / "small.py").write_text("x = 1\n")
 
-    async def _fake_embed(texts):
+    async def _fake_embed(texts, **kwargs):
         return [[0.1, 0.2] for _ in texts]
     monkeypatch.setattr("rag.index_code.embed_texts", _fake_embed)
 
@@ -82,7 +82,7 @@ async def test_reindex_code_not_truncated_under_cap(tmp_path, monkeypatch):
 
 @pytest.fixture
 def _fake_embed_fixture(monkeypatch):
-    async def _fake_embed(texts):
+    async def _fake_embed(texts, **kwargs):
         return [[0.1, 0.2] for _ in texts]
     monkeypatch.setattr("rag.index_code.embed_texts", _fake_embed)
 
@@ -154,3 +154,23 @@ async def test_reindex_code_all_targets_missing_is_a_no_op(tmp_path):
     result = await reindex_code(str(tmp_path), store, targets=["nope.py"])
 
     assert result == {"chunks": 0, "truncated": False, "missing": ["nope.py"], "scoped": True, "referenced": 0}
+
+
+@pytest.mark.asyncio
+async def test_reindex_code_forwards_on_progress_to_embed_texts(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    captured = {}
+
+    async def _fake_embed(texts, on_progress=None):
+        captured["on_progress"] = on_progress
+        if on_progress:
+            on_progress(len(texts), len(texts))
+        return [[0.1, 0.2] for _ in texts]
+    monkeypatch.setattr("rag.index_code.embed_texts", _fake_embed)
+
+    calls = []
+    store = VectorStore(str(tmp_path / "index.json"))
+    await reindex_code(str(tmp_path), store, on_progress=lambda done, total: calls.append((done, total)))
+
+    assert captured["on_progress"] is not None
+    assert calls == [(1, 1)]

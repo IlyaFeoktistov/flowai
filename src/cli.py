@@ -684,7 +684,27 @@ async def main() -> None:
             targets = cmd_args.split() if cmd_args else None
             scope_label = ", ".join(targets) if targets else "весь проект"
             console.print(f"[dim]  📚 переиндексирую: {scope_label} (может занять время)…[/]\n")
-            result = await reindex_code_from_disk(os.getcwd(), targets=targets)
+
+            # Печатает НОВУЮ строку на каждые +10%, а не перерисовывает
+            # одну и ту же строку — Rich Progress/Live двигают курсор
+            # ANSI-командами, рассчитывая на прямой terminal file
+            # descriptor, а вывод здесь идёт через ui/console.py's
+            # _AppProxy (либо в output pane реального TUI-приложения,
+            # либо в sys.stdout.buffer в фолбэк-режиме) — курсор туда-
+            # обратно там ничего гарантированно не найдёт и на месте не
+            # перерисуется, просто наплодит мусор. Та же схема (печатать
+            # статус построчно), что уже использует /music's on_status.
+            _last_reported_pct = -1
+
+            def _on_progress(done: int, total: int) -> None:
+                nonlocal _last_reported_pct
+                pct = (done * 100 // total) if total else 100
+                bucket = (pct // 10) * 10
+                if bucket != _last_reported_pct:
+                    _last_reported_pct = bucket
+                    console.print(f"[dim]     ↳ эмбеддинг: {done}/{total} чанков ({bucket}%)[/]")
+
+            result = await reindex_code_from_disk(os.getcwd(), targets=targets, on_progress=_on_progress)
             if result["missing"]:
                 console.print(f"[red]  ✗ не найдено: {', '.join(result['missing'])}[/]")
             report = f"Индекс обновлён: {result['chunks']} чанков ({scope_label})."

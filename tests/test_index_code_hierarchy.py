@@ -19,7 +19,7 @@ def _isolated_data_dir(tmp_path_factory, monkeypatch):
 
 @pytest.fixture
 def _fake_embed(monkeypatch):
-    async def _embed(texts):
+    async def _embed(texts, **kwargs):
         return [[0.1, 0.2] for _ in texts]
     monkeypatch.setattr("rag.index_code.embed_texts", _embed)
 

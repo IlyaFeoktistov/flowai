@@ -2,6 +2,7 @@ import asyncio
 import fnmatch
 import os
 from pathlib import Path
+from typing import Callable
 
 from mcp_agent.debug_log import log_event
 from mcp_agent.servers.file_ops_server import SKIP_DIRS
@@ -153,7 +154,10 @@ def _resolve_targets(repo_path: str, targets: list[str]) -> tuple[list[str], lis
     return resolved, missing
 
 
-async def reindex_code(repo_path: str, store: VectorStore, targets: list[str] | None = None) -> dict:
+async def reindex_code(
+    repo_path: str, store: VectorStore, targets: list[str] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict:
     """Пересобирает индекс кода/доков — либо весь проект с нуля
     (targets=None, старое поведение: store.clear() + полный обход), либо
     ТОЛЬКО перечисленные файлы/директории (targets — из /reindex src
@@ -201,7 +205,7 @@ async def reindex_code(repo_path: str, store: VectorStore, targets: list[str] | 
     # проверки: он лишь напечатает лишнее предупреждение, не потеряет данные.
     truncated = len(texts) >= MAX_INDEXED_CHUNKS
 
-    embeddings = await embed_texts(texts)
+    embeddings = await embed_texts(texts, on_progress=on_progress)
 
     if roots is None:
         store.clear()
@@ -251,7 +255,10 @@ def _reindex_lock(repo_path: str) -> asyncio.Lock:
     return lock
 
 
-async def reindex_code_from_disk(repo_path: str, targets: list[str] | None = None) -> dict:
+async def reindex_code_from_disk(
+    repo_path: str, targets: list[str] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> dict:
     """reindex_code, but owns the full load-from-disk -> reindex -> save-
     to-disk cycle itself, serialized per repo_path (see _reindex_lock) —
     for callers that don't already hold a live VectorStore in hand:
@@ -262,4 +269,4 @@ async def reindex_code_from_disk(repo_path: str, targets: list[str] | None = Non
     racing it."""
     async with _reindex_lock(repo_path):
         store = VectorStore.load(code_store_path(repo_path))
-        return await reindex_code(repo_path, store, targets=targets)
+        return await reindex_code(repo_path, store, targets=targets, on_progress=on_progress)

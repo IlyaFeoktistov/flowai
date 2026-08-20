@@ -21,8 +21,10 @@ def _project(tmp_path, monkeypatch):
     (tmp_path / "a.py").write_text("def a():\n    pass\n")
     (tmp_path / "b.py").write_text("def b():\n    pass\n")
 
-    async def _slow_embed(texts):
+    async def _slow_embed(texts, on_progress=None, **kwargs):
         await asyncio.sleep(0.01)  # gives the event loop a chance to interleave
+        if on_progress:
+            on_progress(len(texts), len(texts))
         return [[0.1, 0.2] for _ in texts]
     monkeypatch.setattr("rag.index_code.embed_texts", _slow_embed)
 
@@ -67,3 +69,13 @@ async def test_concurrent_reindex_calls_are_actually_serialized(_project):
     await asyncio.gather(_tracked_reindex("a.py"), _tracked_reindex("b.py"))
 
     assert max_concurrent == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_code_from_disk_forwards_on_progress(_project):
+    repo_path, _store_path = _project
+    calls = []
+
+    await reindex_code_from_disk(repo_path, targets=["a.py"], on_progress=lambda done, total: calls.append((done, total)))
+
+    assert calls == [(1, 1)]
