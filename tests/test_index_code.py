@@ -59,7 +59,9 @@ async def test_reindex_code_reports_truncation(tmp_path, monkeypatch):
     store = VectorStore(str(tmp_path / "index.json"))
     result = await reindex_code(str(tmp_path), store)
 
-    assert result == {"chunks": 2, "truncated": True}
+    assert result["chunks"] == 2
+    assert result["truncated"] is True
+    assert result["scoped"] is False
     assert len(store) == 2
 
 
@@ -76,3 +78,79 @@ async def test_reindex_code_not_truncated_under_cap(tmp_path, monkeypatch):
 
     assert result["truncated"] is False
     assert result["chunks"] >= 1
+
+
+@pytest.fixture
+def _fake_embed_fixture(monkeypatch):
+    async def _fake_embed(texts):
+        return [[0.1, 0.2] for _ in texts]
+    monkeypatch.setattr("rag.index_code.embed_texts", _fake_embed)
+
+
+@pytest.mark.asyncio
+async def test_reindex_code_scoped_to_one_dir_leaves_rest_of_index_alone(tmp_path, _fake_embed_fixture):
+    """/reindex src — only src/ gets (re-)indexed; a.py's already-indexed
+    chunks outside src/ survive untouched (no store.clear())."""
+    (tmp_path / "a.py").write_text("def outside():\n    pass\n")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "b.py").write_text("def inside():\n    pass\n")
+
+    store = VectorStore(str(tmp_path / "index.json"))
+    await reindex_code(str(tmp_path), store)  # full reindex first, seeds both files
+    assert {c["metadata"]["source"] for c in store._chunks.values()} == {"a.py", "src/b.py"}
+
+    result = await reindex_code(str(tmp_path), store, targets=["src"])
+
+    assert result["scoped"] is True
+    assert {c["metadata"]["source"] for c in store._chunks.values()} == {"a.py", "src/b.py"}
+
+
+@pytest.mark.asyncio
+async def test_reindex_code_scoped_to_single_file(tmp_path, _fake_embed_fixture):
+    (tmp_path / "a.py").write_text("def a():\n    pass\n")
+    (tmp_path / "b.py").write_text("def b():\n    pass\n")
+
+    store = VectorStore(str(tmp_path / "index.json"))
+    result = await reindex_code(str(tmp_path), store, targets=["b.py"])
+
+    assert result["chunks"] == 1
+    sources = {c["metadata"]["source"] for c in store._chunks.values()}
+    assert sources == {"b.py"}  # a.py was never indexed, only b.py was requested
+
+
+@pytest.mark.asyncio
+async def test_reindex_code_scoped_replaces_shrunk_file_fully(tmp_path, monkeypatch, _fake_embed_fixture):
+    """A re-indexed file that now produces FEWER chunks than before must
+    not leave stale tail chunks (e.g. "a.py:3") behind — remove_by_source
+    drops ALL of a target's old chunks before the new ones are added."""
+    (tmp_path / "a.py").write_text("line\n" * 200)
+    store = VectorStore(str(tmp_path / "index.json"))
+    monkeypatch.setattr("rag.index_code.chunk_text", lambda text: [text] * 5)
+    await reindex_code(str(tmp_path), store, targets=["a.py"])
+    assert len(store) == 5
+
+    monkeypatch.setattr("rag.index_code.chunk_text", lambda text: [text] * 2)
+    await reindex_code(str(tmp_path), store, targets=["a.py"])
+
+    assert len(store) == 2
+    assert all(cid.startswith("a.py:") and int(cid.split(":")[1]) < 2 for cid in store._chunks)
+
+
+@pytest.mark.asyncio
+async def test_reindex_code_reports_missing_targets_without_erroring(tmp_path, _fake_embed_fixture):
+    (tmp_path / "real.py").write_text("x = 1\n")
+
+    store = VectorStore(str(tmp_path / "index.json"))
+    result = await reindex_code(str(tmp_path), store, targets=["real.py", "does_not_exist.py"])
+
+    assert result["missing"] == ["does_not_exist.py"]
+    assert result["chunks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reindex_code_all_targets_missing_is_a_no_op(tmp_path):
+    store = VectorStore(str(tmp_path / "index.json"))
+    result = await reindex_code(str(tmp_path), store, targets=["nope.py"])
+
+    assert result == {"chunks": 0, "truncated": False, "missing": ["nope.py"], "scoped": True}

@@ -45,6 +45,20 @@ class VectorStore:
     def clear(self) -> None:
         self._chunks = {}
 
+    def remove_by_source(self, sources: set[str]) -> int:
+        """Drops every chunk whose metadata["source"] is in `sources` — used
+        by a scoped /reindex (index_code.py:reindex_code, targets= given)
+        to replace a re-indexed file's chunks outright instead of just
+        overwriting by id: if the file shrank (fewer chunks than its
+        previous version), the old version's now-orphaned tail chunk ids
+        (e.g. "file.py:3"/"file.py:4" when the new version only produces
+        0..2) would otherwise never get overwritten and linger in the
+        index with stale content forever."""
+        stale_ids = [cid for cid, c in self._chunks.items() if c["metadata"].get("source") in sources]
+        for cid in stale_ids:
+            del self._chunks[cid]
+        return len(stale_ids)
+
     def __len__(self) -> int:
         return len(self._chunks)
 

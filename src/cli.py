@@ -264,7 +264,7 @@ def _show_help() -> None:
         "[bold cyan]/talk[/] [dim]текст[/]              — озвучить текст напрямую, без модели\n"
         "[bold cyan]/usage[/]                   — статистика токенов\n"
         "[bold cyan]/doctor[/]                  — проверка Ollama/модели/MCP-серверов/хранилища\n"
-        "[bold cyan]/reindex[/]                 — собрать индекс для семантического поиска по коду проекта (один раз на проект, вручную, вы решаете когда)\n"
+        "[bold cyan]/reindex[/] [dim]src file.py ...[/]      — собрать индекс для семантического поиска по коду; без аргументов — весь проект, с аргументами — только эти файлы/папки (не трогая остальной уже собранный индекс)\n"
         "[bold cyan]/clean[/] [dim]logs|trash|snapshots|projects|all[/] — почистить накопившийся за всё время хлам (логи/корзину/индексы); без аргумента — только отчёт, ничего не удаляет\n"
         "[bold cyan]/update[/]                  — проверить и подтянуть обновления flowAI из git\n"
         "[bold cyan]/settings[/]                — настройки моделей и GPU\n"
@@ -632,12 +632,22 @@ async def main() -> None:
             # it won't see a reindex done afterward until the process
             # restarts (that subprocess caches its VectorStore in a module
             # global, loaded once — see rag_server.py:_get_code_store).
-            console.print("[dim]  📚 переиндексирую код проекта (может занять время на большом репозитории)…[/]\n")
+            #
+            # Bare /reindex — full project, from scratch, as before.
+            # /reindex src file.py ... — scoped: only those files/dirs get
+            # (re-)indexed, the rest of an already-built index is left
+            # alone (see reindex_code's own docstring on why this replaces
+            # rather than adds to each target's chunks).
+            targets = cmd_args.split() if cmd_args else None
+            scope_label = ", ".join(targets) if targets else "весь проект"
+            console.print(f"[dim]  📚 переиндексирую: {scope_label} (может занять время)…[/]\n")
             store = VectorStore.load(code_store_path(os.getcwd()), model=EMBED_MODEL)
-            result = await reindex_code(os.getcwd(), store)
-            report = f"Индекс собран: {result['chunks']} чанков."
+            result = await reindex_code(os.getcwd(), store, targets=targets)
+            if result["missing"]:
+                console.print(f"[red]  ✗ не найдено: {', '.join(result['missing'])}[/]")
+            report = f"Индекс обновлён: {result['chunks']} чанков ({scope_label})."
             if result["truncated"]:
-                report += " (репозиторий больше лимита — часть кода не попала в индекс)"
+                report += " (лимит по объёму — часть содержимого не попала в индекс)"
             console.print(Panel(report, title="[bright_black]reindex[/]", border_style="bright_black", padding=(0, 2)))
             console.print()
             return

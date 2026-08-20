@@ -50,44 +50,102 @@ def _is_skipped_dir(name: str) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in SKIP_DIRS)
 
 
-def _iter_chunks(repo_path: str, max_chunks: int):
-    """Генератор — обрывает обход os.walk на месте, как только достигнут
-    max_chunks, вместо того чтобы сначала пройти всё дерево и порезать
-    список постфактум (тот же объём файловых чтений всё равно был бы
-    потрачен впустую)."""
-    n = 0
-    for root, dirs, files in os.walk(repo_path):
+def _iter_files(root_path: str):
+    """Yields absolute file paths under root_path — root_path itself if
+    it's already a file (a /reindex file.py target), or a SKIP_DIRS-
+    filtered recursive walk if it's a directory (whole repo, or a /reindex
+    src target)."""
+    if os.path.isfile(root_path):
+        yield root_path
+        return
+    for root, dirs, files in os.walk(root_path):
         dirs[:] = [d for d in dirs if not _is_skipped_dir(d)]
         for fname in files:
-            fpath = Path(root) / fname
-            try:
-                if fpath.stat().st_size > MAX_FILE_BYTES:
-                    continue
-                text = fpath.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue  # бинарники и нечитаемые файлы просто пропускаем
+            yield str(Path(root) / fname)
 
-            rel = str(fpath.relative_to(repo_path))
-            for i, chunk in enumerate(chunk_text(text)):
+
+def _chunk_file(fpath: str, repo_path: str):
+    """Yields (rel, chunk_idx, chunk_text) for one file — rel is relative
+    to repo_path (not to fpath's own root), so a partial /reindex of a
+    subdirectory still produces the SAME id/source form
+    (f"{rel}:{i}"/metadata["source"]) a full reindex would have for that
+    same file, and _iter_chunks' cross-target dedup (see reindex_code)
+    can match them up."""
+    p = Path(fpath)
+    try:
+        if p.stat().st_size > MAX_FILE_BYTES:
+            return
+        text = p.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return  # бинарники и нечитаемые файлы просто пропускаем
+    rel = str(p.relative_to(repo_path))
+    for i, chunk in enumerate(chunk_text(text)):
+        yield rel, i, chunk
+
+
+def _iter_chunks(repo_path: str, max_chunks: int, roots: list[str] | None = None):
+    """Генератор — обрывает обход на месте, как только достигнут
+    max_chunks, вместо того чтобы сначала пройти всё дерево и порезать
+    список постфактум (тот же объём файловых чтений всё равно был бы
+    потрачен впустую). roots — абсолютные пути (файлы или директории) для
+    точечного /reindex; None означает «весь repo_path», как раньше."""
+    n = 0
+    for root_path in (roots if roots is not None else [repo_path]):
+        for fpath in _iter_files(root_path):
+            for rel, i, chunk in _chunk_file(fpath, repo_path):
                 if n >= max_chunks:
                     return
                 yield rel, i, chunk
                 n += 1
 
 
-async def reindex_code(repo_path: str, store: VectorStore) -> dict:
-    """Полная пересборка индекса кода/доков проекта. Всегда с нуля (не
-    инкрементально) — на масштабе одного проекта это проще и надёжнее, чем
-    диффать; вызывается только вручную по тулу, не на каждом старте.
+def _resolve_targets(repo_path: str, targets: list[str]) -> tuple[list[str], list[str]]:
+    """targets — как их передал пользователь (относительно repo_path, или
+    абсолютные) — возвращает (существующие абсолютные пути, не найденные
+    как были переданы). Не бросает исключение на отсутствующий путь —
+    /reindex src typo1 typo2 должен всё равно проиндексировать src и
+    отдельно сказать пользователю про typo1/typo2, а не молча не сделать
+    ничего."""
+    resolved, missing = [], []
+    for t in targets:
+        abs_t = t if os.path.isabs(t) else os.path.join(repo_path, t)
+        abs_t = os.path.normpath(abs_t)
+        if os.path.exists(abs_t):
+            resolved.append(abs_t)
+        else:
+            missing.append(t)
+    return resolved, missing
+
+
+async def reindex_code(repo_path: str, store: VectorStore, targets: list[str] | None = None) -> dict:
+    """Пересобирает индекс кода/доков — либо весь проект с нуля
+    (targets=None, старое поведение: store.clear() + полный обход), либо
+    ТОЛЬКО перечисленные файлы/директории (targets — из /reindex src
+    file.py ..., см. cli.py), не трогая остальной уже собранный индекс.
+    Точечный режим — это ЗАМЕНА чанков затронутых файлов, не добавление:
+    у каждого файла в targets сначала удаляются ВСЕ его старые чанки (см.
+    store.remove_by_source), а затем добавляются свежие — иначе
+    отредактированный файл, у которого стало МЕНЬШЕ чанков, чем раньше,
+    оставил бы в индексе устаревшие "хвостовые" чанки от прежней, более
+    длинной версии (id "file.py:3"/"file.py:4" никогда не перезапишутся,
+    если после правки в файле осталось только 3 чанка: 0,1,2).
+
     Индекс сохраняется на диск (store.save(), см. rag_server.py:_INDEX_DIR)
     и переживает перезапуск процесса — search_code_semantic лениво
     подгружает его заново из файла, а не держит в памяти живого процесса,
     так что once-per-project реально означает once, а не once-per-session."""
+    missing: list[str] = []
+    roots: list[str] | None = None
+    if targets:
+        roots, missing = _resolve_targets(repo_path, targets)
+        if not roots:
+            return {"chunks": 0, "truncated": False, "missing": missing, "scoped": True}
+
     ids: list[str] = []
     texts: list[str] = []
     metadatas: list[dict] = []
 
-    for rel, i, chunk in _iter_chunks(repo_path, MAX_INDEXED_CHUNKS):
+    for rel, i, chunk in _iter_chunks(repo_path, MAX_INDEXED_CHUNKS, roots):
         ids.append(f"{rel}:{i}")
         texts.append(chunk)
         metadatas.append({"source_type": "code", "source": rel, "chunk_idx": i})
@@ -99,7 +157,11 @@ async def reindex_code(repo_path: str, store: VectorStore) -> dict:
 
     embeddings = await embed_texts(texts)
 
-    store.clear()
+    if roots is None:
+        store.clear()
+    else:
+        touched_sources = {m["source"] for m in metadatas}
+        store.remove_by_source(touched_sources)
     for id_, text, embedding, metadata in zip(ids, texts, embeddings, metadatas):
         store.add(id_, text, embedding, metadata)
     store.model = EMBED_MODEL
@@ -109,5 +171,6 @@ async def reindex_code(repo_path: str, store: VectorStore) -> dict:
     log_event(
         "code_reindexed", repo_path=repo_path, chunks=len(ids),
         truncated=truncated, chunk_cap=MAX_INDEXED_CHUNKS,
+        scoped=roots is not None, missing=len(missing),
     )
-    return {"chunks": len(ids), "truncated": truncated}
+    return {"chunks": len(ids), "truncated": truncated, "missing": missing, "scoped": roots is not None}

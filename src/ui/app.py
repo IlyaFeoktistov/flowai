@@ -630,6 +630,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("/talk",      "speak text directly, no model"),
     ("/usage",    "session statistics"),
     ("/doctor",   "health check: Ollama/model/MCP servers/storage"),
+    ("/reindex",  "build/update the semantic code search index — whole project, or specific files/dirs (/reindex src file.py ...)"),
     ("/update",   "check and pull flowAI updates from git"),
     ("/clean",    "clean up accumulated junk: logs/trash/snapshots/project indexes"),
     ("/settings", "model and GPU settings"),
