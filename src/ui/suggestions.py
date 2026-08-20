@@ -6,11 +6,7 @@ This module only decides WHEN a suggestion makes sense (looks_like_question)
 and generates its text (suggest_reply). Display (Buffer.suggestion, the
 "auto-suggestion" style) and the Tab-to-accept keybinding live in ui/app.py.
 """
-import os
 import re
-
-import settings
-from mcp_agent.model_config import OLLAMA_KEEP_ALIVE, OLLAMA_NUM_CTX, MODEL_TEMPERATURE
 
 _TRAILING_PUNCT_RE = re.compile(r"[)\"'»›』」\]]*\s*$")
 
@@ -34,21 +30,29 @@ async def suggest_reply(ai_text: str) -> str | None:
     """One-shot completion — deliberately NOT mcp_agent.agent.stream_chat's
     full agentic loop (tools, self-heal retries, episodic history writes):
     that loop exists to actually work the user's task and is way too slow/
-    heavy just to guess a one-line reply. Same model tag as the main chat
-    model so Ollama reuses the already-resident weights instead of evicting
-    them for a second pair (see mcp_agent/agent_builder.py's judge_model for
-    the same reasoning). Returns None on any failure — a missing suggestion
+    heavy just to guess a one-line reply.
+
+    Goes through agent_builder._build_chat_model, not a raw ChatOllama
+    pointed at the default Ollama host — same reasoning as
+    router.py:_get_classify_model/_get_casual_agent: with
+    expert_streaming_enabled ON, the main chat model's weights live in the
+    separate llama-server fork (port 8090), and expert_streaming.py's
+    ensure_running explicitly UNLOADS Ollama's own copy before starting
+    that process. A raw ChatOllama here would find nothing resident to
+    reuse and make Ollama load a second full copy of the same model from
+    scratch — two resident instances of the same multi-GB model at once.
+    _build_chat_model is the one place that already knows how to pick the
+    right backend. Returns None on any failure — a missing suggestion
     is a no-op for the caller, never worth surfacing as an error."""
     try:
-        from langchain_ollama import ChatOllama
-        model = ChatOllama(
-            model=settings.get("chat_model"),
-            base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-            keep_alive=OLLAMA_KEEP_ALIVE,
-            num_ctx=OLLAMA_NUM_CTX,
+        import settings
+        from mcp_agent.agent_builder import _build_chat_model
+        model = _build_chat_model(
+            model_tag=settings.get("chat_model"),
             num_predict=20,
             reasoning=False,
-            temperature=MODEL_TEMPERATURE,
+            num_keep=4,
+            has_tools=False,
         )
         resp = await model.ainvoke([
             {"role": "system", "content": _SUGGEST_SYSTEM_PROMPT},
