@@ -73,7 +73,13 @@ _SHELL_TOOLS = {"bash", "bash_bg", "bash_bg_check", "bash_bg_list"}
 # ЧИТАЕТ картинку (для скриншотов/сгенерённых ассетов), а не создаёт её,
 # так что засорения тул-листа тем же смыслом, что у генеративных тулов,
 # здесь нет; было ранее вообще не подключено ни к одной роли — исправлено.
-_WEB_TOOLS = {"web_search", "fetch", "analyze_image"}
+#
+# web_read — НЕ MCP-тул (нужен `model` этого хода, см.
+# web_read_tool.py:build_web_read_tool), поэтому его здесь нет как объекта в
+# `tools` (agent_builder.py:_get_tools) — присутствие имени в этой группе
+# только решает, каким ролям _build_role_agent должен ДОБАВИТЬ реальный
+# инстанс поверх filter_tools(); сам инстанс собирается там же, не здесь.
+_WEB_TOOLS = {"web_search", "fetch", "web_read", "analyze_image"}
 
 # flowai_guide (guide_server.py) — static self-description, no side
 # effects, no project/repo dependency at all, so it's unioned in wherever

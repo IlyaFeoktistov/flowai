@@ -35,7 +35,7 @@ _CORE_TOOL_NAMES = {
     # ровно два инструмента с разным назначением, не почти-дубли друг друга.
     "write_file", "edit_file",
     # web
-    "web_search", "fetch", "analyze_image",
+    "web_search", "fetch", "web_read", "analyze_image",
     # guide_server.py — static self-description, no generative/read/write
     # overlap with anything else here.
     "flowai_guide",

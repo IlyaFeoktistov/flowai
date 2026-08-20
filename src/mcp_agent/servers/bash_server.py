@@ -57,6 +57,20 @@ be created for each tool call"). Из этого следует два неза�
 ПРЯМО когда фоновая команда закончится — отдельная работа над ui/ (нужен
 асинхронный хук в prompt_toolkit, а не просто MCP-тул).
 
+bash сама теперь тоже устроена через этот же job-механизм (_wrap_job_command/
+_new_job_paths/_bg_capacity_error), не через отдельный pipe+watchdog+kill, как
+было раньше. Раньше таймаут значил kill_process_tree — реальную потерю
+прогресса команды, которая честно работала, просто дольше отведённого. Теперь
+на таймауте команда НЕ убивается: раз её вывод/exit-код уже пишутся в файлы
+(а не в pipe этого процесса) и она в своей собственной OS-сессии
+(start_new_session=True), ей ничего не грозит, даже если этот MCP-подпроцесс
+завершится сразу после ответа — она просто становится обычным bash_bg-job'ом,
+который можно потом проверить через bash_bg_check. Разница с bash_bg
+исключительно в том, что bash ЖДЁТ (через asyncio.wait_for(proc.wait(), ...),
+без опроса файлов — это настоящее ожидание процесса, не polling) до timeout=
+секунд, прежде чем сдаться и вернуть job_id, а bash_bg не ждёт вообще ни
+секунды.
+
 Запуск (обычно через MultiServerMCPClient, но можно и вручную):
     python3 -m mcp_agent.servers.bash_server
 """
@@ -79,7 +93,6 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, _PROJECT_ROOT)
 
 import storage  # noqa: E402
-from utils.proc import kill_process_tree  # noqa: E402
 
 mcp = FastMCP("bash")
 
@@ -162,9 +175,12 @@ async def bash(command: str, timeout: int = TIMEOUT) -> str:
     big test file, a large build step) — not a broad/unscoped command that
     should be narrowed instead — pass a bigger timeout= (up to 600s)
     instead of retrying the same call against the default and hitting the
-    same wall. For anything open-ended or likely to run past a few
-    minutes, use bash_bg instead — it doesn't block this turn at
-    all.
+    same wall. If it's still running when that runs out, it is
+    automatically MOVED TO THE BACKGROUND instead of killed — nothing is
+    lost, check on it later with bash_bg_check(job_id) (the response tells
+    you the id). Use bash_bg directly instead when you already know
+    upfront a command is open-ended/long — it doesn't wait at all before
+    returning.
 
     There is no real controlling terminal here (stdin is /dev/null, and
     there's no allocated tty at all) — an interactive TUI/game/ncurses-style
@@ -181,137 +197,142 @@ async def bash(command: str, timeout: int = TIMEOUT) -> str:
         return "Error: no command specified"
     effective_timeout = max(1, min(int(timeout), MAX_TIMEOUT))
 
+    conn = _jobs_conn()
     try:
-        # stdin=DEVNULL — БЕЗ этого create_subprocess_shell оставляет
-        # дочернему процессу stdin ЭТОГО (bash_server'а) процесса как
-        # есть, то есть настоящий терминальный stdin (stdio-транспорт MCP,
-        # см. модульный docstring). Без этого команда, читающая stdin
-        # (например скомпилированный бинарник с bufio.NewReader(os.Stdin))
-        # зависает на реальном терминальном вводе на весь таймаут, а если
-        # родительский процесс оборвётся раньше, чем таймаут сработает,
-        # осиротевший процесс останется висеть НАПРЯМУЮ на терминале
-        # пользователя, блокируя его вплоть до ручного kill -9. С DEVNULL
-        # любое чтение stdin получает
-        # МГНОВЕННЫЙ EOF вместо зависания — интерактивная программа тут же
-        # падает с понятной ошибкой (модель это видит и может поправить
-        # программу или передать вход через pipe/`<file`), а не блокируется
-        # незаметно на неопределённый срок, воруя чужой терминал в придачу.
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        capacity_error = _bg_capacity_error(conn)
+        if capacity_error:
+            return capacity_error
+        _prune_finished_bg_jobs(conn)
+
+        job_id, output_path, exit_path = _new_job_paths()
+        wrapped = _wrap_job_command(command, output_path, exit_path, BG_TIMEOUT)
+        try:
+            # start_new_session=True + output/exit-code already going to
+            # real FILES (not our own pipes, see _wrap_job_command) — the
+            # exact same survival mechanism bash_bg uses, applied here too.
+            # Without it, killing the watchdog used to be the only safe
+            # option: a timed-out command's stdout/stderr were PIPEs into
+            # THIS process, which exits right after returning — the moment
+            # that happens, the child gets SIGPIPE/EPIPE on its next write
+            # and dies anyway, just invisibly instead of cleanly. Once
+            # output has nowhere left to break (a real file survives us
+            # exiting) and the child isn't part of our session (so we
+            # exiting sends it no signal), simply not killing it is safe.
+            proc = await asyncio.create_subprocess_shell(
+                wrapped,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            return f"Error: {e}"
+        conn.execute(
+            "INSERT INTO bg_jobs (job_id, command, pid, started_at, output_path, exit_path) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, command, proc.pid, time.time(), str(output_path), str(exit_path)),
         )
-    except Exception as e:
-        return f"Error: {e}"
+        conn.commit()
+    finally:
+        conn.close()
 
-    timed_out = False
-
-    async def _watchdog() -> None:
-        nonlocal timed_out
-        await asyncio.sleep(effective_timeout)
-        if proc.returncode is None:
-            timed_out = True
-            kill_process_tree(proc.pid)
-
-    # Отдельная задача-таймер + kill_process_tree, а НЕ asyncio.wait_for(proc.
-    # communicate(), timeout=...) + proc.kill() (как было раньше): на
-    # практике этот таймаут ненадёжен — наблюдался случай, когда процесс
-    # провисел ЗАМЕТНО дольше заданного таймаута, и остались живы ОБА
-    # процесса (sh-обёртка и её потомок), хотя proc.kill() шлёт SIGKILL,
-    # который нельзя ни поймать, ни проигнорировать — если бы он реально
-    # вызвался, wrapper был бы мёртв. Точная причина не установлена (где
-    # именно терялась отмена wait_for — не воспроизводится стабильно), но
-    # полагаться на то, что отмена communicate() надёжно достаёт до
-    # заблокированного чтения из pipe, — само по себе хрупкое допущение.
-    # Независимый таймер ничего не отменяет, просто убивает по будильнику.
-    #
-    # kill_process_tree, а не голый proc.kill(): /bin/sh -c форкает
-    # РЕАЛЬНОГО потомка даже для одиночной команды без ";"/пайпов (даже
-    # "sleep 5" — это уже два разных PID, не exec-замена). Потомок
-    # наследует те же файловые
-    # дескрипторы stdout/stderr pipe, что и sh-обёртка — kill() только
-    # обёртки оставляет его сиротой, всё ещё держащим pipe открытым, и
-    # proc.communicate() не увидит EOF, пока НЕ ЗАКРОЮТСЯ ВСЕ держатели
-    # pipe. Для команды, которую убивают именно потому, что она сама
-    # никогда не завершится, это означает, что communicate() после
-    # kill() может зависнуть заново — kill() формально "сработал", а
-    # результат так и не возвращается. kill_process_tree (utils/proc.py)
-    # убивает всё дерево, а не только обёртку — communicate() ниже
-    # возвращается почти сразу же, поэтому частичный вывод до убийства
-    # по-прежнему захватывается, а не теряется.
-    watchdog = asyncio.create_task(_watchdog())
     try:
-        stdout_b, stderr_b = await proc.communicate()
-    except Exception as e:
-        watchdog.cancel()
-        return f"Error: {e}"
-    watchdog.cancel()
-
-    stdout = stdout_b.decode("utf-8", errors="replace").strip()
-    stderr = stderr_b.decode("utf-8", errors="replace").strip()
-    output = "\n".join(x for x in [stdout, stderr] if x)
-
-    if timed_out:
+        # Cancelling this on timeout does NOT signal the underlying OS
+        # process — asyncio.wait_for only stops US from waiting on it, see
+        # the comment above on why that's fine here specifically.
+        await asyncio.wait_for(proc.wait(), timeout=effective_timeout)
+    except asyncio.TimeoutError:
         # A repo-wide, unscoped scan (e.g. `find . -exec php -l {} \;` with
-        # no path/name narrowing) can hit this timeout and get retried as
+        # no path/name narrowing) can hit this and get retried as
         # essentially the SAME broad scan instead of being narrowed — the
-        # message now says outright not to repeat it.
-        #
-        # Tried (and reverted): killing the whole process group via
-        # start_new_session=True + os.killpg() to also clean up children a
-        # shell pipeline/`find -exec` spawns, since proc.kill() only kills
-        # the `/bin/sh -c` wrapper. killpg's blast radius wasn't reliably
-        # scoped to just this subprocess's own tree — too risky here. Left
-        # as plain proc.kill() (only the immediate wrapper) — an orphaned grandchild
-        # process is a smaller problem than accidentally signaling
-        # processes outside this tool call.
-        #
-        # Two different retries make sense depending on WHY it timed out —
-        # narrowing helps a broad/unscoped scan, a bigger timeout= helps a
-        # single, genuinely slow command — so name both instead of only
-        # ever telling the model to narrow (a real live query it needs to
-        # wait longer for isn't "too broad", it's just legitimately slow).
-        # A command trying to read stdin is a THIRD possibility — stdin is
-        # DEVNULL here, so that normally fails fast with EOF well before
-        # this timeout, but a program that ignores EOF and retries could
-        # still end up here, hence the explicit mention.
+        # message says outright not to repeat it, same as before this
+        # became auto-background instead of a kill.
         if effective_timeout < MAX_TIMEOUT:
             retry_hint = (
                 f"If this specific command is known to legitimately need "
                 f"more time (not just broad/unscoped), retry it with a "
                 f"bigger timeout= (up to {MAX_TIMEOUT}s) instead of the "
-                "same default. Otherwise narrow it to the exact file(s)/"
-                "path/query you actually need."
+                "same default next time. Otherwise narrow it to the exact "
+                "file(s)/path/query you actually need."
             )
         else:
-            retry_hint = (
-                f"Already at the {MAX_TIMEOUT}s cap for this tool — if it "
-                "still isn't enough, this belongs in bash_bg instead "
-                "(doesn't block this turn at all), not a bigger timeout= "
-                "here."
-            )
-        partial = f" Output captured before it was killed:\n{output}" if output else ""
+            retry_hint = f"Already at the {MAX_TIMEOUT}s cap for bash's own wait — bash_bg from the start is the better fit for something this size."
         return (
-            f"Error: command timed out after {effective_timeout}s and was "
-            "killed. This can mean the command itself was too broad/slow "
-            "(e.g. scanning the whole repo or vendor/ instead of specific "
-            "files) — that says nothing about whether any particular file "
-            "is correct — that it's a single command that genuinely needs "
-            "more time, OR that it was waiting on input it was never going "
-            "to get (stdin is closed for this tool) — if so, this is not "
-            "an interactive shell; rerun the underlying program with its "
-            f"input passed non-interactively instead. {retry_hint}{partial}"
+            f'Still running after {effective_timeout}s — moved to the '
+            f'background automatically (NOT killed, nothing lost) as job '
+            f'"{job_id}". Check on it later with bash_bg_check("{job_id}") '
+            "once you expect it to be done — don't poll right away, do "
+            f"something else or finish this response first. {retry_hint}"
         )
 
-    if proc.returncode == 0 or _is_non_error_exit(command):
+    try:
+        exit_code = int(exit_path.read_text().strip())
+    except (OSError, ValueError):
+        exit_code = None
+    try:
+        output = output_path.read_text(errors="replace").strip()
+    except OSError:
+        output = ""
+
+    # Finished within budget — this was never really a "background job"
+    # from the caller's perspective, just a normal bash call that happened
+    # to use the same underlying (survives-us-exiting) mechanism. Prune it
+    # immediately so bash_bg_list only ever shows genuinely long-running
+    # jobs, not every ordinary bash call that finished on time.
+    conn = _jobs_conn()
+    try:
+        conn.execute("DELETE FROM bg_jobs WHERE job_id = ?", (job_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    for p in (output_path, exit_path):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+    if exit_code == 0 or _is_non_error_exit(command):
         result = output or "(no output)"
     else:
-        result = f"Error (exit {proc.returncode}): {output}"
+        result = f"Error (exit {exit_code}): {output}"
 
     if len(result) > MAX_OUTPUT:
         result = _sandwich_truncate(result, MAX_OUTPUT)
     return result
+
+
+def _wrap_job_command(command: str, output_path: Path, exit_path: Path, budget: int) -> str:
+    """Shared by bash/bash_bg. The wrapping OS `timeout` (not asyncio's own
+    timeout machinery) plus writing output/exit-code to real FILES rather
+    than pipes is what lets the command survive this MCP subprocess exiting
+    right after the call returns (see module docstring on why a fresh
+    subprocess-per-tool-call breaks anything relying on in-memory/pipe
+    state) — needed even for bash's own synchronous wait below, because if
+    that wait times out, nothing else in THIS process will ever be around
+    to observe the eventual exit code otherwise."""
+    return (
+        f"(timeout {budget} sh -c {shlex.quote(command)}) "
+        f"> {shlex.quote(str(output_path))} 2>&1; "
+        f"echo $? > {shlex.quote(str(exit_path))}"
+    )
+
+
+def _new_job_paths() -> tuple[str, Path, Path]:
+    job_id = uuid.uuid4().hex[:10]
+    return job_id, _JOBS_DIR / f"{job_id}.out", _JOBS_DIR / f"{job_id}.exit"
+
+
+def _bg_capacity_error(conn) -> str | None:
+    """Shared cap on CONCURRENTLY RUNNING jobs — bash's own calls count
+    against this too now (see bash below), not just bash_bg's: same
+    underlying mechanism, same reason to bound it (an unbounded number of
+    detached OS processes accumulating is the thing this caps, regardless
+    of which tool started them)."""
+    rows = conn.execute("SELECT pid, exit_path FROM bg_jobs").fetchall()
+    running = sum(1 for pid, exit_path in rows if not os.path.exists(exit_path) and _is_pid_alive(pid))
+    if running >= MAX_BG_JOBS:
+        return f"Error: {MAX_BG_JOBS} background jobs already running — check bash_bg_list and wait for one to finish"
+    return None
 
 
 def _jobs_conn():
@@ -379,31 +400,21 @@ async def bash_bg(command: str) -> str:
 
     conn = _jobs_conn()
     try:
-        rows = conn.execute("SELECT pid, exit_path FROM bg_jobs").fetchall()
-        running = sum(1 for pid, exit_path in rows if not os.path.exists(exit_path) and _is_pid_alive(pid))
-        if running >= MAX_BG_JOBS:
-            return f"Error: {MAX_BG_JOBS} background jobs already running — check bash_bg_list and wait for one to finish"
+        capacity_error = _bg_capacity_error(conn)
+        if capacity_error:
+            return capacity_error
 
         _prune_finished_bg_jobs(conn)
 
-        job_id = uuid.uuid4().hex[:10]
-        output_path = _JOBS_DIR / f"{job_id}.out"
-        exit_path = _JOBS_DIR / f"{job_id}.exit"
-
-        # timeout — тот же BG_TIMEOUT-потолок, что раньше был на
-        # asyncio.wait_for, только теперь его обеспечивает сама ОС-команда,
-        # а не наш процесс (у которого нет шанса дождаться). echo $? —
-        # exit-код именно обёрнутой команды (timeout вернёт 124, если сам
-        # её убил по таймауту — bash_bg_check это различает).
-        # start_new_session=True — новая сессия ОС (как nohup/setsid):
-        # процесс переживает смерть ЭТОГО (родительского) процесса, которая
-        # наступит сразу после того, как эта функция вернёт ответ — см.
-        # модульный docstring про то, почему это критично, не опционально.
-        wrapped = (
-            f"(timeout {BG_TIMEOUT} sh -c {shlex.quote(command)}) "
-            f"> {shlex.quote(str(output_path))} 2>&1; "
-            f"echo $? > {shlex.quote(str(exit_path))}"
-        )
+        # start_new_session=True — new OS session (like nohup/setsid): the
+        # process survives THIS (parent) process dying, which happens right
+        # after this function returns its response — see the module
+        # docstring for why that's essential, not optional. subprocess.Popen
+        # (not asyncio) — this function never waits on it at all, so there's
+        # no reason to pay for an asyncio-tracked child (bash below DOES
+        # wait inline, hence asyncio.create_subprocess_shell there instead).
+        job_id, output_path, exit_path = _new_job_paths()
+        wrapped = _wrap_job_command(command, output_path, exit_path, BG_TIMEOUT)
         proc = subprocess.Popen(
             ["sh", "-c", wrapped],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

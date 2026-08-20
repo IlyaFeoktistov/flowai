@@ -12,6 +12,10 @@ build_mcp_connections()`. Исключения — тулы, которым ну
   снимков (`mcp_agent/snapshots.py`)
 - D&D-тулы (`dnd_*`) — `mcp_agent/dnd_tools.py`, свои для каждой игровой
   сессии (замкнуты на `game_id`)
+- `delegate` (`mcp_agent/delegate_tool.py`), `web_read`
+  (`mcp_agent/web_read_tool.py`) — нужен уже поднятый `model` этого хода
+  (переиспользуют резидентную модель, без второй загрузки весов), а не
+  что-то, что можно поднять отдельным подпроцессом до выбора модели
 
 Список серверов (все — свои реализации под этот конкретный локальный
 GPU/Ollama-стек; нигде не найдено готового community-сервера под нужную
@@ -19,8 +23,8 @@ GPU/Ollama-стек; нигде не найдено готового community-�
 
 | Сервер | Тулы | Зачем свой, а не готовый |
 |---|---|---|
-| `fetch` | (официальный `mcp-server-fetch`, PyPI) | — |
-| `bash` | `bash`, `bash_bg`, `bash_bg_check`, `bash_bg_list` | нужна своя permission-гранулярность (auto-approve по первому слову команды) |
+| `fetch` | (официальный `mcp-server-fetch`, PyPI) | — сырой markdown страницы, кусками по 5000 симв. с пагинацией (`start_index`). См. `web_read` ниже — обычно предпочтительнее |
+| `bash` | `bash`, `bash_bg`, `bash_bg_check`, `bash_bg_list` | нужна своя permission-гранулярность (auto-approve по первому слову команды). `bash` при превышении `timeout=` больше не убивает процесс — автоматически переводит его в фон (тот же реестр, что `bash_bg`) и отдаёт `job_id` для `bash_bg_check`, ничего не теряя (`bash_server.py`) |
 | `file_ops` | `read_file`, `write_file`, `edit_file`, `grep_search`, `glob_search`, `delete_path`, `restore_deleted_path`, `list_deleted_paths` | заменяет разом filesystem + старые code_search/fs_extra серверы; своя корзина (не безвозвратное удаление). `write_file`/`edit_file` требуют свежего `read_file` по этому пути перед записью — отказ, если путь не читался в этой сессии или изменился на диске с момента чтения (`file_ops_server.py:_require_fresh_read`); модели в ответ уходит только короткое подтверждение ("Updated ..."), сам diff — в `structuredContent` (MCP), которое видит только UI (`ui/stream.py`), не модель |
 | `web_search` | `web_search` | под self-hosted SearXNG |
 | `memory` | `update_memory`, `list_memory` | плоские факты о ПОЛЬЗОВАТЕЛЕ, персистентно между сессиями |
@@ -37,6 +41,19 @@ GPU/Ollama-стек; нигде не найдено готового community-�
 идут через `bash("git ...")`. Analyzer/Planner держат bash под read-only
 allowlist (`agent_builder.py:_is_read_only_bash_command`), Verifier — под
 denylist мутирующих команд.
+
+## web_read
+
+`mcp_agent/web_read_tool.py` — тул рядом с `fetch`, но не MCP-сервер: не
+отдаёт сырую страницу модели, а фетчит URL (переиспользует HTML→markdown-
+извлечение и robots.txt-проверку из уже установленного `mcp-server-fetch`,
+без второй копии парсера), кладёт результат в ОТДЕЛЬНЫЙ, изолированный
+вызов уже резидентной чат-модели вместе с конкретным вопросом (`question`)
+и возвращает только её краткий ответ — сама страница (иногда десятки тысяч
+символов, больше всего `OLLAMA_NUM_CTX`) в основной разговор не попадает
+вообще. Самоочищающийся кэш по URL на 15 минут — повторный вопрос о той же
+странице не идёт за ней в сеть заново. Добавлен во все роли пайплайна,
+легаси-агент и `delegate` — везде, где уже есть `_WEB_TOOLS`/`fetch`.
 
 ## flowai_guide
 

@@ -45,6 +45,7 @@ from mcp_agent.self_heal import (
     _parse_leaked_tool_calls,
 )
 from mcp_agent.tool_wrappers import _dedupe_read_tool
+from mcp_agent.web_read_tool import build_web_read_tool
 import settings
 from ui.console import debug_print
 
@@ -285,6 +286,13 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None):
     if raw_read_file_tool is not None:
         wrapped_read_file = _dedupe_read_tool(raw_read_file_tool, own_read_history)
         delegate_tools = [wrapped_read_file if t.name == "read_file" else t for t in delegate_tools]
+    # web_read (web_read_tool.py) isn't an MCP tool, so the `t.name in
+    # _ALLOWED_TOOLS` filter above can never have picked it up from `tools`
+    # — added directly instead, using the SAME `model` this sub-agent
+    # itself runs on (no second load). _ALLOWED_TOOLS (roles.py:
+    # LEGACY_INVESTIGATION_TOOL_NAMES) includes "web_read" unconditionally,
+    # so this is not gated on anything per-call.
+    delegate_tools.append(build_web_read_tool(model))
     delegate_tools_by_name = {t.name: t for t in delegate_tools}
     sub_agent = create_agent(
         model,

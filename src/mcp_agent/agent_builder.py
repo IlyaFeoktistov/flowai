@@ -42,6 +42,7 @@ from mcp_agent.compaction import _CompactResearchMiddleware, _DropStaleReadsMidd
 from mcp_agent.config import build_mcp_connections, TOOLS_REQUIRING_APPROVAL
 from mcp_agent.debug_log import log_event
 from mcp_agent.delegate_tool import _DelegateNudgeMiddleware, build_delegate_tool
+from mcp_agent.web_read_tool import build_web_read_tool
 from mcp_agent.message_utils import _DedupeToolResultsMiddleware
 from mcp_agent.optimized_tools import build_optimized_tools
 from mcp_agent import plugins
@@ -1045,7 +1046,12 @@ async def _build_agent(repo_path: str | None = None):
     # списка — тот же эффект, что подтолкнул write_file быть overused —
     # здесь стоит развернуть в пользу delegate, а не оставлять его в самом
     # невыгодном месте.
-    agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools, raw_read_file_tool)] + tools
+    # web_read (web_read_tool.py) isn't an MCP tool (needs THIS `model`, see
+    # its own docstring) — added here for the same reason delegate is:
+    # tools/full_tools only ever hold what _get_tools returned, and that
+    # cache is built before any model is chosen. voice_mode gets neither
+    # (empty agent_tools — nothing web-related to add web_read alongside).
+    agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools, raw_read_file_tool), build_web_read_tool(model)] + tools
 
     # Отдельный от "tools_loaded" в _build_tools лог — тот пишется ДО
     # optimized_tools/voice_mode/delegate, то есть показывает "что подняли из
@@ -1172,6 +1178,15 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     # is available to every pipeline role regardless of tool_names, same
     # blanket-access principle as flowai_guide's _META_TOOLS group.
     agent_tools = filter_tools(tool_names | plugin_tool_names, tools)
+
+    # web_read (web_read_tool.py) isn't an MCP tool — it needs THIS role's
+    # own `model` (see build_web_read_tool's docstring), so it can't live in
+    # `tools` (agent_builder.py:_get_tools, cached per repo_path independent
+    # of model) for filter_tools above to have picked up — added here
+    # instead, gated on the SAME roles.py:_WEB_TOOLS membership that
+    # decided whether "web_read" is even in tool_names.
+    if "web_read" in tool_names:
+        agent_tools.append(build_web_read_tool(model))
 
     if DEBUG:
         debug_print(f"[dim][MCP-AGENT] Role '{role}' has {len(agent_tools)} tools available this turn: {[t.name for t in agent_tools]}[/]")
