@@ -19,6 +19,7 @@ from datetime import datetime
 
 from memory import get_store
 from mcp_agent.debug_log import log_event
+from mcp_agent.message_utils import INTERNAL_JUDGE_CONFIG
 from utils.parsing import parse_json_loose
 
 AUTO_CATEGORY = "auto"
@@ -145,7 +146,7 @@ async def maybe_auto_capture(
                 f"Task: {task_text}\n\nExplored:\n{digest}\n\n"
                 f"Final answer: {final_text[:1000]}"
             )},
-        ])
+        ], config=INTERNAL_JUDGE_CONFIG)
         data = parse_json_loose(note_resp.content) or {}
         note = data.get("note")
         if isinstance(note, str) and note.strip():

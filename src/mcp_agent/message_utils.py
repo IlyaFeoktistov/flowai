@@ -11,6 +11,24 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 
+# Every internal judge-model call (compaction.py:_summarize_research,
+# knowledge.py:maybe_auto_capture, self_heal.py's ask_user-shape extraction
+# and semantic check) calls judge_model.ainvoke(...) WITHOUT an explicit
+# config= — LangChain's ensure_config() then picks up whatever RunnableConfig
+# is already ambient on the current asyncio task via contextvars, which for
+# a compaction call is the SAME callback tree LangGraph wired up for the
+# outer agent.astream(..., stream_mode=["values", "messages"]) call it runs
+# inside of (see agent.py's main loop). Without cutting that inheritance,
+# the judge call's own token stream rides along on the SAME "messages"
+# stream as the real model's answer — agent.py:_stream_round only resets its
+# buffer on a new message id, it never checks WHICH runnable produced a
+# chunk, so the judge's raw JSON response (e.g. compaction's
+# {"files_read": [...], ...}) can render in the UI as if it were the
+# model's own reply. Passing this as config= on every internal judge
+# ainvoke() breaks that inheritance explicitly instead of relying on no
+# ambient config happening to be active at that particular call site.
+INTERNAL_JUDGE_CONFIG = {"callbacks": [], "run_name": "internal_judge", "tags": ["internal_judge"]}
+
 # Тулы-проверки — типичный источник "трэшинга": модель меняет подход
 # (другой каст, другая правка), но раз за разом гоняет ОДНУ И ТУ ЖЕ
 # команду проверки, получая каждый раз чуть другой (но всё равно

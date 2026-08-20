@@ -32,7 +32,7 @@ from utils.parsing import parse_json_loose
 from mcp_agent.ask_user_tool import _action_and_detail
 from mcp_agent.config import TOOLS_REQUIRING_APPROVAL
 from mcp_agent.debug_log import log_event
-from mcp_agent.message_utils import _calls_by_id, _tool_text
+from mcp_agent.message_utils import INTERNAL_JUDGE_CONFIG, _calls_by_id, _tool_text
 from mcp_agent.model_config import DEBUG, OLLAMA_NUM_CTX
 from tools.confirm import ask_permission
 
@@ -796,6 +796,7 @@ async def _extract_ask_user_shape(judge_model, answer_text: str) -> dict:
                 {"role": "system", "content": _ASK_EXTRACT_SYSTEM_PROMPT},
                 {"role": "user", "content": answer_text},
             ],
+            config=INTERNAL_JUDGE_CONFIG,
             **extra_kwargs,
         )
         data = parse_json_loose(resp.content) or {}
@@ -901,7 +902,8 @@ async def _semantic_check(
     )
     try:
         resp = await model.ainvoke(
-            [{"role": "system", "content": _SEMANTIC_SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+            [{"role": "system", "content": _SEMANTIC_SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+            config=INTERNAL_JUDGE_CONFIG,
         )
         data = parse_json_loose(resp.content) or {}
         verdict = {"relevant": bool(data.get("relevant", True)), "reason": str(data.get("reason", ""))}

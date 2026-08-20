@@ -141,7 +141,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_ollama import ChatOllama
 
 from mcp_agent.debug_log import log_event
-from mcp_agent.message_utils import _calls_by_id, _tool_text
+from mcp_agent.message_utils import INTERNAL_JUDGE_CONFIG, _calls_by_id, _tool_text
 from mcp_agent.model_config import DEBUG, OLLAMA_NUM_PREDICT
 from mcp_agent.self_heal import _failed_write_messages
 from ui.console import debug_print
@@ -191,27 +191,35 @@ PERIODIC_CHUNK_TOOL_CALLS = 8
 STICKY_TOOL_NAMES = {"read_file", "lsp", "grep_search", "glob_search", "submit_plan"}
 
 _COMPACT_SYSTEM_PROMPT = (
-    "You compress a coding agent's own history in the current task into a "
-    "short, concrete digest for its OWN later use — not a message to the "
-    "user. Input is the ORIGINAL TASK plus a transcript of tool calls: "
-    "read-only investigation (directory listings, file reads, searches) "
-    "and, often, one or more EARLIER edits that already happened and don't "
-    "need to happen again. Write what a developer would need to remember "
-    "to keep working effectively: the relevant file(s) and what's actually "
-    "in them, the specific cause/convention that justified any edit, and — "
-    "whenever the transcript shows an edit — EXACTLY what was already "
-    "changed (file path plus the substance of the change, e.g. 'added "
-    "STATUS_CANCELLED=50 and its $statuses entry to "
-    "MailboxConvertationPersister.php') so it is never redone, "
-    "contradicted, or second-guessed later. Keep it to a few dense, "
-    "concrete sentences (file paths, line numbers, function/class/constant "
-    "names), not a transcript replay and not vague generalities. Do NOT "
-    "describe whatever edit or verification comes AFTER this transcript "
-    "(that's kept separately, verbatim, right after this digest) — only "
-    "summarize what's already in the transcript you were given. Drop dead "
-    "ends and files that turned out irrelevant entirely; don't pad the "
-    "digest to mention everything that was looked at.\n"
-    'Respond with ONLY this JSON: {"findings": "..."}'
+    "You compress a coding agent's own history in the current task into "
+    "structured facts for its OWN later use — not a message to the user. "
+    "Input is the ORIGINAL TASK plus a transcript of tool calls: read-only "
+    "investigation (directory listings, file reads, searches) and, often, "
+    "one or more EARLIER edits that already happened and don't need to "
+    "happen again. Do NOT describe whatever edit or verification comes "
+    "AFTER this transcript (that's kept separately, verbatim, right after "
+    "this digest) — only extract facts already in the transcript you were "
+    "given. Drop dead ends and files that turned out irrelevant entirely; "
+    "don't pad the output to mention everything that was looked at — "
+    "extract facts, don't narrate a replay of the transcript.\n"
+    "Respond with ONLY this JSON:\n"
+    "{\n"
+    '  "files_read": [{"path": "...", "note": "what\'s actually in it that '
+    'matters — a real function/class/constant name, or a short literal '
+    'snippet (1-3 lines, verbatim) worth keeping so it never has to be '
+    're-read just to see it again"}],\n'
+    '  "actions_taken": ["exact file path plus the substance of the change '
+    'already made, e.g. \'added STATUS_CANCELLED=50 and its $statuses entry '
+    'to MailboxConvertationPersister.php\' — so it is never redone, '
+    'contradicted, or second-guessed later"],\n'
+    '  "key_facts": ["env vars, config values, exact file/dir paths, '
+    'commands that worked, or other concrete details worth remembering '
+    'verbatim that don\'t belong under files_read/actions_taken"],\n'
+    '  "current_state": "1-2 sentences: what is done, what is still open '
+    'or was left unresolved, what to do next"\n'
+    "}\n"
+    "Every array may be empty if nothing qualifies — do not invent content "
+    "to fill a field."
 )
 
 # Prefix digests are cached per exact prefix content (see _prefix_cache_key)
@@ -516,6 +524,42 @@ def _last_plan_message_index(messages: list) -> int | None:
     return last
 
 
+def _format_digest(data: dict) -> str:
+    """Renders _COMPACT_SYSTEM_PROMPT's structured JSON into the digest text
+    that actually replaces raw history — kept as its own function (not
+    inlined into _summarize_research) so the section layout is visible in
+    one place and covered by its own tests. Each section is only emitted if
+    the model actually put something in it — an empty files_read on a
+    digest that's pure investigation-with-no-reads shouldn't print an empty
+    "Files read:" header."""
+    lines: list[str] = []
+    files_read = data.get("files_read") or []
+    if files_read:
+        lines.append("Files read:")
+        for f in files_read:
+            if isinstance(f, dict):
+                path = str(f.get("path") or "").strip()
+                note = str(f.get("note") or "").strip()
+                if path:
+                    lines.append(f"- {path}: {note}" if note else f"- {path}")
+            else:
+                text = str(f).strip()
+                if text:
+                    lines.append(f"- {text}")
+    actions = [str(a).strip() for a in (data.get("actions_taken") or []) if str(a).strip()]
+    if actions:
+        lines.append("Actions already taken:")
+        lines.extend(f"- {a}" for a in actions)
+    facts = [str(f).strip() for f in (data.get("key_facts") or []) if str(f).strip()]
+    if facts:
+        lines.append("Key facts (paths/env/commands):")
+        lines.extend(f"- {f}" for f in facts)
+    state = str(data.get("current_state") or "").strip()
+    if state:
+        lines.append(f"Current state: {state}")
+    return "\n".join(lines)
+
+
 async def _summarize_research(judge_model, prefix: list) -> str:
     task_len = _task_frame_len(prefix) if prefix else 0
     task_text = "\n\n".join(str(m.content) for m in prefix[:task_len])
@@ -523,8 +567,14 @@ async def _summarize_research(judge_model, prefix: list) -> str:
     prompt = f"ORIGINAL TASK:\n{task_text}\n\nTRANSCRIPT SO FAR:\n{transcript}"
     try:
         # Explicit options (not JUDGE_NUM_PREDICT=200, tuned for a one-line
-        # relevant/reason verdict elsewhere) — a real findings digest needs
-        # more room than a binary verdict. num_keep gets re-injected
+        # relevant/reason verdict elsewhere) — a structured digest (file
+        # list + snippets + actions + facts, see _COMPACT_SYSTEM_PROMPT)
+        # needs noticeably more room than a single dense paragraph did:
+        # 600 was sized for a few sentences of prose, and this whole
+        # digest is the thing standing in for potentially the ENTIRE
+        # collapsing history — under-budgeting it just to save a few
+        # hundred generation tokens throws away exactly the detail
+        # compaction exists to preserve. num_keep gets re-injected
         # automatically by _ChatOllamaWithNumKeep._chat_params regardless of
         # what's passed here (see agent_builder.py), so it doesn't need to
         # be repeated in this dict. num_ctx here must match settings.get(
@@ -549,22 +599,23 @@ async def _summarize_research(judge_model, prefix: list) -> str:
         # streaming's context is fixed at process start (-c, see
         # expert_streaming.py), so max_tokens alone is enough there.
         extra_kwargs = (
-            {"options": {"num_ctx": settings.get("num_ctx"), "num_predict": 600}}
+            {"options": {"num_ctx": settings.get("num_ctx"), "num_predict": 1400}}
             if isinstance(judge_model, ChatOllama)
-            else {"max_tokens": 600}
+            else {"max_tokens": 1400}
         )
         resp = await judge_model.ainvoke(
             [
                 {"role": "system", "content": _COMPACT_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
+            config=INTERNAL_JUDGE_CONFIG,
             **extra_kwargs,
         )
         data = parse_json_loose(resp.content) or {}
-        findings = str(data.get("findings") or "").strip()
-        if not findings:
-            raise ValueError("empty findings")
-        return findings
+        digest = _format_digest(data)
+        if not digest:
+            raise ValueError("empty digest")
+        return digest
     except Exception as e:
         # fail open — тот же принцип, что в self_heal.py: сломанное сжатие
         # не должно ронять ход, просто в этот раз ход останется несжатым.
