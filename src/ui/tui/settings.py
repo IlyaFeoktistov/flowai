@@ -241,13 +241,13 @@ def _size_suffix(model_id: str, installed_sizes: dict[str, float]) -> str:
 _ITEMS = [
     ("модель",            "chat_model",        "ollama_model"),
     ("спрашивать разрешения", "ask_permissions", "toggle"),
-    ("автопроверка ответа (ретраи)", "self_heal_enabled", "toggle"),
-    ("новый пайплайн (Router→Analyzer→Planner→Coder→Verifier)", "pipeline_mode", "toggle"),
-    ("простые ответы без тулов (casual)", "casual_answers_enabled", "toggle"),
-    ("оптимизированные тулы (урезанный список для всех агентов)", "optimized_tools", "toggle"),
-    ("всегда делегировать поиск по коду сабагенту", "always_delegate_search", "toggle"),
-    ("подсказка \"делегируй\" после долгой разведки", "delegate_nudge_enabled", "toggle"),
-    ("экспериментальный expert-streaming backend", "expert_streaming_enabled", "toggle"),
+    ("автопроверка ответа", "self_heal_enabled", "toggle"),
+    ("новый пайплайн", "pipeline_mode", "toggle"),
+    ("простые ответы без тулов", "casual_answers_enabled", "toggle"),
+    ("оптимизированные тулы", "optimized_tools", "toggle"),
+    ("делегировать поиск кода", "always_delegate_search", "toggle"),
+    ("подсказка delegate", "delegate_nudge_enabled", "toggle"),
+    ("expert-streaming backend", "expert_streaming_enabled", "toggle"),
     ("контекст чат-модели",  "num_ctx",            "preset"),
     ("размышления",       "show_thinking",    "toggle"),
     ("recap",             "recap_enabled",    "toggle"),
@@ -274,7 +274,7 @@ _ITEMS = [
     ("gen_model полигонаж", "gen3d_target_faces",     "preset"),
     ("gen_model скиннинг", "gen3d_skin_source",        "preset"),
     ("gen_model профиль",  "gen3d_hunyuan_profile",    "preset"),
-    ("gen_model AI PBR (roughness/metallic)", "gen3d_pbr_ai", "toggle"),
+    ("gen_model AI PBR", "gen3d_pbr_ai", "toggle"),
     ("debug",             "debug",                    "toggle"),
     ("выгрузить модели",  "_unload_models",            "action"),
 ]
@@ -289,24 +289,24 @@ _ITEMS = [
 _LABEL_COL_WIDTH = max(22, max(len(label) for label, _, _ in _ITEMS) + 2)
 
 _TOGGLE_HINTS = {
-    "ask_permissions":        "(bash/запись файлов/git — ВЫКЛ = без подтверждения, ОПАСНО)",
-    "self_heal_enabled":      "(ВЫКЛ = 1 попытка без ретраев; ask_user-диалог всё равно работает; сама проверка ответа не выключается — она же фильтр качества датасета для finetune/, см. finetune/README.md)",
-    "pipeline_mode":          "(ВЫКЛ = простой пайплайн — один агент с планированием, без разделения на стадии; голосовой режим всегда идёт через простой пайплайн)",
-    "casual_answers_enabled": "(ВЫКЛ (дефолт) = простые сообщения без project/shell/change тоже идут через analyzer-стадию, а не прямым ответом без тулов и без верификации — включай, если на этой модели прямой casual-путь работает нормально и хочется сэкономить на analyzer-накладных; действует только в новом пайплайне, см. pipeline_mode выше)",
-    "always_delegate_search": "(ВЫКЛ = делегирует поиск сабагенту только для больших/незнакомых деревьев; ВКЛ = делегирует ЛЮБОЙ поиск по коду, даже мелкий в этом проекте — медленнее на простых задачах)",
-    "delegate_nudge_enabled": "(ВЫКЛ = не подсказывать delegate после долгой разведки — независимо от always_delegate_search выше)",
-    "expert_streaming_enabled": "(экспериментальный, незамерженный форк llama.cpp с настоящим dynamic MoE expert-кэшем вместо статичного сплита Ollama — TG быстрее, PP заметно медленнее, нужен `setup.py --only expert-streaming`; действует независимо от pipeline_mode — см. expert_streaming.py)",
-    "optimized_tools":        "(не в голосовом режиме — по одному тулу на смысл: bash/read/grep/glob/write, без git-тулов и вариантов read/write; действует и в легаси-агенте, и во всех ролях нового пайплайна — Analyzer/Planner/Coder/Verifier)",
-    "show_thinking": "(цепочка мыслей)",
-    "recap_enabled":          "(краткая память в шапке)",
-    "compact_history_enabled": "(ВЫКЛ = никогда не пересказывать историю тул-вызовов внутри хода — риск переполнить num_ctx на очень долгих ходах, зато без потери деталей)",
-    "voice_mode":             "(озвучивает ответы, переключает модель на qwen3:8b)",
-    "imggen_safety":          "(safety checker)",
-    "imggen_enhance_prompt":  "(LLM улучшает промпт перед генерацией)",
-    "debug":                  "(лог tool-коллов в episodic; DEBUG в .env приоритетнее этого тумблера)",
-    "gen_agent_tools":        "(даёт агенту generate_image/music/3d_model напрямую; /gen /music /gen_model работают всегда; применяется сразу, со следующего хода)",
-    "gen3d_enabled":          "(/gen_model, /anim и агентные тулы — ВЫКЛ прячет их совсем)",
-    "gen3d_pbr_ai":           "(SuperMat, отдельная SD2.1-модель, +6-8 мин к /gen_model; нужен vendor/supermat)",
+    "ask_permissions":        "подтверждение перед bash/файлами/git — ВЫКЛ опасно",
+    "self_heal_enabled":      "автоматический повтор при неудачном ответе",
+    "pipeline_mode":          "Router→Analyzer→Planner→Coder→Verifier",
+    "casual_answers_enabled": "прямой ответ без верификации (Требуется pipeline_mode)",
+    "always_delegate_search": "всегда, даже мелкий — не только большие деревья",
+    "delegate_nudge_enabled": "после долгой разведки",
+    "expert_streaming_enabled": "MoE expert-кэш (Требуется собранный expert-streaming)",
+    "optimized_tools":        "по одному тулу на смысл, для всех агентов",
+    "show_thinking":          "цепочка мыслей модели",
+    "recap_enabled":          "краткая память в шапке",
+    "compact_history_enabled": "сжимать историю тул-вызовов внутри хода",
+    "voice_mode":             "озвучивает ответы, переключает модель",
+    "imggen_safety":          "safety checker",
+    "imggen_enhance_prompt":  "LLM улучшает промпт перед генерацией",
+    "debug":                  "лог тул-коллов в episodic",
+    "gen_agent_tools":        "агент сам вызывает генерацию картинок/музыки/3D",
+    "gen3d_enabled":          "включает /gen_model, /anim и агентные тулы",
+    "gen3d_pbr_ai":           "roughness/metallic, +6-8 мин (Требуется vendor/supermat)",
 }
 
 
@@ -319,6 +319,25 @@ _RU_TO_EN: dict[str, str] = {
     'Ф':'A','Ы':'S','В':'D','А':'F','П':'G','Р':'H','О':'J','Л':'K','Д':'L',
     'Я':'Z','Ч':'X','С':'C','М':'V','И':'B','Т':'N','Ь':'M',
 }
+
+
+def _fit(text: str, max_len: int) -> str:
+    """Truncates with a trailing ellipsis if text would overflow max_len —
+    curses.addstr on a string that runs past the window's right edge
+    either wraps onto the NEXT row (visually merging two settings' text
+    together — the exact garbled overlap a too-long _TOGGLE_HINTS entry
+    used to produce on anything narrower than a very wide terminal) or
+    raises curses.error partway through the write (silently caught
+    elsewhere in this module, leaving an arbitrary mid-word cutoff).
+    Drawing an already-bounded string avoids both failure modes outright,
+    regardless of how long any given label/hint/value happens to be."""
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len == 1:
+        return "…"
+    return text[:max_len - 1] + "…"
 
 
 def _getch(stdscr) -> int:
@@ -384,9 +403,19 @@ def settings_menu(print_header: Callable) -> None:
                 base = curses.color_pair(1) | curses.A_BOLD if is_sel else 0
                 xv = 4 + _LABEL_COL_WIDTH
 
+                # w - xv (1 col margin) — сколько ЕЩЁ можно вообще нарисовать в
+                # этой строке правее значения (общий бюджет под "○ ВЫКЛ " +
+                # подсказку/значение); room_after_toggle — то, что остаётся
+                # под саму подсказку уже после 7-символьного индикатора
+                # ВКЛ/ВЫКЛ. На отрицательный бюджет (совсем узкий терминал)
+                # _fit сама отдаёт "" вместо попытки нарисовать что-то с
+                # отрицательной длиной.
+                room = max(0, w - xv - 1)
+                room_after_toggle = max(0, room - 7)
+
                 try:
                     stdscr.addstr(y, 2, "▶ " if is_sel else "  ", base)
-                    stdscr.addstr(y, 4, f"{label:<{_LABEL_COL_WIDTH}}", base)
+                    stdscr.addstr(y, 4, _fit(label, _LABEL_COL_WIDTH), base)
 
                     if kind == "toggle":
                         if val:
@@ -395,23 +424,23 @@ def settings_menu(print_header: Callable) -> None:
                             stdscr.addstr(y, xv, "○ ВЫКЛ ", curses.A_DIM)
                         hint = _TOGGLE_HINTS.get(key, "")
                         if hint:
-                            stdscr.addstr(y, xv + 7, hint, curses.A_DIM)
+                            stdscr.addstr(y, xv + 7, _fit(hint, room_after_toggle), curses.A_DIM)
                     elif kind == "device":
                         if not settings.CUDA_AVAILABLE:
-                            stdscr.addstr(y, xv, f"{val.upper()}  (GPU недоступен)", curses.A_DIM)
+                            stdscr.addstr(y, xv, _fit(f"{val.upper()}  (GPU недоступен)", room), curses.A_DIM)
                         else:
                             attr = curses.color_pair(2) if val == "cuda" else curses.color_pair(3)
                             gpu = f"  ({settings.CUDA_DEVICE_NAME})" if settings.CUDA_DEVICE_NAME else ""
-                            stdscr.addstr(y, xv, val.upper() + gpu, attr | curses.A_BOLD)
+                            stdscr.addstr(y, xv, _fit(val.upper() + gpu, room), attr | curses.A_BOLD)
                     elif kind == "voice_clone":
                         if val:
-                            stdscr.addstr(y, xv, f"кастомный ({val})", curses.color_pair(2))
+                            stdscr.addstr(y, xv, _fit(f"кастомный ({val})", room), curses.color_pair(2))
                         else:
                             stdscr.addstr(y, xv, "стандартный", curses.A_DIM)
                     elif kind == "action":
                         stdscr.addstr(y, xv, "[Enter] выполнить", curses.color_pair(3))
                     else:
-                        stdscr.addstr(y, xv, str(val), curses.color_pair(3))
+                        stdscr.addstr(y, xv, _fit(str(val), room), curses.color_pair(3))
                 except curses.error:
                     pass
 
