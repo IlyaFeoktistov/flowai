@@ -21,7 +21,7 @@ GPU/Ollama-стек; нигде не найдено готового community-�
 |---|---|---|
 | `fetch` | (официальный `mcp-server-fetch`, PyPI) | — |
 | `bash` | `bash`, `bash_bg`, `bash_bg_check`, `bash_bg_list` | нужна своя permission-гранулярность (auto-approve по первому слову команды) |
-| `file_ops` | `read_file`, `write_file`, `edit_file`, `grep_search`, `glob_search`, `delete_path`, `restore_deleted_path`, `list_deleted_paths` | заменяет разом filesystem + старые code_search/fs_extra серверы; своя корзина (не безвозвратное удаление) |
+| `file_ops` | `read_file`, `write_file`, `edit_file`, `grep_search`, `glob_search`, `delete_path`, `restore_deleted_path`, `list_deleted_paths` | заменяет разом filesystem + старые code_search/fs_extra серверы; своя корзина (не безвозвратное удаление). `write_file`/`edit_file` требуют свежего `read_file` по этому пути перед записью — отказ, если путь не читался в этой сессии или изменился на диске с момента чтения (`file_ops_server.py:_require_fresh_read`); модели в ответ уходит только короткое подтверждение ("Updated ..."), сам diff — в `structuredContent` (MCP), которое видит только UI (`ui/stream.py`), не модель |
 | `web_search` | `web_search` | под self-hosted SearXNG |
 | `memory` | `update_memory`, `list_memory` | плоские факты о ПОЛЬЗОВАТЕЛЕ, персистентно между сессиями |
 | `knowledge` | `update_knowledge`, `get_knowledge` | категоризированные знания о ПРОЕКТЕ (архитектура/решения/конвенции), отдельно от памяти о пользователе. `get_knowledge(query=...)` — free-text поиск подстрокой по всем category/key/value сразу, без необходимости знать точное имя категории заранее (`category=` — точный фильтр, как раньше) |

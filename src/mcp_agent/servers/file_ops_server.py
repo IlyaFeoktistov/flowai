@@ -17,10 +17,17 @@ path) закрывает браузинг структуры проекта, wri
 (old_path), либо bash.
 
 Особенности реализации:
-  - write_file возвращает настоящий diff через utils/parsing.py:
+  - write_file/edit_file строят настоящий diff через utils/parsing.py:
     unified_diff_at (difflib.SequenceMatcher) — уже написанный в этом
     проекте генератор построчного diff'а, а не подделку вроде "весь старый
-    файл как удалённые строки, весь новый — как добавленные".
+    файл как удалённые строки, весь новый — как добавленные". Модели он не
+    возвращается (см. _text_result) — уходит только в structuredContent
+    (CallToolResult), откуда его берёт исключительно ui/stream.py для
+    рендера человеку; модель получает одну строку-подтверждение.
+  - write_file/edit_file требуют свежего read_file по этому пути перед
+    записью (_require_fresh_read, _last_read_mtime) — отказ, если путь
+    вообще не читался в этой сессии или изменился на диске с момента
+    чтения, чтобы не перезаписать вслепую то, чего модель не видела.
   - read_file/write_file/edit_file держат бинарный/размерный гард ПРЯМО
     внутри тула (NUL-байт в первых 8KB, 10MB потолок) — раньше это было
     внешней обёрткой в tool_wrappers.py, потому что чтение шло через
@@ -51,6 +58,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 sys.path.insert(0, _PROJECT_ROOT)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.types import CallToolResult, TextContent  # noqa: E402
 
 from storage import connect, data_dir  # noqa: E402
 from utils.parsing import unified_diff_at  # noqa: E402
@@ -76,6 +84,20 @@ TOOL_PERMISSIONS = {
 _MAX_READABLE_FILE_BYTES = 10 * 1024 * 1024
 _MAX_WRITABLE_CONTENT_BYTES = 10 * 1024 * 1024
 
+# Mirrors TOOL_OUTPUT_CHAR_CAP (mcp_agent/model_config.py, same env var) without
+# importing that module — it pulls in `settings`, which probes for a CUDA GPU
+# via torch at import time (settings.py:38), a multi-second cost this
+# lightweight I/O subprocess has no reason to pay just to read one constant.
+#
+# A whole-file read (no limit) past this cap would today still be read in
+# full and only THEN truncated by agent_builder.py's _cap_tool_output —
+# paying the read cost for a sandwich-truncated result that's mostly filler.
+# Rejecting it before the read, with a nudge toward offset/limit, is both
+# cheaper and more token-economical: a throw costs a ~100-byte error message,
+# while letting it through and truncating afterward costs a full cap's worth
+# of mostly-useless tokens for the same overflow.
+_MAX_READ_CHARS_UNBOUNDED = int(os.getenv("TOOL_OUTPUT_CHAR_CAP", "20000"))
+
 # code_search_server.py's own list, live-bug-driven (venv-tts/venv-build-tools/
 # venv-uv beyond the standard .venv — "venv*" glob, not the literal name
 # "venv" — none of the standard exclusion lists in the wild catch this
@@ -100,6 +122,68 @@ def _is_binary_file(path: str) -> bool:
     return b"\x00" in chunk
 
 
+# path (as passed by the model, unnormalized — matches how read_file/write_file/
+# edit_file already key everything else in this module) -> mtime at the moment
+# read_file last successfully looked at it. Lives for this subprocess's whole
+# lifetime (same pattern as rag_server.py's own mtime caches), not reset per
+# turn — a file read several turns ago should still count as "read" now,
+# same as a human editor doesn't forget a file it opened earlier.
+#
+# Used by write_file/edit_file (see _require_fresh_read below) to refuse
+# touching a path the model hasn't actually looked at, or that changed on
+# disk since it did — so a write/edit can never blindly clobber content
+# the model never saw.
+_last_read_mtime: dict[str, float] = {}
+
+
+def _require_fresh_read(path: str) -> str | None:
+    """Guard shared by write_file/edit_file. Returns a bare error message
+    (no "Error: " prefix — callers pass it through _text_error, which adds
+    that) if the write should be refused, None if it's clear to proceed. A
+    path that doesn't exist yet is always fine (nothing to have read) —
+    this only guards against blindly overwriting/editing content never
+    seen, or seen before it changed underneath the model (another process,
+    a linter, the user)."""
+    if not os.path.exists(path):
+        return None
+    last = _last_read_mtime.get(path)
+    if last is None:
+        return (
+            f"{path!r} exists and hasn't been read yet this session — "
+            "call read_file on it first so you're not overwriting content "
+            "you've never actually seen."
+        )
+    try:
+        current = os.path.getmtime(path)
+    except OSError as e:
+        return str(e)
+    if current > last:
+        return (
+            f"{path!r} has changed on disk since you last read it "
+            "(another process, a linter, or the user may have modified it) "
+            "— call read_file again before writing."
+        )
+    return None
+
+
+def _text_result(text: str, *, diff: str | None = None) -> CallToolResult:
+    """Success shape for write_file/edit_file: a short confirmation for the
+    model (it already knows what it just wrote — echoing the diff back would
+    only cost tokens for no new information), with the full diff (if any)
+    carried in structuredContent instead. That field doesn't reach the
+    model's context at all — langchain-mcp-adapters exposes it as the
+    ToolMessage's `artifact` — but the UI (ui/stream.py) reads it from there
+    to still render the real diff for the human."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structuredContent=({"diff": diff} if diff else None),
+    )
+
+
+def _text_error(message: str) -> CallToolResult:
+    return _text_result(f"Error: {message}")
+
+
 @mcp.tool()
 async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str:
     """Read a text file, optionally windowed by line — offset (0-indexed,
@@ -113,12 +197,16 @@ async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str
     accidentally copied into it would silently make old_string never match.
     Rejects binary files (images, compiled artifacts, .db, ...) and anything
     over 10MB outright — narrow with offset/limit or use bash's grep/head/
-    tail on a huge file instead of trying to read it whole."""
+    tail on a huge file instead of trying to read it whole. A whole-file read
+    (no limit given) is also rejected up front if the file is large enough
+    that the result would just come back truncated — pass limit= for large
+    files instead of omitting it."""
     path = path.strip()
     if not path:
         return "Error: path is required"
     try:
-        size = os.path.getsize(path)
+        st = os.stat(path)
+        size = st.st_size
     except OSError as e:
         return f"Error: {e}"
     if size > _MAX_READABLE_FILE_BYTES:
@@ -126,6 +214,14 @@ async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str
             f"Error: {path!r} is {size / (1024 * 1024):.1f}MB — over the "
             f"{_MAX_READABLE_FILE_BYTES // (1024 * 1024)}MB limit for a single "
             "read. Narrow with offset/limit, or use bash with grep/head/tail."
+        )
+    if limit is None and size > _MAX_READ_CHARS_UNBOUNDED:
+        return (
+            f"Error: {path!r} is {size} bytes — reading it whole would exceed "
+            f"the {_MAX_READ_CHARS_UNBOUNDED}-character output cap and come "
+            "back truncated from the middle anyway. Pass limit= (optionally "
+            "with offset=) to read it in a bounded window, or use grep_search "
+            "to jump straight to the relevant lines."
         )
     if _is_binary_file(path):
         return (
@@ -138,6 +234,7 @@ async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str
             lines = f.readlines()
     except OSError as e:
         return f"Error: {e}"
+    _last_read_mtime[path] = st.st_mtime
 
     total = len(lines)
     start = max(0, offset)
@@ -152,21 +249,27 @@ async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str
 
 
 @mcp.tool()
-async def write_file(path: str, content: str) -> str:
+async def write_file(path: str, content: str) -> CallToolResult:
     """Write (create or fully overwrite) a text file — creates any missing
-    parent directories automatically. Returns a real diff of what changed
-    against the previous content (empty if the file is new). Rejects
-    content over 10MB — for a file that large, this is very likely the
-    wrong tool for the job."""
+    parent directories automatically. Requires the file (if it already
+    exists) to have been read via read_file first, with nothing changing it
+    on disk since — refuses otherwise, to avoid blindly overwriting content
+    never actually seen. Returns a short confirmation only, not the diff —
+    the change is already known to you (you just wrote it) and is shown to
+    the user separately. Rejects content over 10MB — for a file that large,
+    this is very likely the wrong tool for the job."""
     path = path.strip()
     if not path:
-        return "Error: path is required"
+        return _text_error("path is required")
     if len(content.encode("utf-8", errors="replace")) > _MAX_WRITABLE_CONTENT_BYTES:
-        return (
-            f"Error: content is {len(content) / (1024 * 1024):.1f}MB — over "
+        return _text_error(
+            f"content is {len(content) / (1024 * 1024):.1f}MB — over "
             f"the {_MAX_WRITABLE_CONTENT_BYTES // (1024 * 1024)}MB limit for "
             "a single write."
         )
+    guard_error = _require_fresh_read(path)
+    if guard_error:
+        return _text_error(guard_error)
 
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -183,41 +286,51 @@ async def write_file(path: str, content: str) -> str:
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
     except OSError as e:
-        return f"Error: {e}"
+        return _text_error(str(e))
+    _last_read_mtime[path] = os.path.getmtime(path)
 
     if is_new:
-        return f"Created {path!r} ({len(content.splitlines())} lines)."
+        return _text_result(f"Created {path!r} ({len(content.splitlines())} lines).")
     diff = unified_diff_at((original or "").splitlines(keepends=True), content.splitlines(keepends=True), path, 1)
-    return f"Updated {path!r}.\n\n{diff}" if diff else f"Wrote {path!r} (content unchanged)."
+    if not diff:
+        return _text_result(f"Wrote {path!r} (content unchanged).")
+    return _text_result(f"Updated {path!r}.", diff=diff)
 
 
 @mcp.tool()
-async def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+async def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> CallToolResult:
     """Replace an exact, VERBATIM substring in a file — old_string must
     match the file's CURRENT content byte-for-byte (read the file first,
     don't reconstruct old_string from memory). By default replaces only the
     FIRST occurrence — old_string must therefore include enough surrounding
     context (a few lines) to be unique in the file, or the call fails
     asking you to narrow it; pass replace_all=true to replace every
-    occurrence instead (e.g. renaming a variable used many times). Returns
-    a real diff of what changed."""
+    occurrence instead (e.g. renaming a variable used many times). Requires
+    the file to have been read via read_file first, with nothing changing
+    it on disk since — refuses otherwise, to avoid blindly editing content
+    never actually seen. Returns a short confirmation only, not the diff —
+    the change is already known to you (you specified old_string/new_string
+    yourself) and is shown to the user separately."""
     path = path.strip()
     if not path:
-        return "Error: path is required"
+        return _text_error("path is required")
     if old_string == new_string:
-        return "Error: old_string and new_string must differ"
+        return _text_error("old_string and new_string must differ")
+    guard_error = _require_fresh_read(path)
+    if guard_error:
+        return _text_error(guard_error)
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             original = f.read()
     except OSError as e:
-        return f"Error: {e}"
+        return _text_error(str(e))
 
     count = original.count(old_string)
     if count == 0:
-        return f"Error: old_string not found in {path!r} — re-read the file, it may not match byte-for-byte."
+        return _text_error(f"old_string not found in {path!r} — re-read the file, it may not match byte-for-byte.")
     if not replace_all and count > 1:
-        return (
-            f"Error: old_string appears {count} times in {path!r} — it must be "
+        return _text_error(
+            f"old_string appears {count} times in {path!r} — it must be "
             "unique for a single replacement. Include more surrounding context "
             "in old_string to disambiguate, or pass replace_all=true if you "
             "really want every occurrence replaced."
@@ -228,10 +341,13 @@ async def edit_file(path: str, old_string: str, new_string: str, replace_all: bo
         with open(path, "w", encoding="utf-8") as f:
             f.write(updated)
     except OSError as e:
-        return f"Error: {e}"
+        return _text_error(str(e))
+    _last_read_mtime[path] = os.path.getmtime(path)
 
     diff = unified_diff_at(original.splitlines(keepends=True), updated.splitlines(keepends=True), path, 1)
-    return f"Edited {path!r} ({count if replace_all else 1} replacement{'s' if replace_all and count != 1 else ''}).\n\n{diff}"
+    replacements = count if replace_all else 1
+    msg = f"Edited {path!r} ({replacements} replacement{'s' if replace_all and count != 1 else ''})."
+    return _text_result(msg, diff=diff)
 
 
 def _sh(s: str) -> str:

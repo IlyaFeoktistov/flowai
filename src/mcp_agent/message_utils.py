@@ -115,6 +115,22 @@ def _tool_text(content: Any) -> str:
     return str(content)
 
 
+def _tool_artifact_diff(artifact: Any) -> str | None:
+    """write_file/edit_file (file_ops_server.py) carry their diff in the MCP
+    tool's structuredContent rather than in the text content the model sees
+    (see file_ops_server.py's _text_result — the model gets a short
+    confirmation only, to avoid paying tokens to see back a diff it already
+    knows it just made). langchain-mcp-adapters exposes structuredContent as
+    ToolMessage.artifact.structured_content. UI-only — this must never be
+    fed into anything the model reads."""
+    structured = getattr(artifact, "structured_content", None)
+    if isinstance(structured, dict):
+        diff = structured.get("diff")
+        if isinstance(diff, str):
+            return diff
+    return None
+
+
 def _dedupe_identical_tool_results(messages: list) -> list:
     """Между несколькими раундами тул-коллинга ВНУТРИ ОДНОГО хода (create_agent
     зовёт модель заново на каждый раунд, таща за собой всю историю) иногда

@@ -805,7 +805,13 @@ class StreamDisplay:
             else:
                 fold = None  # can't attach a result to a fold whose header line is gone
 
-            diffish = _format_file_edit_result(name, pending_args, result) if name in _FILE_EDIT_TOOL_NAMES and result else None
+            # write_file/edit_file no longer put the diff in `result` (the
+            # model's own tool-result text — see file_ops_server.py's
+            # _text_result) — it rides in the event's own "diff" key
+            # instead (agent.py plumbs it from ToolMessage.artifact). Fall
+            # back to `result` for anything that still puts a diff there.
+            diff_text = event.get("diff") or result
+            diffish = _format_file_edit_result(name, pending_args, diff_text) if name in _FILE_EDIT_TOOL_NAMES and diff_text else None
             if diffish:
                 diff_header, body = diffish
                 lines = [f"[bright_black]     └ {_escape_markup(diff_header)}[/]", *body]
