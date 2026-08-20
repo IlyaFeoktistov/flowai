@@ -10,7 +10,7 @@ import pytest
 
 import mcp_agent.servers.rag_server as rag_server
 import storage
-from mcp_agent.servers.rag_server import search_code_semantic
+from mcp_agent.servers.rag_server import search_code_semantic, search_dialog_history
 from rag import VectorStore
 from rag.index_code import code_store_path
 
@@ -83,3 +83,46 @@ def test_get_code_store_does_not_reload_when_the_file_is_unchanged(_isolated_rep
     second = rag_server._get_code_store()
 
     assert first is second  # same object — not reloaded when nothing changed
+
+
+@pytest.mark.asyncio
+async def test_search_code_semantic_warns_the_index_is_partial(monkeypatch):
+    """The index only ever covers files already touched by read_file/
+    write_file/edit_file (auto-reindex, plugin_hooks.py) — a thin or
+    empty result must never read as "this doesn't exist in the codebase",
+    only as "not indexed yet". Without this reminder repeated on every
+    call, a model seeing 1 result for a top_k=10 query could reasonably
+    (but wrongly) conclude the search was exhaustive."""
+    store = VectorStore(path="/dev/null")
+    store.add("a.py:0", "hello world", [0.1], {"source": "a.py"})
+    monkeypatch.setattr(rag_server, "_get_code_store", lambda: store)
+
+    async def _fake_embed(texts):
+        return [[0.1] for _ in texts]
+    monkeypatch.setattr(rag_server, "embed_texts", _fake_embed)
+
+    result = await search_code_semantic(query="hello")
+
+    assert "hasn't been indexed yet" in result
+    assert "hello world" in result  # the actual match is still there, note doesn't replace it
+
+
+@pytest.mark.asyncio
+async def test_search_dialog_history_does_not_carry_the_code_coverage_note(monkeypatch):
+    """_format_results is shared across all three search_* tools — the
+    code-specific coverage note must be opt-in per call site, not baked
+    into the shared formatter, or dialog/external search results would
+    carry a note about "files read/written/edited" that makes no sense
+    for them."""
+    store = VectorStore(path="/dev/null")
+    store.add("turn:0", "we discussed X yesterday", [0.1], {"source": "turn:0"})
+    monkeypatch.setattr(rag_server, "_get_dialog_store", lambda: store)
+
+    async def _fake_embed(texts):
+        return [[0.1] for _ in texts]
+    monkeypatch.setattr(rag_server, "embed_texts", _fake_embed)
+
+    result = await search_dialog_history(query="X")
+
+    assert "read/written/edited" not in result
+    assert "we discussed X yesterday" in result

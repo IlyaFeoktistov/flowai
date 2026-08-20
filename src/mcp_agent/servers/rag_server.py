@@ -90,13 +90,22 @@ def _get_external_store() -> VectorStore:
     return _external_store
 
 
-def _format_results(results: list[dict]) -> str:
-    if not results:
-        return "No results found"
-    return "\n---\n".join(
+_COVERAGE_NOTE = (
+    "[index covers only files already read/written/edited this project (it "
+    "builds up incrementally, in the background, as you touch files — not "
+    "a snapshot of the whole codebase) — a thin or empty result here is "
+    "NOT proof the thing you're looking for doesn't exist, only that it "
+    "hasn't been indexed yet. Cross-check with grep_search/glob_search "
+    "before concluding something isn't in the codebase.]\n\n"
+)
+
+
+def _format_results(results: list[dict], note: str = "") -> str:
+    body = "No results found" if not results else "\n---\n".join(
         f"{r['score']:.3f} | {r['metadata'].get('source', '?')}:{r['metadata'].get('chunk_idx', 0)}\n{r['text']}"
         for r in results
     )
+    return note + body
 
 
 @mcp.tool()
@@ -104,19 +113,25 @@ async def search_code_semantic(query: str, top_k: int = 5) -> str:
     """Semantic (meaning-based) search over the project's code/docs — finds
     relevant files even when your query's wording differs from the actual
     code. Use grep_search for exact strings/patterns; use this for
-    conceptual questions like 'where do we limit tool output size'. Building
-    the index is expensive and NOT something you can trigger — only the
-    user can, by running /reindex themselves, and only they can decide
-    it's worth the time. If this returns the empty-index message below,
-    tell the user so IN YOUR ANSWER (don't just silently fall back) and
-    proceed with grep_search/glob_search/search_symbols instead — don't
-    ask them to run /reindex before you can continue, just say it's an
-    option for next time and keep working."""
+    conceptual questions like 'where do we limit tool output size'.
+
+    The index builds itself incrementally in the background as files get
+    read/written/edited — no action needed from you, and nothing you can
+    trigger directly either (no reindex tool exists). It only ever covers
+    what's ALREADY been touched, never the whole project up front, so a
+    thin or empty result means "not indexed yet", not "doesn't exist" —
+    NEVER treat this as exhaustive; always cross-check with grep_search/
+    glob_search before concluding something isn't in the codebase (same
+    reminder repeats in every result, see _COVERAGE_NOTE). If the index is
+    completely empty, tell the user so IN YOUR ANSWER (don't just silently
+    fall back) and proceed with grep_search/glob_search/search_symbols
+    instead — mention /reindex as an optional one-shot full pass, don't
+    ask them to run it before you can continue."""
     store = _get_code_store()
     if len(store) == 0:
-        return "Code index has not been built — the user can run /reindex to enable this tool; use grep_search/glob_search for now"
+        return "Code index is empty (nothing read/written yet this project) — use grep_search/glob_search; the user can also run /reindex for a one-shot full pass, but that's optional"
     query_embedding = (await embed_texts([query]))[0]
-    return _format_results(store.search(query_embedding, top_k=top_k))
+    return _format_results(store.search(query_embedding, top_k=top_k), note=_COVERAGE_NOTE)
 
 
 @mcp.tool()
