@@ -285,7 +285,7 @@ Ollama, см. `expert_streaming.py` — обычный Ollama-путь для Э
 python3 src/cli.py
 ```
 
-Команды в чате: `/img путь.jpg`, `/paste`, `/gen промпт`, `/gen_model промпт [--rig]`, `/anim описание движения`, `/gen_texture @модель @картинка`, `/usage`, `/settings`, `/clear`, `/help`.
+Команды в чате: `/img путь.jpg`, `/paste`, `/gen промпт`, `/gen_model промпт [--rig]`, `/anim описание движения`, `/gen_texture @модель @картинка`, `/usage`, `/settings`, `/reindex [путь ...]`, `/clear`, `/help` (полный список — [`docs/commands.md`](docs/commands.md)).
 
 ### Запуск из любой директории (Linux)
 
