@@ -332,15 +332,26 @@ class StreamDisplay:
         # там же), который держит АКТУАЛЬНУЮ (может сдвинуться, если раньше
         # зарегистрированный тул успеет развернуться/свернуться) позицию
         # строки тула — читать fold.trigger_line, а не кешировать индекс.
-        # FIFO, не одиночное значение — модель иногда зовёт несколько тулов
-        # одним сообщением (несколько tool_start подряд до их tool_end).
+        # Keyed by tool_call_id (event's "id"), not FIFO position — a
+        # positional queue silently mispairs a tool_start with the WRONG
+        # tool_end whenever the strict alternating order it assumed breaks,
+        # which delegate's nested sub-agent stream does in practice (its
+        # own tool_start/tool_end interleave with the outer conversation's,
+        # see delegate_tool.py's module docstring on this exact cross-talk)
+        # — live-caught: a memory-facts result rendered under an unrelated
+        # glob_search call, shifted by one slot. dict preserves insertion
+        # order, so a missing/duplicate id (defensive — should not happen
+        # after every emission site was given a real id) still degrades to
+        # the old FIFO behavior via _pop_pending_tool_call below, rather
+        # than crashing.
         # 4-й элемент — задача мигания этой конкретной точки (см. _blink_tool_dot);
         # 5-й — форматированный заголовок (см. _format_tool_call), чтобы
         # blink/tool_end переписывали ту же фразу, а не откатывались на
         # голое имя тула.
         # 3rd element is a ui.app._ToolFold or None — not type-hinted as
         # such to avoid importing ui.app here just for a hint.
-        self._pending_tool_calls: list[tuple] = []
+        self._pending_tool_calls: dict[str, tuple] = {}
+        self._pending_tool_call_seq = 0
         self._speech = None            # SpeechStreamer, создаётся лениво при первом voice_mode-ходе
         self._speech_buf: str = ""
         self._speech_notified: bool = False
@@ -661,7 +672,16 @@ class StreamDisplay:
                 asyncio.create_task(self._blink_tool_dot(fold, header))
                 if fold is not None else None
             )
-            self._pending_tool_calls.append((name, args, fold, blink_task, header))
+            # Fallback key when an event genuinely has no id (shouldn't
+            # happen — every real emission site passes one — see
+            # _pending_tool_calls' own comment) — a monotonic counter
+            # still gives it a unique dict slot instead of colliding with
+            # another id-less call.
+            call_id = event.get("id")
+            if call_id is None:
+                self._pending_tool_call_seq += 1
+                call_id = f"_no_id_{self._pending_tool_call_seq}"
+            self._pending_tool_calls[call_id] = (name, args, fold, blink_task, header)
             self._stats["tools_called"] += 1
             self._phase_label = f"{random.choice(_TOOL_RUNNING_PHRASES)}..."
 
@@ -744,15 +764,21 @@ class StreamDisplay:
         elif t == "tool_end":
             name = event.get("name", "")
             result = event.get("result", "")
-            # FIFO — см. _pending_tool_calls в __init__: tool_start/tool_end
-            # для одного и того же вызова эмитятся строго по порядку, даже
-            # если модель запросила несколько тулов одним сообщением.
+            # Matched by id (see _pending_tool_calls' own comment) — falls
+            # back to the OLDEST pending entry (old FIFO behavior) only
+            # when this event's id is missing or was never registered by a
+            # tool_start, so a genuinely id-less caller still degrades
+            # gracefully instead of losing its result outright.
             pending_args: dict = {}
             fold = None
             blink_task = None
             header = name
-            if self._pending_tool_calls:
-                _, pending_args, fold, blink_task, header = self._pending_tool_calls.pop(0)
+            call_id = event.get("id")
+            if call_id is not None and call_id in self._pending_tool_calls:
+                _, pending_args, fold, blink_task, header = self._pending_tool_calls.pop(call_id)
+            elif self._pending_tool_calls:
+                oldest_key = next(iter(self._pending_tool_calls))
+                _, pending_args, fold, blink_task, header = self._pending_tool_calls.pop(oldest_key)
             if blink_task is not None:
                 blink_task.cancel()
             # Bounds-check: /clear (or any other command) can run concurrently
@@ -882,10 +908,10 @@ class StreamDisplay:
         totally different turn. Called from finish() (this turn ending) and
         start() (defensive — in case a previous turn's cleanup was itself
         interrupted before reaching finish())."""
-        for _, _, _, blink_task, _ in self._pending_tool_calls:
+        for _, _, _, blink_task, _ in self._pending_tool_calls.values():
             if blink_task is not None:
                 blink_task.cancel()
-        self._pending_tool_calls = []
+        self._pending_tool_calls = {}
 
     async def finish(self) -> None:
         self._cancel_pending_tool_blinks()

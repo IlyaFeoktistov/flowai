@@ -22,6 +22,7 @@ mcp_agent/roles.py), а run_stage остаётся общей
 stream_chat при вырезании.
 """
 import time
+import uuid
 from dataclasses import dataclass, field
 
 import ollama
@@ -257,11 +258,18 @@ async def run_stage(
             if leaked_calls:
                 result_parts = []
                 for call in leaked_calls:
+                    # No real LangChain tool_call_id here — this call never
+                    # went through actual tool-calling machinery in the
+                    # first place (see _leaked_tool_call_syntax's own
+                    # docstring) — a fresh synthetic id per call is enough
+                    # to pair this tool_start with its own tool_end below in
+                    # ui/stream.py, same purpose a real id serves elsewhere.
+                    call_id = uuid.uuid4().hex
                     if on_event:
-                        await on_event({"type": "tool_start", "name": call["name"], "args": call["args"], "stage": stage_name})
+                        await on_event({"type": "tool_start", "name": call["name"], "args": call["args"], "stage": stage_name, "id": call_id})
                     call_result = await _execute_leaked_tool_call(tools_by_name, call["name"], call["args"])
                     if on_event:
-                        await on_event({"type": "tool_end", "name": call["name"], "result": call_result[:2000], "stage": stage_name})
+                        await on_event({"type": "tool_end", "name": call["name"], "result": call_result[:2000], "stage": stage_name, "id": call_id})
                     result_parts.append(f"`{call['name']}` result:\n{call_result}")
                 verdict = {
                     "relevant": False,
@@ -324,11 +332,16 @@ async def run_stage(
         ):
             self_heal_asks_used += 1
             shape = await _extract_ask_user_shape(judge_model, round_final_text)
+            # No real tool_call_id — this ask_user was synthesized here from
+            # plain text the model wrote, never a real tool call (see the
+            # punt-to-user rescue comment above) — a fresh synthetic id
+            # pairs this tool_start with its own tool_end in ui/stream.py.
+            call_id = uuid.uuid4().hex
             if on_event:
-                await on_event({"type": "tool_start", "name": "ask_user", "args": shape, "stage": stage_name})
+                await on_event({"type": "tool_start", "name": "ask_user", "args": shape, "stage": stage_name, "id": call_id})
             answer = await ask_user_question(shape["question"], shape["options"], shape["recommended"])
             if on_event:
-                await on_event({"type": "tool_end", "name": "ask_user", "result": answer[:2000], "stage": stage_name})
+                await on_event({"type": "tool_end", "name": "ask_user", "result": answer[:2000], "stage": stage_name, "id": call_id})
             round_digests.append(f"- asked user: {shape['question']!r}\n- user answered: {answer!r}")
             payload = {"messages": [HumanMessage(content=f"The user's answer: {answer}")]}
             max_attempts += 1  # гарантированный ход на использование ответа, не засчитывается как провал

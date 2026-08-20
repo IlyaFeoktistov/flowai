@@ -318,7 +318,7 @@ async def _stream_round(
                             # promises, and DEBUG gating it here defeated that.
                             log_event("tool_call", name=tc["name"], args=tc["args"])
                             if on_event:
-                                await on_event({"type": "tool_start", "name": tc["name"], "args": tc["args"]})
+                                await on_event({"type": "tool_start", "name": tc["name"], "args": tc["args"], "id": tc.get("id")})
                         if m.usage_metadata:
                             tokens_in += m.usage_metadata.get("input_tokens", 0) or 0
                             tokens_out += m.usage_metadata.get("output_tokens", 0) or 0
@@ -341,7 +341,7 @@ async def _stream_round(
                         # chars) with a separate, shorter 200-char cutoff.
                         log_event("tool_result", name=m.name, result=result_text[:2000])
                         if on_event:
-                            await on_event({"type": "tool_end", "name": m.name, "result": result_text[:2000]})
+                            await on_event({"type": "tool_end", "name": m.name, "result": result_text[:2000], "id": m.tool_call_id})
                 emitted = len(msgs)
 
                 # См. mid_turn_queue в докстринге — только сразу после шага

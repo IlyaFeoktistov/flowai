@@ -242,12 +242,14 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
                         "type": "tool_start",
                         "name": f"delegate → {tc['name']}",
                         "args": tc.get("args", {}),
+                        "id": tc.get("id"),
                     })
             elif isinstance(m, ToolMessage):
                 await on_event({
                     "type": "tool_end",
                     "name": f"delegate → {m.name}",
                     "result": _tool_text(m.content)[:2000],
+                    "id": m.tool_call_id,
                 })
         prev_len = len(msgs)
     return final_state, tokens_in, tokens_out
