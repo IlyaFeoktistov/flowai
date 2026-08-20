@@ -8,8 +8,8 @@ echo  ==============================================
 echo    FlowAI — Установка и настройка
 echo  ==============================================
 echo.
-echo  Будет скачано около 2-3 ГБ данных.
-echo  Время установки: 10-20 минут.
+echo  Будет скачано около 3-4 ГБ данных.
+echo  Время установки: 15-25 минут.
 echo.
 pause
 
@@ -19,7 +19,7 @@ echo  [Папка проекта] %CD%
 echo.
 
 :: ── 1. Проверка winget ────────────────────────────────────────────────────────
-echo  [1/6] Проверяю winget...
+echo  [1/7] Проверяю winget...
 winget --version >nul 2>&1
 if errorlevel 1 (
     echo.
@@ -33,7 +33,7 @@ echo        OK.
 
 :: ── 2. Python ─────────────────────────────────────────────────────────────────
 echo.
-echo  [2/6] Проверяю Python...
+echo  [2/7] Проверяю Python...
 
 :: Проверяем PATH сначала
 python --version >nul 2>&1
@@ -78,7 +78,7 @@ echo        Python 3.12 установлен.
 
 :: ── 3. Ollama ─────────────────────────────────────────────────────────────────
 echo.
-echo  [3/6] Проверяю Ollama...
+echo  [3/7] Проверяю Ollama...
 
 ollama --version >nul 2>&1
 if not errorlevel 1 (
@@ -108,9 +108,57 @@ echo        Ollama установлен.
 
 :ollama_done
 
-:: ── 4. Python-зависимости ─────────────────────────────────────────────────────
+:: ── 4. Git for Windows (даёт agent'у настоящий bash — см. FlowAI's ────────────
+::      bash_windows_server.py: без него тулы агента, завязанные на shell
+::      (git/grep/find/&&-цепочки), не смогут выполняться вообще) ─────────────
 echo.
-echo  [4/6] Устанавливаю зависимости приложения...
+echo  [4/7] Проверяю Git for Windows (нужен агенту как shell)...
+
+:: Явные пути Git for Windows проверяем ПЕРВЫМИ, а не "where bash.exe" —
+:: на машине с включённым WSL "where" находит C:\Windows\System32\bash.exe
+:: раньше (это заглушка, запускающая WSL-дистрибутив, а не настоящий
+:: автономный bash — совсем другая программа, и не то, что нам нужно здесь).
+if exist "%ProgramFiles%\Git\bin\bash.exe" (
+    set "GITBASH=%ProgramFiles%\Git\bin\bash.exe"
+    goto :gitbash_found
+)
+if exist "%ProgramFiles(x86)%\Git\bin\bash.exe" (
+    set "GITBASH=%ProgramFiles(x86)%\Git\bin\bash.exe"
+    goto :gitbash_found
+)
+
+:: Фолбэк на PATH, но с фильтром против System32\bash.exe (WSL-заглушка,
+:: см. комментарий выше) — берём первое совпадение, которое НЕ из System32.
+for /f "delims=" %%b in ('where bash.exe 2^>nul') do (
+    echo %%b | find /i "System32" >nul
+    if errorlevel 1 (
+        set "GITBASH=%%b"
+        goto :gitbash_found
+    )
+)
+
+echo        Git for Windows не найден, устанавливаю...
+winget install Git.Git ^
+    --silent --accept-package-agreements --accept-source-agreements
+if errorlevel 1 (
+    echo.
+    echo  [ПРЕДУПРЕЖДЕНИЕ] Не удалось установить Git for Windows автоматически.
+    echo  Скачайте вручную: https://git-scm.com/download/win, затем перезапустите
+    echo  этот скрипт — без него агент не сможет пользоваться shell-тулами.
+    set "GITBASH="
+    goto :gitbash_done
+)
+if exist "%ProgramFiles%\Git\bin\bash.exe" set "GITBASH=%ProgramFiles%\Git\bin\bash.exe"
+echo        Git for Windows установлен.
+
+:gitbash_found
+echo        Найден: %GITBASH%
+:gitbash_done
+
+:: ── 5. Python-зависимости ─────────────────────────────────────────────────────
+echo.
+echo  [5/7] Устанавливаю зависимости приложения (полный стек: LangChain/
+echo        LangGraph/MCP, не облегчённая версия)...
 
 if not exist ".venv" (
     "%PYTHON%" -m venv .venv
@@ -121,29 +169,41 @@ if not exist ".venv" (
 )
 
 .venv\Scripts\pip install --upgrade pip --quiet --disable-pip-version-check
-.venv\Scripts\pip install -r windows\requirements-lite.txt --quiet
+.venv\Scripts\pip install -r requirements.txt --quiet
 if errorlevel 1 (
     echo  [ОШИБКА] Не удалось установить зависимости.
     pause & exit /b 1
 )
 echo        Готово.
 
-:: ── 5. Файл конфигурации (.env) ───────────────────────────────────────────────
+:: ── 6. Файл конфигурации (.env) ───────────────────────────────────────────────
 echo.
-echo  [5/6] Настройка конфигурации...
+echo  [6/7] Настройка конфигурации...
 
 if not exist ".env" (
     copy .env.example .env >nul
-    powershell -Command ^
-        "(Get-Content .env) -replace 'OLLAMA_MODEL=.*', 'OLLAMA_MODEL=qwen2.5:7b' | Set-Content .env"
+    :: OLLAMA_MODEL — дефолтная модель flowAI (glm-4.7-flash) требует
+    :: expert_streaming, отдельно собираемый из исходников форк llama.cpp
+    :: (Linux/CUDA-toolchain-only, см. корневой README «Модели») — здесь не
+    :: ставится, поэтому явно переключаем на модель, работающую на голом
+    :: Ollama. .env.example не содержит строк OLLAMA_MODEL/
+    :: EXPERT_STREAMING_ENABLED — дописываем, а не пытаемся заменить
+    :: несуществующую строку.
+    (
+        echo OLLAMA_MODEL=qwen2.5:7b
+        echo EXPERT_STREAMING_ENABLED=0
+    ) >> .env
+    if defined GITBASH (
+        echo FLOWAI_WINDOWS_BASH=%GITBASH% >> .env
+    )
     echo        Создан .env, выбрана модель qwen2.5:7b.
 ) else (
     echo        .env уже существует — не изменяю.
 )
 
-:: ── 6. Скачивание языковой модели ─────────────────────────────────────────────
+:: ── 7. Скачивание языковой модели ─────────────────────────────────────────────
 echo.
-echo  [6/6] Скачивание языковой модели (qwen2.5:7b, около 4.7 ГБ)...
+echo  [7/7] Скачивание языковой модели (qwen2.5:7b, около 4.7 ГБ)...
 echo        Пожалуйста, подождите. Это делается один раз.
 echo.
 
@@ -178,7 +238,7 @@ echo     if errorlevel 1 start "" /b "%OLLAMA_EXE%" serve
 echo )
 echo timeout /t 2 /nobreak ^>nul
 echo.
-echo .venv\Scripts\python cli.py
+echo .venv\Scripts\python src\cli.py
 echo pause
 ) > "Запустить FlowAI.bat"
 
@@ -191,4 +251,11 @@ echo    Для запуска откройте файл:
 echo    "Запустить FlowAI.bat"
 echo  ==============================================
 echo.
+if not defined GITBASH (
+    echo  [ВНИМАНИЕ] Git for Windows не найден — shell-тулы агента ^(git,
+    echo  grep, любые команды в чате^) работать не будут, пока он не
+    echo  установлен. Поставьте https://git-scm.com/download/win и
+    echo  перезапустите flowai — остальной чат при этом работает и так.
+    echo.
+)
 pause

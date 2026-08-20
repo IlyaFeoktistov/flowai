@@ -56,6 +56,7 @@ grep_search, glob_search, web_search, fetch) идёт без диалога — 
 """
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 
@@ -73,6 +74,35 @@ _FLOWAI_INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 _LOG_DIR = os.path.join(tempfile.gettempdir(), "flowai-mcp-logs")
 
 
+# Git for Windows install locations, checked in order when no bash is on
+# PATH — the same two spots windows/setup.bat probes before writing
+# FLOWAI_WINDOWS_BASH into .env, kept here too so this still works even for
+# a .env written by hand or by an older setup.bat run.
+_WINDOWS_BASH_CANDIDATES = [
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+]
+
+
+def _resolve_windows_bash() -> str | None:
+    """None means no POSIX-compatible shell is available on this Windows
+    machine — callers fall back to cmd.exe instead of crashing outright.
+    See mcp_agent/servers/bash_windows_server.py's module docstring for why
+    the bash TOOL itself (not just this launch-log wrapper) needs a real
+    bash rather than cmd.exe."""
+    override = os.getenv("FLOWAI_WINDOWS_BASH")
+    if override and os.path.isfile(override):
+        return override
+    from shutil import which
+    found = which("bash")
+    if found:
+        return found
+    for candidate in _WINDOWS_BASH_CANDIDATES:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _via_shell(command: str, args: list[str], log_name: str) -> tuple[str, list[str]]:
     """Каждый MCP-сервер пишет свои внутренние логи в stderr — Python `mcp`
     SDK логирует входящие запросы (mcp/server/lowlevel/server.py), Node
@@ -84,9 +114,22 @@ def _via_shell(command: str, args: list[str], log_name: str) -> tuple[str, list[
     stdio_client() жёстко использует sys.stderr, никакого errlog= в
     StdioConnection нет. Редиректим на уровне самого запуска подпроцесса
     стандартным shell '>': трогаем только stderr, stdout не трогаем — там
-    живёт сам MCP JSON-RPC протокол, его нельзя портить."""
+    живёт сам MCP JSON-RPC протокол, его нельзя портить.
+
+    На Windows голого "bash" в PATH обычно нет — используем Git for
+    Windows, если он найден (_resolve_windows_bash), с ТЕМ ЖЕ синтаксисом,
+    что и на POSIX (это настоящий bash, просто из другой поставки); если
+    Git for Windows не установлен, откатываемся на cmd.exe (свой синтаксис
+    редиректа, без shlex-квотинга — cmd не понимает POSIX-кавычки)."""
     os.makedirs(_LOG_DIR, exist_ok=True)
     log_path = os.path.join(_LOG_DIR, f"{log_name}.log")
+    if sys.platform == "win32":
+        win_bash = _resolve_windows_bash()
+        if win_bash:
+            full_cmd = " ".join(shlex.quote(p) for p in [command, *args])
+            return win_bash, ["-c", f"exec {full_cmd} 2>{shlex.quote(log_path)}"]
+        full_cmd = subprocess.list2cmdline([command, *args])
+        return "cmd", ["/c", f'{full_cmd} 2>"{log_path}"']
     full_cmd = " ".join(shlex.quote(p) for p in [command, *args])
     return "bash", ["-c", f"exec {full_cmd} 2>{shlex.quote(log_path)}"]
 
@@ -158,7 +201,14 @@ def build_mcp_connections(repo_path: str | None = None) -> dict:
         # ДО того, как они дойдут до file_ops_server.py, и спрашивает через
         # ask_permission, если целевой путь вне repo_path.
         "fetch": (mcp_server_fetch, []),
-        "bash": (py, [_own_server("bash")]),
+        # bash_windows_server.py — СВОЙ, отдельный от bash_server.py модуль
+        # (не общий код с if-ветками): процессная модель (сессии/группы
+        # процессов, проверка живости PID, kill дерева) на Windows устроена
+        # по-другому на уровне ОС, а не просто другим синтаксисом shell — см.
+        # его module docstring. Ветка выбирается один раз здесь, при
+        # регистрации сервера; сам тул для модели/roles.py/self_heal.py
+        # выглядит одинаково независимо от ОС.
+        "bash": (py, [_own_server("bash_windows" if sys.platform == "win32" else "bash")]),
         "web_search": (py, [_own_server("web_search")]),
         "memory": (py, [_own_server("memory")]),
         "knowledge": (py, [_own_server("knowledge")]),

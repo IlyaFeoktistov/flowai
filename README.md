@@ -664,8 +664,11 @@ flowAI/
 │   │   ├── run_cli.py          — раннер для сравнения mcp_agent/agent.py со старым пайплайном
 │   │   ├── dnd_agent.py / dnd_store.py / dnd_tools.py — режим /dnd: изолированный агент,
 │   │   │                         SQLite-стейт, прямые (не MCP) тулы
-│   │   └── servers/            — MCP тул-серверы: bash_server, file_ops_server (read/write/edit
-│   │                             /grep_search/glob_search + delete_path/restore_deleted_path),
+│   │   └── servers/            — MCP тул-серверы: bash_server (POSIX) / bash_windows_server
+│   │                             (Windows, свой процессный слой — Git for Windows как shell,
+│   │                             taskkill вместо /proc-обхода — выбор по sys.platform в
+│   │                             config.py), file_ops_server (read/write/edit/grep_search/
+│   │                             glob_search + delete_path/restore_deleted_path),
 │   │                             web_search_server, memory_server, knowledge_server, rag_server,
 │   │                             image_gen_server, vision_server, music_server, gen_model_server,
 │   │                             lsp_server, guide_server (self-описание на «что ты умеешь»)
