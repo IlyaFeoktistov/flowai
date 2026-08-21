@@ -262,24 +262,55 @@ function AskUserItem({
   item: Extract<TurnItem, { kind: 'ask_user' }>
   onRespond: (id: string, answer: string) => void
 }) {
+  const [customAnswer, setCustomAnswer] = useState('')
+
+  const submitCustom = () => {
+    const text = customAnswer.trim()
+    if (text) onRespond(item.id, text)
+  }
+
   return (
     <div className="turn-ask-user">
       <div className="ask-user-question">{item.question}</div>
       {item.resolved ? (
         <div className="dim">Ответ: {item.resolved}</div>
       ) : (
-        <div className="btn-row wrap">
-          {item.options.map((opt) => (
-            <button
-              key={opt.label}
-              className={'btn' + (opt.label === item.recommended ? ' btn-primary' : '')}
-              title={opt.description}
-              onClick={() => onRespond(item.id, opt.label)}
-            >
-              {opt.label}
+        <>
+          {/* Стопкой, не строкой пилюль — так помещается описание под
+              лейблом (раньше оно пряталось в title-тултип и было не видно
+              вообще), и не ломается на дублирующихся лейблах — модель
+              иногда честно присылает два варианта с одним и тем же
+              текстом, но разными description (см. index, не opt.label, —
+              одинаковый key на дублях уже путал React). */}
+          <ul className="ask-user-options">
+            {item.options.map((opt, i) => (
+              <li key={i}>
+                <button
+                  className={'ask-user-option' + (opt.label === item.recommended ? ' ask-user-option-recommended' : '')}
+                  onClick={() => onRespond(item.id, opt.label)}
+                >
+                  <span className="ask-user-option-label">{opt.label}</span>
+                  {opt.description && <span className="ask-user-option-desc">{opt.description}</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="ask-user-custom">
+            <input
+              type="text"
+              className="ask-user-custom-input"
+              placeholder="Свой вариант ответа…"
+              value={customAnswer}
+              onChange={(e) => setCustomAnswer(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submitCustom()
+              }}
+            />
+            <button type="button" className="btn" onClick={submitCustom} disabled={!customAnswer.trim()}>
+              Отправить
             </button>
-          ))}
-        </div>
+          </div>
+        </>
       )}
     </div>
   )
@@ -307,11 +338,10 @@ function TurnItemView({
         </details>
       )
     case 'text':
-      return (
-        <Collapsible>
-          <div className="turn-text">{renderMarkdown(item.text)}</div>
-        </Collapsible>
-      )
+      // Без Collapsible нарочно — это ответ модели, не вложение/тул-
+      // результат: он и так обычно короткий, сворачивать его в 10 строк
+      // по умолчанию больше мешало, чем помогало.
+      return <div className="turn-text">{renderMarkdown(item.text)}</div>
     case 'tool':
       return <ToolItem item={item} />
     case 'plan':

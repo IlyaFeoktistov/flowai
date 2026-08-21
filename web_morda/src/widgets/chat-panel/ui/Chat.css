@@ -206,8 +206,7 @@
   text-decoration: line-through;
 }
 
-.turn-permission,
-.turn-ask-user {
+.turn-permission {
   border: 1px solid var(--warn-soft);
   background: var(--warn-soft);
   border-radius: var(--radius-md);
@@ -217,8 +216,82 @@
   gap: 10px;
 }
 
+/* Не варнинг (в отличие от .turn-permission — тут ничего рискованного не
+   подтверждается, модель просто уточняет вопрос) — свой, нейтральный
+   акцентный цвет вместо одолженного жёлто-коричневого warn-тона. */
+.turn-ask-user {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .ask-user-question {
   font-weight: 500;
+}
+
+.ask-user-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ask-user-option {
+  width: 100%;
+  text-align: left;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text);
+}
+.ask-user-option:hover {
+  background: var(--bg-hover);
+}
+.ask-user-option-recommended {
+  border-color: var(--accent-2);
+  background: var(--accent-soft);
+}
+
+.ask-user-option-label {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.ask-user-option-desc {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.ask-user-custom {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.ask-user-custom-input {
+  flex: 1;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.ask-user-custom-input:focus {
+  outline: 2px solid var(--accent-2);
+  outline-offset: -1px;
 }
 
 .turn-error {
