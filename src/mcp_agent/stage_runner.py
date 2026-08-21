@@ -6,7 +6,7 @@ self-heal цикла mcp_agent/agent.py:stream_chat (recursion-limit-обраб�
 разметки, punt-to-user rescue через настоящий ask_user, дайджест-ретраи по
 образцу _start_next_attempt) в переиспользуемую run_stage(...).
 
-В отличие от легаси stream_chat, здесь НЕТ ни одной строки того огромного
+В отличие от основного stream_chat, здесь НЕТ ни одной строки того огромного
 if/elif вердикт-дерева (~150 строк в agent.py, "wrote code but didn't
 verify", "diff not read" и т.п.) — та логика имела смысл только для
 монолитного агента, который делал всё сразу. Каждая стадия пайплайна
@@ -69,7 +69,7 @@ class StageResult:
     llm_calls: int = 0
     # Суммарное время реальной генерации токенов (см. _stream_round's gen_ms
     # docstring) по ВСЕМ попыткам — no pipeline.py stage currently reports
-    # this in its own "stats" event, но mcp_agent/agent.py's legacy caller
+    # this in its own "stats" event, но mcp_agent/agent.py's main caller
     # does (tok/s в UI), так что run_stage не должен его тихо отбрасывать.
     gen_duration_ms: int = 0
     attempts_used: int = 0
@@ -323,7 +323,7 @@ async def run_stage(
         # the user forever would loop indefinitely: each punt does
         # `max_attempts += 1; attempt += 1`, so the gap between attempt and
         # max_attempts never closes and `attempt == max_attempts - 1` never
-        # fires. mcp_agent/agent.py's legacy self-heal loop already caps
+        # fires. mcp_agent/agent.py's main self-heal loop already caps
         # this the same way (self_heal_asks_used < MAX_SELF_HEAL_ASKS) —
         # this was missing here since run_stage was extracted from it.
         if (
@@ -393,7 +393,7 @@ async def _call_guidance_fn(guidance_fn, verdict, round_msgs, new_tool_msgs, rou
 def _stage_digest(round_msgs: list, verdict: dict) -> str:
     """Тот же формат, что _summarize_round в agent.py (explored/changed/ran/
     diffed + rejected reason) — сюда не импортирован напрямую, потому что
-    agent.py импортирует stage_runner.py в перспективе (легаси cutover, см.
+    agent.py импортирует stage_runner.py в перспективе (cutover основного агента, см.
     план), а не наоборот; логика достаточно короткая, чтобы держать копию
     здесь не было накладно, но при правке ОБЕИХ копий синхронно проверять
     вторую (agent.py:_summarize_round)."""

@@ -4,7 +4,7 @@
 
 - [architecture.md](architecture.md) — общее устройство приложения:
   вход (`cli.py`/`main.py`), пайплайн Router→Analyzer→Planner→Coder→
-  Verifier против легаси-агента, `roles.py`'s композиция тулов по роли,
+  Verifier против основного агента, `roles.py`'s композиция тулов по роли,
   self-heal цикл (`stage_runner.py`), `BuildCache`.
 - [tools-and-mcp-servers.md](tools-and-mcp-servers.md) — как устроены
   тулы модели: MCP-серверы-подпроцессы, реестр

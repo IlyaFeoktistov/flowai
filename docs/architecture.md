@@ -26,7 +26,7 @@ strip'ает префикс при сборке — снаружи всё выг
 cli.py / main.py
         │
         ▼
-pipeline_mode=ВКЛ (дефолт)              pipeline_mode=ВЫКЛ (легаси)
+pipeline_mode=ВКЛ (дефолт)              pipeline_mode=ВЫКЛ (основной агент)
         │                                        │
         ▼                                        ▼
 mcp_agent/pipeline.py                   mcp_agent/agent.py:stream_chat
@@ -40,10 +40,10 @@ Coder → Verifier                        исследование+запись+
          (recursion-limit/context-overflow/ResponseError-восстановление,
          разбор утёкшей tool-call разметки, punt-to-user rescue,
          дайджест-ретраи) — один и тот же код крутит и каждую стадию
-         пайплайна, и весь легаси-ход целиком.
+         пайплайна, и весь ход основного агента целиком.
 ```
 
-Легаси-путь (`agent.py`) остаётся ЕДИНСТВЕННЫМ путём для голосового
+Путь основного агента (`agent.py`) остаётся ЕДИНСТВЕННЫМ путём для голосового
 режима (`voice_mode`) — у пайплайна нет голосовой ветки.
 
 ## Пайплайн (дефолтный путь)
@@ -76,7 +76,7 @@ Coder → Verifier                        исследование+запись+
 
 ## Сборка агента
 
-`mcp_agent/agent_builder.py` — единая точка сборки и для легаси-агента
+`mcp_agent/agent_builder.py` — единая точка сборки и для основного агента
 (`_build_agent`), и для каждой роли пайплайна (`_build_role_agent`):
 
 - модель (Ollama или expert-streaming backend, см.
@@ -93,7 +93,7 @@ Coder → Verifier                        исследование+запись+
 ## Self-heal
 
 `stage_runner.py:run_stage` — общий движок ретраев для каждой
-стадии/легаси-хода: если раунд не прошёл verdict-проверку (детерминированную
+стадии/хода основного агента: если раунд не прошёл verdict-проверку (детерминированную
 или через LLM-судью), строится дайджест уже сделанного и раунд повторяется
 с урезанным контекстом, до `max_attempts`. Отдельно обрабатывает:
 `GraphRecursionError`, реальный context-overflow от backend'а, утёкшую в
@@ -106,7 +106,7 @@ Coder → Verifier                        исследование+запись+
 
 ```
 Alt+R → ui/audio.py:record_from_mic → transcribe (faster-whisper)
-      → текст в поле ввода → обычный ход агента (легаси-путь) → ответ
+      → текст в поле ввода → обычный ход агента (путь основного агента) → ответ
       → (если voice_mode) ui/audio.py:speak → venv-tts subprocess (Chatterbox)
       → воспроизведение
 ```

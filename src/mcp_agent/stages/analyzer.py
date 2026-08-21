@@ -2,7 +2,7 @@
 Verdict/guidance для стадии Analyzer (mcp_agent/roles.py, mcp_agent/pipeline.py).
 
 Analyzer — самая простая по вердикту роль: она не пишет код и не гоняет
-bash, поэтому весь легаси self-heal-репертуар mcp_agent/agent.py
+bash, поэтому весь self-heal-репертуар основного mcp_agent/agent.py
 (execution_failure, syntax_only_verification, diff-review и т.д.) ей
 попросту не о чем проверять — единственное, что имеет смысл: "было ли
 вообще расследование" и "есть ли внятное саммари по итогу". Не нужен даже

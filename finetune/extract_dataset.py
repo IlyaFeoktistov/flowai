@@ -94,7 +94,7 @@ def extract_examples(rows):
     history = []  # накопленные messages в формате user/assistant/tool
     pending_tool_call = None  # (seq, name, args) уже отправленного вызова, ждём его tool_end
     round_had_tool_call_seq = None  # seq последнего answer_end had_tool_calls=true раунда
-    current_stage = None  # последний виденный role="stage_changed"; None — легаси/неизвестно (см. модуль docstring)
+    current_stage = None  # последний виденный role="stage_changed"; None — основной агент/неизвестно (см. модуль docstring)
 
     for i, (seq, role, content, ts) in enumerate(rows):
         if role == "stage_changed":
@@ -133,7 +133,7 @@ def extract_examples(rows):
                     # реальная аномалия) — не тащим противоречивый пример:
                     # либо давать неверный (без цели) tool_scope, либо
                     # рисковать, что модель решит, будто это "нормально".
-                    # Откатываемся на None (легаси-путь ниже по пайплайну).
+                    # Откатываемся на None (путь для основного агента/неизвестной роли ниже).
                     tool_scope = None
 
             example = {
@@ -146,7 +146,7 @@ def extract_examples(rows):
                 # физически появиться в этой сессии, "rejected=False" здесь
                 # значит "не проверялось", а не "проверено и принято".
                 "verified": ts >= _SELF_HEAL_TRACKING_SINCE,
-                "tool_scope": tool_scope,  # точный список имён тулов роли, или None (легаси/неизвестно)
+                "tool_scope": tool_scope,  # точный список имён тулов роли, или None (основной агент/неизвестно)
             }
             examples.append(example)
 

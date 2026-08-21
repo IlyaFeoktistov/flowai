@@ -120,7 +120,7 @@ async def save_auto_note(repo_path: str, text: str) -> None:
 async def maybe_auto_capture(
     judge_model, repo_path: str, task_text: str, investigated_items: set[str], final_text: str,
 ) -> None:
-    """Общая auto-capture логика для legacy mcp_agent/agent.py:stream_chat и
+    """Общая auto-capture логика для main mcp_agent/agent.py:stream_chat и
     mcp_agent/pipeline.py — вызывающий код уже решил, что стоит попробовать
     (обычно: >=4 разных мест разведки, ничего не сохранено вручную тулом,
     ход завершился успехом); эта функция делает сам judge-вызов

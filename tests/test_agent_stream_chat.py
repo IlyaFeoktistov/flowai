@@ -1,6 +1,6 @@
-"""End-to-end mcp_agent/agent.py:stream_chat — the legacy monolithic path
+"""End-to-end mcp_agent/agent.py:stream_chat — the main monolithic path
 (voice_mode / pipeline_mode=off), now a thin wrapper around
-mcp_agent/stage_runner.py:run_stage with mcp_agent/stages/legacy.py's
+mcp_agent/stage_runner.py:run_stage with mcp_agent/stages/main_agent.py's
 verdict/guidance. Every real model/tool call is mocked at _stream_round —
 these confirm the collapse (agent.py: 1476 -> 747 lines) kept behavior
 intact for the scenarios documented in the old code's own comments."""
@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage
 
 import mcp_agent.agent as agent_mod
 import mcp_agent.stage_runner as sr
-import mcp_agent.stages.legacy as legacy_mod
+import mcp_agent.stages.main_agent as main_agent_mod
 import settings
 
 from conftest import ai_message, tool_message
@@ -177,7 +177,7 @@ async def test_punt_to_user_cap_then_falls_back_to_normal_retries(monkeypatch):
     async def fake_semantic_check(model, task, tool_msgs, answer, ask_user_called):
         return {"relevant": False, "reason": "keeps asking instead of deciding"}
 
-    monkeypatch.setattr(legacy_mod, "_semantic_check", fake_semantic_check)
+    monkeypatch.setattr(main_agent_mod, "_semantic_check", fake_semantic_check)
 
     async def fake_ask_user_question(question, options, recommended):
         return "some answer"

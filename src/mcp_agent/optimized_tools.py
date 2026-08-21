@@ -7,8 +7,8 @@ config.py:TOOLS_REQUIRING_APPROVAL, ask_user_tool.py, compaction.py и весь
 правки.
 
 Смысл: и Analyzer, и Coder, и voice_mode-агент (когда он всё же получает
-тулы) в легаси-пути видят ВСЕ доступные тулы сразу, независимо от задачи
-(см. router.py/roles.py — ровно то, чего у легаси-агента НЕТ и что уже
+тулы) в пути основного агента видят ВСЕ доступные тулы сразу, независимо от задачи
+(см. router.py/roles.py — ровно то, чего у основного агента НЕТ и что уже
 чинит новый пайплайн через per-request классификацию needs_project/
 needs_shell). file_ops_server.py's консолидация (read_file/write_file/
 edit_file/grep_search/glob_search вместо дюжины почти-дублей — filesystem

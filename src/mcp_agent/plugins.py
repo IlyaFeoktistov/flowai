@@ -133,7 +133,7 @@ class SkillTask:
     prefer_delegate — soft nudge (prepended text), not an enforced routing
     rule: flowai has no way to hand a skill's task straight to delegate()
     without going through the model's own tool-calling decision (delegate
-    only exists in the legacy agent's tool set to begin with, see
+    only exists in the main agent's tool set to begin with, see
     delegate_tool.py — nothing to route to at all in pipeline_mode). Same
     class of mechanism as delegate_tool.py's own _DelegateNudgeMiddleware
     (prompt text, not a hard bypass) — harmless if delegate isn't bound for

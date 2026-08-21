@@ -82,7 +82,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from mcp_agent.agent import stream_chat as _legacy_stream_chat
+from mcp_agent.agent import stream_chat as _main_stream_chat
 from mcp_agent import dnd_store
 from mcp_agent import plugins
 from mcp_agent.dnd_agent import dnd_stream_chat, reconcile_before_exit
@@ -473,7 +473,7 @@ async def main() -> None:
     # _stream_round подхватывает его между шагами графа (после того, как
     # текущий tool_call доведён до конца, перед следующим вызовом модели),
     # а не после конца всего хода. Пересоздаётся заново на каждый ход
-    # (_handle_input) — None, когда ходит не легаси-агент (D&D/pipeline_mode/
+    # (_handle_input) — None, когда ходит не основной агент (D&D/pipeline_mode/
     # idle), тогда _enqueue откатывается на старую очередь _pending.
     _mid_turn_queue: "asyncio.Queue[str] | None" = None
     _music_task: asyncio.Task | None = None   # running /music stream, if any
@@ -483,7 +483,7 @@ async def main() -> None:
     # список сообщений (_dnd_messages, не смешивается с messages — иначе
     # фэнтези-нарратив мешался бы с историей кодинг-сессии и наоборот) и
     # свой изолированный агент (mcp_agent/dnd_agent.py), НЕ проходящий через
-    # _legacy_stream_chat/_pipeline_stream_chat вообще. Структурное состояние
+    # _main_stream_chat/_pipeline_stream_chat вообще. Структурное состояние
     # игры (персонаж/локация/инвентарь/партия/факты) живёт в БД
     # (mcp_agent/dnd_store.py), не здесь — эти три переменные — только "какая
     # игра активна прямо сейчас в этой сессии терминала".
@@ -1293,21 +1293,21 @@ async def main() -> None:
         display.start(t_wall)
 
         # Новый пайплайн (mcp_agent/pipeline.py) не участвует в voice_mode
-        # (нет голосовой ветки) — та ветка всегда идёт через легаси-агент,
+        # (нет голосовой ветки) — та ветка всегда идёт через основной агент,
         # независимо от pipeline_mode. Проверяем оба флага НА КАЖДЫЙ ход
         # (не один раз при старте) — оба переключаются на лету через
         # /settings, и пользователь должен увидеть эффект сразу, без
         # перезапуска.
-        use_legacy = _settings.get("voice_mode") or not _settings.get("pipeline_mode")
-        stream_chat = _legacy_stream_chat if use_legacy else _pipeline_stream_chat
-        # Мид-терн стир (см. _mid_turn_queue выше) — только у легаси-агента:
+        use_main = _settings.get("voice_mode") or not _settings.get("pipeline_mode")
+        stream_chat = _main_stream_chat if use_main else _pipeline_stream_chat
+        # Мид-терн стир (см. _mid_turn_queue выше) — только у основного агента:
         # _pipeline_stream_chat раскладывает ход на стадии с СВОИМИ
         # thread_id per стадия/ретрай (mcp_agent/stage_runner.py), а не один
         # непрерывный тред — тот же приём "продолжить тем же thread_id с
         # новым HumanMessage" там не годится без отдельной проработки.
-        _mid_turn_queue = asyncio.Queue() if use_legacy else None
+        _mid_turn_queue = asyncio.Queue() if use_main else None
         stream_kwargs = {"on_event": _on_event}
-        if use_legacy:
+        if use_main:
             stream_kwargs["mid_turn_queue"] = _mid_turn_queue
         try:
             async for chunk in stream_chat(messages, **stream_kwargs):

@@ -13,7 +13,7 @@ def test_present_in_every_role_tool_set():
     assert "flowai_guide" in roles.verifier_tools()
     assert "flowai_guide" in roles.executor_tools(needs_project=True)
     assert "flowai_guide" in roles.executor_tools(needs_project=False)
-    assert "flowai_guide" in roles.LEGACY_INVESTIGATION_TOOL_NAMES
+    assert "flowai_guide" in roles.MAIN_INVESTIGATION_TOOL_NAMES
 
 
 def test_survives_optimized_tools_filter():

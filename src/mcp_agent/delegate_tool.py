@@ -68,7 +68,7 @@ from mcp_agent.ask_user_tool import _ToolErrorGuardMiddleware
 from mcp_agent.compaction import _CompactResearchMiddleware, _summarize_research, is_context_overflow_error
 from mcp_agent.message_utils import _DedupeToolResultsMiddleware, _tool_text
 from mcp_agent.model_config import DEBUG, DELEGATE_RECURSION_LIMIT, TOOL_OUTPUT_CHAR_CAP
-from mcp_agent.roles import LEGACY_INVESTIGATION_TOOL_NAMES
+from mcp_agent.roles import MAIN_INVESTIGATION_TOOL_NAMES
 from mcp_agent.self_heal import (
     _execute_leaked_tool_call,
     _leaked_tool_call_syntax,
@@ -95,10 +95,10 @@ _MAX_LEAK_RECOVERIES = 2
 # Allowlist по ИМЕНИ тула, а не "всё, что не в TOOLS_REQUIRING_APPROVAL" — так
 # подмножество не меняется молча, если кто-то добавит новый read-only-с-виду
 # тул в approval-неймспейс не подумав про delegate. mcp_agent/roles.py:
-# LEGACY_INVESTIGATION_TOOL_NAMES — фиксированный (без per-turn флагов
-# router.py, которых у легаси-агента нет) read-only+web набор, БЕЗ shell —
+# MAIN_INVESTIGATION_TOOL_NAMES — фиксированный (без per-turn флагов
+# router.py, которых у основного агента нет) read-only+web набор, БЕЗ shell —
 # держит верным собственный системный промпт этого файла ниже ("no shell").
-_ALLOWED_TOOLS = LEGACY_INVESTIGATION_TOOL_NAMES
+_ALLOWED_TOOLS = MAIN_INVESTIGATION_TOOL_NAMES
 
 _DELEGATE_SYSTEM_PROMPT = (
     "You are a focused research sub-agent, delegated ONE specific "
@@ -189,7 +189,7 @@ class _DelegateNudgeMiddleware(AgentMiddleware):
 current_on_event: ContextVar = ContextVar("delegate_on_event", default=None)
 
 # Тулы, чья работа идёт ВНУТРИ отдельного sub_agent.astream()/ainvoke() на
-# том же объекте `model`, что и внешняя роль/легаси-агент — delegate
+# том же объекте `model`, что и внешняя роль/основной агент — delegate
 # единственный такой сейчас. Пока delegate работает, внешний
 # agent.astream(stream_mode=["values", "messages"]) может выдавать ДЕСЯТКИ
 # answer_start подряд без единого answer_chunk/answer_end — похоже, токен-
@@ -201,7 +201,7 @@ current_on_event: ContextVar = ContextVar("delegate_on_event", default=None)
 # потока глушим — они не принадлежат ему, а tool_start/tool_end самого
 # delegate (плюс его собственные "delegate → ..." из _run_subagent_streaming
 # выше) НЕ глушатся, так что пользователь всё равно видит, что происходит,
-# просто без рваных чужих текстовых фрагментов поверх. Общее для легаси
+# просто без рваных чужих текстовых фрагментов поверх. Общее для основного
 # stream_chat (agent.py) и пайплайна (stage_runner.py) — оба реально зовут
 # delegate/делят один `model`.
 _SUBAGENT_TOOLS = frozenset({"delegate"})
@@ -339,7 +339,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
     # _ALLOWED_TOOLS` filter above can never have picked it up from `tools`
     # — added directly instead, using the SAME `model` this sub-agent
     # itself runs on (no second load). _ALLOWED_TOOLS (roles.py:
-    # LEGACY_INVESTIGATION_TOOL_NAMES) includes "web_read" unconditionally,
+    # MAIN_INVESTIGATION_TOOL_NAMES) includes "web_read" unconditionally,
     # so this is not gated on anything per-call.
     delegate_tools.append(build_web_read_tool(model))
     delegate_tools_by_name = {t.name: t for t in delegate_tools}

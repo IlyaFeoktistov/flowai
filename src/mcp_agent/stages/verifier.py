@@ -1,7 +1,7 @@
 """
 Verdict/guidance для стадии Verifier (mcp_agent/roles.py, mcp_agent/pipeline.py).
 
-Ключевое отличие от легаси mcp_agent/agent.py: там "execution_failure" был
+Ключевое отличие от основного mcp_agent/agent.py: там "execution_failure" был
 ПРОВАЛОМ self-heal раунда (весь ход должен был сам и написать, и
 проверить). Здесь Verifier — ОТДЕЛЬНАЯ роль, чья единственная работа —
 честно запустить проверку и доложить результат: реальный fail — это

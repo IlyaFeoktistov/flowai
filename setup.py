@@ -407,7 +407,7 @@ def setup_expert_streaming() -> None:
         "docstring for exactly which PR, why it's not in mainline, and the "
         "known PP-for-TG tradeoff a real tester reported). Toggle "
         "'экспериментальный expert-streaming backend' in /settings to try it "
-        "against the current model -- it only takes effect for the legacy "
+        "against the current model -- it only takes effect for the main "
         "agent path (pipeline_mode=ВЫКЛ)."
     )
 

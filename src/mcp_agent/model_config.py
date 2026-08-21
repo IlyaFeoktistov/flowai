@@ -296,7 +296,7 @@ QUICK_FIX_RECURSION_LIMIT = 80
 # Per-роль self-heal retry-бюджеты (аналог MAX_ATTEMPTS выше, но раздельно
 # по ролям пайплайна — см. mcp_agent/stage_runner.py:run_stage). Planner и
 # Verifier дешевле "перепройти" (короткая, узкая по смыслу проверка), Coder
-# держит тот же запас, что и legacy-агент, потому что там же живёт вся
+# держит тот же запас, что и основной агент, потому что там же живёт вся
 # сложность multi-part-правок.
 ANALYZER_MAX_ATTEMPTS = 2
 PLANNER_MAX_ATTEMPTS = 2

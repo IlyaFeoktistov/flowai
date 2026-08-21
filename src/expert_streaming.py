@@ -121,7 +121,7 @@ Ollama-путь считает per-запросно:
     процесса управляет этот модуль (start/stop/ensure_running), а не демон
     Ollama.
 
-Покрывает ОБА пути через agent_builder._build_chat_model — легаси-агент
+Покрывает ОБА пути через agent_builder._build_chat_model — основной агент
 (_build_agent, pipeline_mode=ВЫКЛ) И роли нового пайплайна (_build_role_agent,
 вызывается из mcp_agent/pipeline.py при pipeline_mode=ВКЛ) — обе функции
 строят модель с одним и тем же тегом settings.chat_model через один и тот

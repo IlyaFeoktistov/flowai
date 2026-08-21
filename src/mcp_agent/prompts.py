@@ -649,7 +649,7 @@ _SYSTEM_PROMPT_TOKENS_ESTIMATE = len(_SYSTEM_PROMPT_TEMPLATE) // 4
 
 # ---------------------------------------------------------------------------
 # Промпт для settings.optimized_tools (mcp_agent/optimized_tools.py) —
-# урезанный (БЕЗ переименования) набор тулов у легаси-агента: один тул на
+# урезанный (БЕЗ переименования) набор тулов у основного агента: один тул на
 # смысл (bash/read/grep/glob/write/edit), без генеративных/git-тулов, если
 # они выключены отдельными тумблерами. Отдельный от _SYSTEM_PROMPT_TEMPLATE
 # шаблон (не условная вставка внутрь него) — тот описывает инструменты,
@@ -741,7 +741,7 @@ def _build_optimized_system_prompt(repo_path: str) -> str:
     _SYSTEM_PROMPT_TEMPLATE — см. его докстринг. Мутирует тот же глобальный
     _SYSTEM_PROMPT_TOKENS_ESTIMATE, что и _build_system_prompt/
     _build_voice_system_prompt: это альтернативный промпт для ТОГО ЖЕ
-    единственного легаси-агента (см. agent_builder.py:_build_agent — ровно
+    единственного основного агента (см. agent_builder.py:_build_agent — ровно
     одна из трёх веток реально используется на конкретный вызов), не
     параллельно живущий per-role промпт вроде тех, что ниже (см. их
     докстринг про то, почему ТЕ не трогают этот global)."""

@@ -16,7 +16,7 @@ Verifier'а реальный fail — ВАЛИДНЫЙ исход её собс�
 mcp_agent/stages/verifier.py) — pipeline.py решает по kind="execution_failure",
 возвращать ли правки Coder'у на новый круг; если круги кончились — откат
 через mcp_agent/snapshots.py:_revert_turn_paths, тот же механизм, что уже
-был в legacy mcp_agent/agent.py.
+был в main mcp_agent/agent.py.
 
 Ветвление здесь идёт НЕ по одному kind-enum'у, а по 4 независимым булевым
 флагам от mcp_agent/router.py:classify_intent (needs_project/needs_shell/
@@ -322,7 +322,7 @@ def _investigator_scope_note(is_final_answer: bool, is_followup: bool = False) -
 async def stream_chat(messages: list[dict], on_event=None):
     turn_start = time.monotonic()
     # Якорь ДО первой возможной правки этого хода — тот же принцип, что
-    # turn_start_wall в legacy mcp_agent/agent.py:stream_chat: auto-revert
+    # turn_start_wall в main mcp_agent/agent.py:stream_chat: auto-revert
     # (_revert_turn_paths) должен откатывать только правки ИЗ ЭТОГО хода.
     turn_start_wall = datetime.now().isoformat(timespec="seconds")
     if not messages:

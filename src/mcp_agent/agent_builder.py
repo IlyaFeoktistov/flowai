@@ -287,7 +287,7 @@ _tools_cache = BuildCache()
 # voice_mode не меняется вообще — без voice_mode в ключе кеш решил бы, что
 # пересобирать нечего, и агент остался бы с пустым тулсетом/голосовым
 # промптом (или наоборот) до следующей смены МОДЕЛИ, а не режима. Single
-# slot (key=None) — there's only ever one legacy monolith agent per process.
+# slot (key=None) — there's only ever one main monolith agent per process.
 _agent_cache = BuildCache()
 
 
@@ -850,7 +850,7 @@ def _compute_num_keep(system_prompt_tokens_estimate: int) -> int:
     num_keep only helps if there's still enough ROOM left after it for the
     part of the history llama.cpp actually discards on a context shift;
     keeping more than half would defeat that. Same formula for both the
-    legacy monolith (_build_agent) and every pipeline role (_build_role_agent)
+    main monolith (_build_agent) and every pipeline role (_build_role_agent)
     — they differ only in WHICH prompt's token estimate they pass in."""
     return min(settings.get("num_ctx") // 2, system_prompt_tokens_estimate + 1500)
 
@@ -859,7 +859,7 @@ def _base_agent_middleware(
     resolved_repo_path: str, hitl_middleware: HumanInTheLoopMiddleware,
     pre_hitl: list | None = None,
 ) -> list:
-    """The 7-middleware base both the legacy monolith agent (_build_agent)
+    """The 7-middleware base both the main monolith agent (_build_agent)
     and every pipeline role agent (_build_role_agent) start from, before
     their own mode/role-specific extras (delegate-nudge/voice for the
     former; ask-user-finalize for the latter — see each function's own
@@ -925,7 +925,7 @@ async def _build_agent(repo_path: str | None = None):
 
     # optimized_tools (mcp_agent/optimized_tools.py, settings.py) — урезанный
     # (БЕЗ переименования — см. модульный docstring про то, почему) список
-    # тулов для этого, легаси-агента: один тул на смысл (bash/read/grep/
+    # тулов для этого, основного агента: один тул на смысл (bash/read/grep/
     # glob/write/edit) вместо 5-6 читающих и 5 пишущих вариантов сразу.
     # full_tools сохраняется отдельно — delegate (ниже, build_delegate_tool)
     # строится из НЕГО, не из урезанного списка: его собственное read-only
@@ -1102,7 +1102,7 @@ _role_agent_cache = BuildCache()
 
 def invalidate_tool_caches() -> None:
     """Drops every cache keyed off the loaded MCP tool list: _tools_cache
-    (schemas/connections, see _get_tools), _agent_cache (legacy monolith
+    (schemas/connections, see _get_tools), _agent_cache (main monolith
     agent — holds a direct reference to the OLD tools list baked in at
     build time via _build_agent's agent_tools = tools + [...]), and
     _role_agent_cache (pipeline roles, same problem one level up). None of
@@ -1137,7 +1137,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     агента, а параметр КОНКРЕТНОГО astream/ainvoke вызова.
 
     Никакой voice_mode-развилки здесь нет: роли пайплайна не участвуют в
-    голосовом режиме — тот идёт по легаси _get_agent (пустой tools=[],
+    голосовом режиме — тот идёт по основному _get_agent (пустой tools=[],
     отдельный _build_voice_system_prompt)."""
     tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, _raw_read_file_tool = await _get_tools(repo_path)
 
@@ -1171,10 +1171,10 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
 
     # delegate (delegate_tool.py) сознательно НЕ даётся ни одной роли
     # пайплайна, даже инвестигатору — у него ТОТ ЖЕ read-only
-    # набор тулов (roles.py:LEGACY_INVESTIGATION_TOOL_NAMES), то есть это
+    # набор тулов (roles.py:MAIN_INVESTIGATION_TOOL_NAMES), то есть это
     # вложенный саб-агент внутри уже отдельно бюджетируемой
     # исследовательской роли — лишняя матрёшка, а не разделение труда.
-    # delegate был оправдан для ЛЕГАСИ монолитного агента (mcp_agent/
+    # delegate был оправдан для ОСНОВНОГО монолитного агента (mcp_agent/
     # agent.py:_build_agent, тот случай ниже остаётся с ним), где всё
     # расследование делило ОДИН общий бюджет шагов на весь ход — здесь
     # инвестигатор получает свой собственный, достаточно большой бюджет
@@ -1249,7 +1249,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
 
 async def _get_role_agent(role: str, tool_names: frozenset[str], repo_path: str | None = None):
     """Кеш ПО (РОЛЬ, НАБОР ТУЛОВ) — в отличие от единственного _agent_cache
-    легаси-пути, здесь словарь, значение-ключ для сравнения свежести —
+    пути основного агента, здесь словарь, значение-ключ для сравнения свежести —
     (chat_model, resolved_repo_path) (у ролей пайплайна нет своего
     voice_mode-переключения, см. _build_role_agent). tool_names — ЧАСТЬ
     КЛЮЧА словаря САМОГО (не просто значения для сравнения свежести), а не

@@ -1,5 +1,5 @@
 """
-Verdict/guidance для легаси монолитного агента (mcp_agent/agent.py) —
+Verdict/guidance для основного монолитного агента (mcp_agent/agent.py) —
 извлечено из его stream_chat почти построчно (та же дисциплина, что
 описана в agent.py's own module docstring: копия по точным диапазонам, не
 пересочинено по памяти), чтобы agent.py:stream_chat стал таким же тонким
@@ -10,14 +10,14 @@ user — всё это уже общее в run_stage, см. его докстр
 
 В отличие от остальных ролей пайплайна (mcp_agent/stages/analyzer.py и
 все остальные — чисто детерминированные, никто не завязан на
-self_heal.py:_semantic_check, см. docstring analyzer.py) легаси-агент
+self_heal.py:_semantic_check, см. docstring analyzer.py) основной агент
 делает всё разом (исследование+запись+проверка в ОДНОМ раунде без
 разделения на роли), так что, в отличие от них, у него есть финальный
 LLM-судья fallback, когда ни один детерминированный чек не сработал —
 ровно то же дерево, что раньше жило прямо в agent.py:stream_chat.
 
 verdict_fn получает judge_model/task_text/on_event через замыкание
-(make_legacy_verdict) — единственная роль, которой они вообще нужны;
+(make_main_verdict) — единственная роль, которой они вообще нужны;
 менять общий verdict_fn(round_msgs, new_tool_msgs, round_final_text)
 контракт (mcp_agent/stage_runner.py:run_stage) ради этого одного случая не
 стоило."""
@@ -42,7 +42,7 @@ from mcp_agent.self_heal import (
 )
 
 
-def make_legacy_verdict(judge_model, task_text: str, on_event):
+def make_main_verdict(judge_model, task_text: str, on_event):
     """Возвращает verdict_fn для этого ОДНОГО хода — judge_model/task_text/
     on_event зафиксированы через замыкание, run_stage продолжает звать
     результат с обычной (round_msgs, new_tool_msgs, round_final_text)
@@ -62,7 +62,7 @@ def make_legacy_verdict(judge_model, task_text: str, on_event):
             if on_event:
                 await on_event({"type": "verifying_end"})
 
-    async def legacy_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: str) -> dict:
+    async def main_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: str) -> dict:
         if not new_tool_msgs:
             # Дешёвый ФИЛЬТР, не вердикт: без "?" в тексте раунд без единого
             # тула считается штатным прямым ответом — судью гонять незачем
@@ -197,19 +197,19 @@ def make_legacy_verdict(judge_model, task_text: str, on_event):
             }
         verdict = await _judge(new_tool_msgs, _called_ask_user(new_tool_msgs), round_final_text)
         # "kind" маркер, не входящий в _semantic_check's собственный вывод —
-        # legacy_guidance ниже читает его, чтобы отличить "вердикт пришёл от
+        # main_guidance ниже читает его, чтобы отличить "вердикт пришёл от
         # LLM-судьи" (semantic_verdict_used в оригинале) от детерминированных
         # веток выше, не пересчитывая заново, какая именно ветка сработала.
         verdict["kind"] = "semantic"
         return verdict
 
-    return legacy_verdict
+    return main_verdict
 
 
-def legacy_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_final_text: str) -> str:
+def main_guidance(verdict: dict, round_msgs: list, new_tool_msgs: list, round_final_text: str) -> str:
     if not new_tool_msgs:
         # Достижимо только когда verdict пришёл от _judge на без-тульном
-        # "?"-ответе (см. legacy_verdict) — run_stage's собственный
+        # "?"-ответе (см. main_verdict) — run_stage's собственный
         # _seed_retry уже добавляет "The previous tool results don't answer
         # the task (reason: ...)." ПЕРЕД этим текстом (то же самое
         # оригинальное вступление, см. mcp_agent/stage_runner.py), так что

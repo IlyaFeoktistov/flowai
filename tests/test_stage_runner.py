@@ -3,7 +3,7 @@ while collapsing mcp_agent/agent.py onto this engine: a missing
 MAX_SELF_HEAL_ASKS cap on the punt-to-user rescue (a model that keeps
 punting would otherwise loop forever, since max_attempts grows in lockstep
 with attempt), and gen_duration_ms/attempts_used not being threaded into
-StageResult at all (silently dropped, needed by the legacy caller's stats
+StageResult at all (silently dropped, needed by the main caller's stats
 event and error messages)."""
 import pytest
 

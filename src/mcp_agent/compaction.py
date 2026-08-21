@@ -178,7 +178,7 @@ PERIODIC_CHUNK_TOOL_CALLS = 8
 # path+params, telling it to "reuse that earlier result" — which no longer
 # exists anywhere in what the model can see (see the read_file note in the
 # module docstring).
-# submit_plan (ask_user_tool.py, legacy agent's own numbered-plan
+# submit_plan (ask_user_tool.py, main agent's own numbered-plan
 # registration) is sticky for a different reason than the names above: not
 # because its RESULT is worth re-reading, but because its ARGUMENTS are
 # the plan itself, the target task for the rest of this turn — losing the
@@ -510,7 +510,7 @@ def _last_plan_message_index(messages: list) -> int | None:
     ask_user_tool.py) — that message and everything after it must survive
     compaction unchanged, the same guarantee the pipeline gets for free by
     seeding the Planner's plan into the untouchable task frame
-    (_task_frame_len) instead of ordinary history. The legacy agent has no
+    (_task_frame_len) instead of ordinary history. The main agent has no
     such frame — the plan is just another AIMessage in the middle of the
     conversation — so awrap_model_call's write-triggered path (which
     doesn't consult STICKY_TOOL_NAMES at all, unlike the periodic path)

@@ -109,11 +109,11 @@ def _project_read_tools(has_shell: bool) -> set[str]:
 
 def _apply_optimized_filter(names: set[str]) -> set[str]:
     """settings.optimized_tools (see optimized_tools.py's own docstring)
-    used to be scoped to ONLY the legacy monolithic agent — "работает
+    used to be scoped to ONLY the main monolithic agent — "работает
     только когда 'новый пайплайн' ВЫКЛ" (see ui/tui/settings.py's toggle
     hint, updated alongside this). Direct instruction (2026-08-14): same
     toggle should narrow every new-pipeline role's tool set too, not just
-    legacy's. The file_ops_server.py consolidation (read_file/write_file/
+    the main agent's. The file_ops_server.py consolidation (read_file/write_file/
     edit_file/grep_search/glob_search replacing a dozen near-duplicate
     filesystem/code-search tools) already closes most of the original
     complaint on its own — this filter still matters for the remaining
@@ -234,7 +234,7 @@ def approval_tools(names: set[str]) -> list[str]:
     return [name for name in TOOLS_REQUIRING_APPROVAL if name in names]
 
 
-# Фиксированный набор без shell — путь легаси монолитного агента
+# Фиксированный набор без shell — путь основного монолитного агента
 # (delegate_tool.py: сабагент delegate, вызывается из mcp_agent/agent.py, а
 # не из pipeline.py) не участвует в флагах router.py вообще, поэтому не
 # может композировать набор per-call — используем тот же (project read +
@@ -245,7 +245,7 @@ def approval_tools(names: set[str]) -> list[str]:
 # shell") — этот набор держит то утверждение верным, никакого
 # поведенческого изменения тут нет, в отличие от investigator_tools выше.
 # _THIN_WRAPPER_TOOLS НЕ вычитаются — без bash замены им тут нет.
-LEGACY_INVESTIGATION_TOOL_NAMES = set(_WEB_TOOLS) | _META_TOOLS | _PROJECT_READ_TOOLS
+MAIN_INVESTIGATION_TOOL_NAMES = set(_WEB_TOOLS) | _META_TOOLS | _PROJECT_READ_TOOLS
 
 ROLE_RECURSION_LIMIT: dict[str, int] = {
     "analyzer": ANALYZER_RECURSION_LIMIT,

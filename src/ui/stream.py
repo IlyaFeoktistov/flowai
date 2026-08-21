@@ -353,7 +353,7 @@ class StreamDisplay:
         self._t_wall: float = 0.0
         self._footer_task: asyncio.Task | None = None
         self._phase_label: str = ""
-        self._current_stage: str = ""  # см. _STAGE_LABELS, "" вне нового пайплайна (легаси-агент/casual ещё не начался)
+        self._current_stage: str = ""  # см. _STAGE_LABELS, "" вне нового пайплайна (основной агент/casual ещё не начался)
         self._content_lines: int = 0
         # Статус-точка тула (см. on_event "tool_start"/"tool_end"): 3-й
         # элемент — зарезервированный при tool_start _ToolFold (ui/app.py:
@@ -400,7 +400,7 @@ class StreamDisplay:
         self._speech_notified = False
         self._cancel_pending_tool_blinks()
         self._phase_label = f"{random.choice(_THINKING_PHRASES)}..."
-        self._current_stage = ""  # сбрасывается на каждый ход — новый ход сам решит, стадийный он или легаси
+        self._current_stage = ""  # сбрасывается на каждый ход — новый ход сам решит, стадийный он или основной агент
         self._footer_task = asyncio.create_task(self._footer_loop())
 
     _TOOL_DOT_BLINK_S = 1.0
@@ -636,7 +636,7 @@ class StreamDisplay:
             else:
                 console.print(f"[green]  ✅ Шаг {index + 1} выполнен[/]")
 
-        # ── PLAN SUBMITTED (mcp_agent/ask_user_tool.py:submit_plan, legacy
+        # ── PLAN SUBMITTED (mcp_agent/ask_user_tool.py:submit_plan, main
         # agent only — the pipeline gets its checklist from pipeline.py's
         # own "plan_steps" event above instead, seeded from the Planner's
         # approved plan) — same rendering as "plan_steps", just triggered

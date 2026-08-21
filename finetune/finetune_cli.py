@@ -307,7 +307,7 @@ def cmd_train(args):
             example_tools = [tools_by_name[n] for n in ex["tool_scope"] if n in tools_by_name]
             n_exact_scope += 1
         else:
-            # Легаси-сессия без разметки роли — единственное, что осталось,
+            # Сессия основного агента без разметки роли — единственное, что осталось,
             # это приближение случайной подвыборкой (см. _tools_subset).
             example_tools = _tools_subset(tools, ex["target_tool_call"]["name"], args.max_tools_per_example, tools_rng)
         result = _render_and_mask(
@@ -324,7 +324,7 @@ def cmd_train(args):
           f"(усилено {boosted} исходных примеров x{args.boost_weight}, "
           f"пропущено {skipped} — не влезли даже после обрезки и окна, или пуст шаблон)")
     print(f"Из них с точным tool_scope по роли: {n_exact_scope}, "
-          f"со случайной подвыборкой (легаси/неизвестная роль): {len(examples) - n_exact_scope}")
+          f"со случайной подвыборкой (основной агент/неизвестная роль): {len(examples) - n_exact_scope}")
 
     # CPU-offload (--gpu-mem/--cpu-mem) — для моделей, чьи 4-битные веса
     # целиком не влезают в VRAM (30B+ на карте вроде 6GB). max_memory
@@ -577,7 +577,7 @@ def main():
     p_train.add_argument("--boost-weight", type=int, default=3)
     p_train.add_argument("--max-tools-per-example", type=int, default=8,
                           help="сколько тулов давать модели на пример без точного tool_scope по роли "
-                          "(целевой + случайные отвлекающие) — влияет только на легаси/неизвестные роли")
+                          "(целевой + случайные отвлекающие) — влияет только на основного агента/неизвестные роли")
     p_train.add_argument("--gpu-mem", default=None,
                           help="потолок VRAM под ВЕСА модели (напр. '3GiB') — включает CPU-offload "
                           "(device_map='auto' сам раскидает то, что не влезло, на --cpu-mem). "

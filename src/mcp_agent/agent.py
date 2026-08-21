@@ -9,7 +9,7 @@ agent/orchestrator.py:stream_chat() — async-generator, on_event получае
 cutover cli.py достаточно было поменять один импорт.
 
 Этот файл держит только _stream_round (низкоуровневый astream-стример,
-общий и для этого легаси-пути, и для mcp_agent/pipeline.py — см.
+общий и для этого основного пути, и для mcp_agent/pipeline.py — см.
 mcp_agent/stage_runner.py's локальный импорт), _summarize_round/
 _round_call_info/_investigation_signals (дайджест-хелперы, тоже
 переиспользуемые stage_runner.py/pipeline.py) и сам stream_chat. Self-heal
@@ -18,7 +18,7 @@ retry-цикл (recursion-limit/context-overflow/ResponseError-восстано�
 здесь БОЛЬШЕ НЕ дублируется — stream_chat тонкий вызыватель
 mcp_agent/stage_runner.py:run_stage, тот же общий движок, что и у
 mcp_agent/pipeline.py, с собственным verdict_fn/guidance_fn
-(mcp_agent/stages/legacy.py — единственная роль с финальным LLM-судьёй
+(mcp_agent/stages/main_agent.py — единственная роль с финальным LLM-судьёй
 fallback, т.к. этот путь делает исследование+запись+проверку в ОДНОМ
 раунде, без разделения на роли, см. её докстринг). До этого — до
 2026-08-18 — здесь жила ВТОРАЯ, отдельно поддерживаемая копия того же
@@ -42,7 +42,7 @@ self-heal движка (~900 строк, разошедшаяся с извле�
                           overflow/ResponseError/leaked-tool-call/punt-to-
                           user/дайджест-ретраи), используемый и здесь, и
                           mcp_agent/pipeline.py, и mcp_agent/router.py
-  - stages/legacy.py    — verdict_fn/guidance_fn ЭТОЙ роли (единственной,
+  - stages/main_agent.py — verdict_fn/guidance_fn ЭТОЙ роли (единственной,
                           кому вообще нужен LLM-судья fallback)
 
 Permission-диалог переиспользует САМ tools/confirm.py:ask_permission() —
@@ -88,7 +88,7 @@ from mcp_agent.model_config import DEBUG, MAX_ATTEMPTS, RECURSION_LIMIT, TOOL_OU
 from mcp_agent.self_heal import _LEAK_MARKER_START_RE, _LEAK_TAIL_MARGIN, _written_paths  # noqa: E402
 from mcp_agent.snapshots import _revert_turn_paths, clear_session_file_snapshots  # noqa: E402,F401 (re-exported for cli.py/run_cli.py)
 from mcp_agent.stage_runner import run_stage  # noqa: E402
-from mcp_agent.stages.legacy import legacy_guidance, make_legacy_verdict  # noqa: E402
+from mcp_agent.stages.main_agent import main_guidance, make_main_verdict  # noqa: E402
 
 
 async def _stream_round(
@@ -524,7 +524,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
 
     # Оборачиваем ОДИН раз здесь, а не в каждом месте, где ниже вызывается
     # on_event(...) — обёртка глушит answer_*/thinking_* внешнего потока,
-    # пока delegate (единственный тул легаси-агента, что зовёт sub_agent на
+    # пока delegate (единственный тул основного агента, что зовёт sub_agent на
     # том же `model`) не закрылся своим tool_end (см. docstring в
     # delegate_tool.py про утечку чужого токен-стрима, которую это
     # предотвращает). Кладём в ContextVar, а не передаём отдельным
@@ -613,16 +613,16 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
 
     # settings.get("self_heal_enabled")=False -> ровно одна попытка: первый
     # ответ модели становится финальным без единого автоматического
-    # ретрая, даже если legacy_verdict (mcp_agent/stages/legacy.py) сочтёт
+    # ретрая, даже если main_verdict (mcp_agent/stages/main_agent.py) сочтёт
     # его "не relevant" (ask_user-спасение в run_stage не завязано на
     # max_attempts и остаётся живым независимо от этого тумблера).
     max_attempts_effective = MAX_ATTEMPTS if settings.get("self_heal_enabled") else 1
 
     # Тот же self-heal движок, что и у mcp_agent/pipeline.py (recursion-
     # limit/context-overflow/ResponseError-восстановление, разбор утёкшей
-    # tool-call разметки, punt-to-user rescue, дайджест-ретраи) — легаси-
+    # tool-call разметки, punt-to-user rescue, дайджест-ретраи) — основной
     # агент отличается только своим verdict_fn/guidance_fn (mcp_agent/
-    # stages/legacy.py: единственная роль с финальным LLM-судьёй fallback,
+    # stages/main_agent.py: единственная роль с финальным LLM-судьёй fallback,
     # т.к. делает исследование+запись+проверку в ОДНОМ раунде без
     # разделения на роли, см. её докстринг) и mid_turn_queue (единственный
     # вызыватель run_stage, которому он вообще нужен — cli.py's live user
@@ -630,10 +630,10 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     stage_result = await run_stage(
         agent, payload, on_event,
         judge_model=judge_model, tools_by_name=tools_by_name, read_history=read_history,
-        verdict_fn=make_legacy_verdict(judge_model, task_text, on_event),
-        guidance_fn=legacy_guidance,
+        verdict_fn=make_main_verdict(judge_model, task_text, on_event),
+        guidance_fn=main_guidance,
         max_attempts=max_attempts_effective, recursion_limit=RECURSION_LIMIT,
-        stage_name="legacy", mid_turn_queue=mid_turn_queue,
+        stage_name="main", mid_turn_queue=mid_turn_queue,
     )
 
     tokens_in, tokens_out, llm_calls = stage_result.tokens_in, stage_result.tokens_out, stage_result.llm_calls

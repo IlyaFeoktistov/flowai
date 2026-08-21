@@ -21,7 +21,7 @@ All source lives under `src/` (flat layout physically under `src/`, not
 install time, so imports everywhere else still read as top-level `import
 cli`/`import mcp_agent`/...).
 
-- `mcp_agent/agent.py` — legacy agentic loop (voice_mode/`pipeline_mode=off`); `mcp_agent/pipeline.py` — the default Analyzer→Planner→Coder→Verifier pipeline
+- `mcp_agent/agent.py` — main agentic loop (voice_mode/`pipeline_mode=off`); `mcp_agent/pipeline.py` — the default (`pipeline_mode=on`) Analyzer→Planner→Coder→Verifier pipeline
 - `mcp_agent/plugins.py` — plugin loader: global plugins (slash commands, MCP servers, hooks) under `<repo root>/plugins/`, plus manifest-free per-project skills/hooks under `<open project>/.flowai/{skills,hooks}/`; `mcp_agent/plugin_hooks.py` — the post_file_edit/pre_commit hook middleware; `examples/plugins/hello-world/` and `examples/project-skills-hooks/` — reference examples; see `docs/plugins.md` for the full mechanism
 - `tools/` — tool handlers: bash_exec, file_ops, web_search, read_page, image_gen, memory
 - `ui/` — terminal UI: stream display, prompt_toolkit input, Rich console

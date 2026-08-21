@@ -347,7 +347,7 @@ flowai                      # или ./flowai / python3 src/cli.py, см. «За
 |---|---|
 | [`docs/commands.md`](docs/commands.md) | Полный список слэш-команд и горячих клавиш |
 | [`docs/plugins.md`](docs/plugins.md) | Глобальные плагины и project-скилы/хуки — форматы, как написать свой, рабочие примеры |
-| [`docs/architecture.md`](docs/architecture.md) | Пайплайн Router→Analyzer→Planner→Coder→Verifier vs легаси-агент |
+| [`docs/architecture.md`](docs/architecture.md) | Пайплайн Router→Analyzer→Planner→Coder→Verifier vs основной агент |
 | [`docs/tools-and-mcp-servers.md`](docs/tools-and-mcp-servers.md) | Как устроены MCP-тулы модели |
 | [`docs/models.md`](docs/models.md) | Выбор модели, `expert_streaming`, `/settings` |
 | [`docs/persistence.md`](docs/persistence.md) | Что и где хранится на диске, `/clean` |
@@ -520,7 +520,7 @@ You: сгенерируй 3D-модель дракона с ригом и зас
 cli.py / main.py (HTTP)
         │
         ▼
-pipeline_mode=ВКЛ (дефолт)             pipeline_mode=ВЫКЛ (легаси)
+pipeline_mode=ВКЛ (дефолт)             pipeline_mode=ВЫКЛ (основной агент)
         │                                       │
         ▼                                       ▼
 mcp_agent/pipeline.py — Router →       mcp_agent/agent.py — stream_chat():
@@ -633,7 +633,7 @@ flowAI/
 │   ├── doctor.py           — /doctor: единый health-check (жив ли Ollama, что реально загружено)
 │   ├── update.py           — /update: автообновление поверх git, а не пакетного менеджера
 │   ├── mcp_agent/
-│   │   ├── agent.py            — легаси: монолитный self-heal цикл, стриминг (_stream_round)
+│   │   ├── agent.py            — основной агент: монолитный self-heal цикл, стриминг (_stream_round)
 │   │   ├── agent_builder.py    — сборка LangGraph-агента/роли, кеш тулов/модели, миддлвари
 │   │   ├── pipeline.py         — дефолтный путь (`pipeline_mode`, см. settings.py):
 │   │   │                         Router → Analyzer → Planner → Coder → Verifier
@@ -655,7 +655,7 @@ flowAI/
 │   │   ├── snapshots.py        — снимки файлов, auto-revert при провале проверки
 │   │   ├── tool_wrappers.py    — обёртки над MCP-тулами (обрезка вывода, дедуп чтений)
 │   │   ├── ollama_kv_cache.py  — автопереключение OLLAMA_KV_CACHE_TYPE под модель
-│   │   ├── optimized_tools.py  — урезанный набор тулов для легаси-агента (без pipeline_mode)
+│   │   ├── optimized_tools.py  — урезанный набор тулов для основного агента (без pipeline_mode)
 │   │   ├── ask_user_tool.py    — тул ask_user, HITL-мидлвари
 │   │   ├── debug_log.py        — сквозной JSONL-лог одного прогона (диагностика)
 │   │   ├── plugins.py          — загрузчик плагинов (slash-команды, MCP-сервера, хуки) +
