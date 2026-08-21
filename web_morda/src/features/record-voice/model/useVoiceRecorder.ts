@@ -91,6 +91,16 @@ export function useVoiceRecorder(onRecorded: (recording: VoiceRecording) => void
         audioCtxRef.current = null
         analyserRef.current = null
 
+        // Клик "стоп" почти сразу после клика "старт" (или отпущенный/
+        // забракованный микрофон посреди записи) — ondataavailable мог не
+        // успеть выстрелить вообще ни разу, тогда chunksRef.current пуст, а
+        // Blob([], {...}) — 0 байт, гарантированно неиграбельный (та самая
+        // "no supported source"). Не отдаём такую запись наверх молча.
+        if (chunksRef.current.length === 0) {
+          setState('idle')
+          return
+        }
+
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' })
         const durationMs = Date.now() - startedAtRef.current
         onRecorded({ blob, waveform: downsampleToBars(samplesRef.current, BAR_COUNT), durationMs })

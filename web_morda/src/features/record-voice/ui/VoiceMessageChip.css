@@ -66,12 +66,24 @@
   gap: 2px;
   height: 24px;
   min-width: 80px;
+  cursor: pointer;
+  touch-action: none;
 }
 .voice-chip-wave span {
   flex: 1;
   background: var(--accent-1);
   border-radius: 2px;
   min-height: 3px;
+}
+/* До первого проигрывания — вся волна цвета морской волны (акцент), как
+   и раньше. С первого нажатия play — уже пройденная часть остаётся
+   акцентной, непройденная сереет, "заливка" сдвигается по ходу
+   воспроизведения (ontimeupdate в VoiceMessageChip.tsx). */
+.voice-chip-wave-unplayed {
+  background: var(--text-faint);
+}
+.voice-chip-wave-played {
+  background: var(--accent-1);
 }
 
 .voice-chip-duration {
