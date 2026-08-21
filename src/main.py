@@ -21,6 +21,7 @@ polls with a blocking time.sleep — the default 20s ping timeout drops
 the socket mid-turn otherwise.
 """
 import asyncio
+import base64
 import json
 import os
 import tempfile
@@ -31,14 +32,16 @@ load_dotenv()
 
 from fastapi import APIRouter, FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from rich.text import Text
+from starlette.background import BackgroundTask
 
 import settings as app_settings  # noqa: E402
 import usage as usage_mod  # noqa: E402
 import memory_admin  # noqa: E402
 from ui import audio as ui_audio  # noqa: E402
+from ui import images as ui_images  # noqa: E402
 import clean as clean_mod  # noqa: E402
 from doctor import run_doctor  # noqa: E402
 from update import run_update  # noqa: E402
@@ -221,6 +224,21 @@ async def models_endpoint():
         return JSONResponse({"error": str(e)}, status_code=502)
 
 
+@router.post("/upload_image")
+async def upload_image_endpoint(image: UploadFile = File(...)):
+    """Attach-file chip for an image — reuses ui/images.py's store_image()
+    (the same store CLI's /img and clipboard-paste use), returning a
+    '[Image-N]' placeholder. The composer inlines that bare placeholder into
+    the outgoing message text; process_turns resolves it to the real
+    on-disk path (resolve_image_paths) right before the model sees it, the
+    same point cli.py does it — never for a mid-turn injection either,
+    matching cli.py's own _enqueue (see ws_chat's comment)."""
+    data = await image.read()
+    b64 = base64.b64encode(data).decode()
+    placeholder = ui_images.store_image(b64)
+    return {"placeholder": placeholder}
+
+
 @router.post("/transcribe")
 async def transcribe_endpoint(audio: UploadFile = File(...)):
     """Speech-to-text for the mic button — reuses ui/audio.py's transcribe()
@@ -245,6 +263,30 @@ async def transcribe_endpoint(audio: UploadFile = File(...)):
     finally:
         os.unlink(tmp_path)
     return {"text": text}
+
+
+class SpeakBody(BaseModel):
+    text: str
+
+
+@router.post("/speak")
+async def speak_endpoint(body: SpeakBody):
+    """Text-to-speech for the voice-mode orb — reuses ui/audio.py's
+    synthesize_speech() (Chatterbox, via the separate venv-tts subprocess,
+    see its own docstring on why a separate interpreter), the same TTS the
+    CLI's voice_mode uses for `/talk`/spoken replies. Unlike ui/audio.py's
+    own speak(), which synthesizes AND plays through Windows/MCI, this only
+    synthesizes — playback happens in the browser's own <audio>, so the
+    WSL-specific playback path never enters into it.
+
+    Blocking subprocess.run (RTF ~4-5x on this CPU) — asyncio.to_thread for
+    the same reason as /transcribe. The synthesized WAV is a temp file
+    (synthesize_speech's own tempfile.mkstemp) — BackgroundTask deletes it
+    once the response body has actually been sent, not before."""
+    path = await asyncio.to_thread(ui_audio.synthesize_speech, body.text)
+    if path is None:
+        return JSONResponse({"error": "synthesis failed"}, status_code=502)
+    return FileResponse(path, media_type="audio/wav", background=BackgroundTask(os.unlink, path))
 
 
 @router.get("/settings")
@@ -280,6 +322,14 @@ async def ws_chat(ws: WebSocket):
 
     bridge = WebBridge(ws.send_json)
     inbound: asyncio.Queue[str] = asyncio.Queue()
+    # И current_turn_task, И mid_turn_queue живут на уровне ws_chat (не
+    # внутри process_turns), потому что receive_loop должен их видеть —
+    # "stop" отменяет current_turn_task, "user_message" во время активного
+    # хода уходит в mid_turn_queue вместо inbound, если ход это поддерживает
+    # (см. cli.py's собственный _mid_turn_queue — тот же приём, тут просто
+    # веб-эквивалент). None у обоих значит "ходов сейчас нет".
+    current_turn_task: asyncio.Task | None = None
+    mid_turn_queue: asyncio.Queue | None = None
 
     async def send_safe(payload: dict) -> None:
         try:
@@ -298,6 +348,7 @@ async def ws_chat(ws: WebSocket):
     # блокировался бы на await stream_fn(...) и не смог бы вычитывать
     # permission_response, которые могут прийти ПОКА этот же ход ещё идёт.
     async def receive_loop() -> None:
+        nonlocal current_turn_task, mid_turn_queue
         while True:
             raw = await ws.receive_text()
             data = json.loads(raw)
@@ -305,28 +356,85 @@ async def ws_chat(ws: WebSocket):
             if mtype in ("permission_response", "ask_user_response"):
                 bridge.resolve(data)
             elif mtype == "user_message":
-                await inbound.put((data.get("text") or "").strip())
+                text = (data.get("text") or "").strip()
+                if not text:
+                    continue
+                turn_running = current_turn_task is not None and not current_turn_task.done()
+                if turn_running and mid_turn_queue is not None:
+                    # Ход уже идёт и умеет мид-терн стир (основной агент,
+                    # см. process_turns) — сообщение уйдёт МОДЕЛИ между
+                    # шагами графа, не дожидаясь конца хода. Фронтенд узнает
+                    # об этом по факту (событие mid_turn_injected из
+                    # agent.py, когда _stream_round реально его заберёт),
+                    # не по немедленному подтверждению отсюда.
+                    await mid_turn_queue.put(text)
+                else:
+                    # Либо ходов сейчас нет (станет новым), либо идёт
+                    # пайплайн-ход (мид-терн стир не поддерживает, см.
+                    # agent.py/pipeline.py) — тогда ждёт своей очереди в
+                    # inbound, как раньше.
+                    await inbound.put(text)
+            elif mtype == "stop":
+                if current_turn_task is not None and not current_turn_task.done():
+                    current_turn_task.cancel()
 
     async def process_turns() -> None:
+        nonlocal current_turn_task, mid_turn_queue
         while True:
             text = await inbound.get()
             if not text:
                 continue
-            if _turn_lock.locked():
-                await send_safe({"type": "error", "message": "a turn is already in progress"})
-                continue
 
-            messages.append({"role": "user", "content": text})
-            episodic.append("user", text)
+            # Плейсхолдер [Image-N] -> реальный абсолютный путь ТОЛЬКО для
+            # того, что реально идёт модели/в историю — эхо в turn_started
+            # ниже нарочно шлёт ИСХОДНЫЙ текст с плейсхолдером, а не путь:
+            # (1) фронтенду он и не нужен, (2) entities/chat's
+            # displayTextByRawRef матчит по точно тому, что сам отправил.
+            # cli.py делает это же разрешение только для НОВОГО хода, не
+            # для мид-терн инъекции (см. receive_loop выше) — та же
+            # асимметрия тут сознательно повторена.
+            resolved_text = ui_images.resolve_image_paths(text)
+            messages.append({"role": "user", "content": resolved_text})
+            episodic.append("user", resolved_text)
+            await send_safe({"type": "turn_started", "text": text})
 
             use_main = app_settings.get("voice_mode") or not app_settings.get("pipeline_mode")
             stream_fn = main_stream_chat if use_main else pipeline_stream_chat
+            mid_turn_queue = asyncio.Queue() if use_main else None
+            stream_kwargs = {"on_event": send_safe}
+            if use_main:
+                stream_kwargs["mid_turn_queue"] = mid_turn_queue
 
-            async with _turn_lock:
-                connect_confirm_app(bridge)
-                final_text = ""
-                async for chunk in stream_fn(messages, on_event=send_safe):
-                    final_text = chunk
+            async def run_turn():
+                async with _turn_lock:
+                    connect_confirm_app(bridge)
+                    final = ""
+                    async for chunk in stream_fn(messages, **stream_kwargs):
+                        final = chunk
+                    return final
+
+            current_turn_task = asyncio.create_task(run_turn())
+            try:
+                final_text = await current_turn_task
+            except asyncio.CancelledError:
+                # Остановлено кнопкой "стоп" — то, что модель уже успела
+                # написать, уже дошло до фронтенда через answer_chunk;
+                # здесь только фиксируем итог в истории/episodic и явно
+                # сообщаем фронтенду, что это была отмена, а не обрыв связи.
+                final_text = "⚠️ Ход остановлен пользователем."
+                await send_safe({"type": "stopped"})
+            finally:
+                # Сообщение могло уйти в mid_turn_queue уже ПОСЛЕ того, как
+                # ход фактически закончился (обычный конец, ошибка, стоп) —
+                # _stream_round не успел дойти до следующей границы между
+                # шагами графа и забрать его. Сливаем недошедшее обратно в
+                # inbound, иначе оно потерялось бы молча (тот же приём, что
+                # cli.py's finally-дренаж _mid_turn_queue).
+                if mid_turn_queue is not None:
+                    while not mid_turn_queue.empty():
+                        await inbound.put(mid_turn_queue.get_nowait())
+                mid_turn_queue = None
+                current_turn_task = None
 
             messages.append({"role": "assistant", "content": final_text})
             episodic.append("assistant", final_text)
@@ -355,6 +463,15 @@ async def ws_chat(ws: WebSocket):
         # ВСЕ будущие ходы на этом процессе.
         receiver_task.cancel()
         processor_task.cancel()
+        # .cancel() только ПРОСИТ остановиться — сама отмена доставляется
+        # асинхронно, на следующей же передаче управления циклу событий.
+        # Без этого gather episodic.close() ниже мог выполниться РАНЬШЕ,
+        # чем process_turns успевал дойти до своего except
+        # asyncio.CancelledError (там же он и дописывает "остановлено
+        # пользователем" в episodic/messages для кнопки "стоп", см. её
+        # тело) — гонка "Cannot operate on a closed database", если
+        # process_turns как раз был на середине episodic.append.
+        await asyncio.gather(receiver_task, processor_task, return_exceptions=True)
         bridge.cancel_all()
         episodic.close()
 
