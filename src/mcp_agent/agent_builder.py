@@ -207,6 +207,18 @@ def _build_chat_model(
                 temperature=sampling.get("temperature", MODEL_TEMPERATURE),
                 top_p=sampling.get("top_p", TOP_P),
                 extra_body=extra_body,
+                # langchain_openai только автовключает stream_usage=True для
+                # ДЕФОЛТНОГО openai.com base_url — на кастомном (наш
+                # localhost:8090) оно молча остаётся off, и итоговый
+                # AIMessageChunk.usage_metadata пустой на каждом стриминговом
+                # вызове, из-за чего agent.py's tokens_in/tokens_out (и,
+                # соответственно, "stats"-событие/футер в вебе) всегда
+                # считались нулём для этой модели — не "модель не отдаёт
+                # токены", а просто клиент их не запрашивал. Форкнутый
+                # llama.cpp-сервер (vendor/llama-expert-streaming) честно
+                # умеет stream_options.include_usage (server-schema.cpp),
+                # достаточно было включить это на клиенте.
+                stream_usage=True,
                 # langchain_openai's own watchdog assumes a real
                 # OpenAI-class endpoint (first token in low single-digit
                 # seconds even for large prompts) and fires
