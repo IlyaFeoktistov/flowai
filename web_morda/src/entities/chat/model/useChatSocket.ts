@@ -77,7 +77,17 @@ export function useChatSocket() {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [status, setStatus] = useState<ConnectionStatus>('idle')
   const [isStreaming, setIsStreaming] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // Список, не одна строка — ошибки рисуются тостами (см. App.tsx's
+  // ToastStack), которые должны стекаться, а не перезаписывать друг друга;
+  // id нужен, чтобы ДВЕ ошибки с одинаковым текстом всё равно завели два
+  // отдельных тоста, а не молча схлопнулись в один re-render.
+  const [errors, setErrors] = useState<{ id: string; message: string }[]>([])
+  const pushError = useCallback((message: string) => {
+    setErrors((prev) => [...prev, { id: nextId(), message }])
+  }, [])
+  const dismissError = useCallback((id: string) => {
+    setErrors((prev) => prev.filter((e) => e.id !== id))
+  }, [])
   // Сколько сообщений уже улетело по сокету, но сервер ещё не подтвердил
   // ни turn_started (стало новым ходом), ни mid_turn_injected (подложено в
   // текущий) — чисто информационная штука для UI, не влияет на порядок/
@@ -110,7 +120,6 @@ export function useChatSocket() {
   const connect = useCallback((withSessionId: string | null) => {
     closeSocket()
     setStatus('connecting')
-    setError(null)
     const ws = new WebSocket(wsUrl(withSessionId))
     wsRef.current = ws
 
@@ -119,7 +128,7 @@ export function useChatSocket() {
       setStatus('closed')
       setIsStreaming(false)
     }
-    ws.onerror = () => setError('Соединение с агентом прервалось')
+    ws.onerror = () => pushError('Соединение с агентом прервалось')
 
     ws.onmessage = (ev) => {
       const event = JSON.parse(ev.data) as Record<string, unknown> & { type: string }
@@ -146,7 +155,7 @@ export function useChatSocket() {
         setPendingCount((n) => Math.max(0, n - 1))
         setEntries((prev) => [
           ...prev,
-          { kind: 'turn', id: turnId, userText: displayFor(text), items: [], complete: false },
+          { kind: 'turn', id: turnId, userText: displayFor(text), items: [], complete: false, startedAt: Date.now() },
         ])
         return
       }
@@ -159,6 +168,14 @@ export function useChatSocket() {
         const text = displayFor(event.text as string)
         setEntries((prev) => mapTurnItem(prev, turnId, (t) => pushItem(t, { kind: 'mid_turn', id: nextId(), text })))
         return
+      }
+
+      // pushError вынесен из свитча ниже нарочно — тот целиком крутится
+      // внутри setEntries(prev => ...), а StrictMode-дублирование этой
+      // updater-функции задвоило бы тост (тот же класс проблемы, что и с
+      // ws.send() в sendMessage, см. её комментарий).
+      if (event.type === 'error') {
+        pushError(event.message as string)
       }
 
       setEntries((prev) => {
@@ -281,7 +298,6 @@ export function useChatSocket() {
             )
 
           case 'error':
-            setError(event.message as string)
             return mapTurnItem(prev, turnId, (t) =>
               pushItem(t, { kind: 'error', id: nextId(), message: event.message as string }),
             )
@@ -289,17 +305,31 @@ export function useChatSocket() {
           case 'stopped':
             return mapTurnItem(prev, turnId, (t) => pushItem(t, { kind: 'stopped', id: nextId() }))
 
+          case 'stats':
+            return mapTurnItem(prev, turnId, (t) => ({
+              ...t,
+              stats: {
+                tokensIn: event.tokens_in as number,
+                tokensOut: event.tokens_out as number,
+                tokensInContent: event.tokens_in_content as number,
+                durationMs: event.duration_ms as number,
+                genDurationMs: event.gen_duration_ms as number,
+                delegateTokensIn: (event.delegate_tokens_in as number) ?? 0,
+                delegateTokensOut: (event.delegate_tokens_out as number) ?? 0,
+              },
+            }))
+
           case 'turn_complete':
             currentTurnIdRef.current = null
             setIsStreaming(false)
-            return mapTurnItem(prev, turnId, (t) => ({ ...t, complete: true }))
+            return mapTurnItem(prev, turnId, (t) => ({ ...t, complete: true, completedAt: Date.now() }))
 
           default:
             return prev
         }
       })
     }
-  }, [closeSocket])
+  }, [closeSocket, pushError])
 
   // Инпут никогда не блокируется, и сообщение никогда не ждёт на клиенте —
   // уходит по сокету немедленно. Сервер сам решает, что с ним делать: если
@@ -386,7 +416,8 @@ export function useChatSocket() {
       status,
       isStreaming,
       pendingCount,
-      error,
+      errors,
+      dismissError,
       sendMessage,
       stopCurrentTurn,
       respondPermission,
@@ -400,7 +431,8 @@ export function useChatSocket() {
       status,
       isStreaming,
       pendingCount,
-      error,
+      errors,
+      dismissError,
       sendMessage,
       stopCurrentTurn,
       respondPermission,

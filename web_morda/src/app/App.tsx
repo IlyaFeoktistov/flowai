@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import '@/shared/ui/kit.css'
 import 'katex/dist/katex.min.css'
@@ -6,6 +6,7 @@ import { getProject } from '@/entities/project'
 import { listSessions } from '@/entities/session'
 import type { SessionSummary } from '@/entities/session'
 import { useChatSocket } from '@/entities/chat'
+import { ToastStack } from '@/shared/ui'
 import { Sidebar } from '@/widgets/sidebar'
 import { Chat } from '@/widgets/chat-panel'
 import { InputBar } from '@/features/send-message'
@@ -32,6 +33,7 @@ const COMMANDS: { key: CommandKind; label: string }[] = [
 
 function App() {
   const [projectPath, setProjectPath] = useState('')
+  const [homePath, setHomePath] = useState('')
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [showFolderPicker, setShowFolderPicker] = useState(false)
   const [openCommand, setOpenCommand] = useState<CommandKind | null>(null)
@@ -42,10 +44,29 @@ function App() {
     listSessions().then(setSessions).catch(() => {})
   }, [])
 
+  // Открываем самую свежую сессию сразу при заходе в приложение — раньше
+  // WS-соединение вообще не поднималось, пока не отправишь первое
+  // сообщение, так что список сессий слева был виден, а сама последняя
+  // переписка — нет, пока её явно не открыть кликом. Только один раз за
+  // время жизни компонента (didAutoOpenRef) — иначе каждый повторный
+  // refreshSessions() (после каждого хода, см. ниже) выдёргивал бы
+  // пользователя обратно в последнюю сессию, даже если он сейчас смотрит
+  // другую.
+  const didAutoOpenRef = useRef(false)
   useEffect(() => {
-    getProject().then((r) => setProjectPath(r.path))
-    refreshSessions()
-  }, [refreshSessions])
+    getProject().then((r) => {
+      setProjectPath(r.path)
+      setHomePath(r.home)
+    })
+    listSessions().then((list) => {
+      setSessions(list)
+      if (!didAutoOpenRef.current && list.length > 0) {
+        didAutoOpenRef.current = true
+        chat.openSession(list[0].session_id)
+      }
+    }).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Новая запись в списке слева появляется только после первой реплики —
   // подтягиваем список при каждом завершении хода, а не только при старте.
@@ -71,8 +92,10 @@ function App() {
 
   return (
     <div className="app">
+      <ToastStack toasts={chat.errors} onDismiss={chat.dismissError} />
       <Sidebar
         projectPath={projectPath}
+        homePath={homePath}
         onPickFolder={() => setShowFolderPicker(true)}
         commands={COMMANDS}
         onOpenCommand={(key) => setOpenCommand(key as CommandKind)}
@@ -84,7 +107,6 @@ function App() {
 
       <main className="chat-panel">
         <Chat entries={chat.entries} onRespondPermission={chat.respondPermission} onRespondAskUser={chat.respondAskUser} />
-        {chat.error && <div className="banner-error">{chat.error}</div>}
         <InputBar
           streaming={chat.isStreaming}
           pendingCount={chat.pendingCount}

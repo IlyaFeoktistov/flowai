@@ -4,10 +4,3 @@
   height: 100vh;
 }
 
-.banner-error {
-  max-width: 760px;
-  margin: 0 auto;
-  color: var(--danger);
-  font-size: 13px;
-  padding: 0 24px 8px;
-}

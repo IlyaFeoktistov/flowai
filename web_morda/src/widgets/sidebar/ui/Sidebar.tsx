@@ -1,7 +1,13 @@
-import { useRef } from 'react'
 import type { SessionSummary } from '@/entities/session'
 import { IconFolder, IconPlus, IconChevronRight } from '@/shared/ui'
 import './Sidebar.css'
+
+function shortenPath(path: string, home: string): string {
+  if (home && (path === home || path.startsWith(home + '/'))) {
+    return '~' + path.slice(home.length)
+  }
+  return path
+}
 
 function timeLabel(iso: string): string {
   const d = new Date(iso)
@@ -15,6 +21,7 @@ function timeLabel(iso: string): string {
 
 export function Sidebar({
   projectPath,
+  homePath,
   onPickFolder,
   commands,
   onOpenCommand,
@@ -24,6 +31,7 @@ export function Sidebar({
   onOpenSession,
 }: {
   projectPath: string
+  homePath: string
   onPickFolder: () => void
   commands: { key: string; label: string }[]
   onOpenCommand: (key: string) => void
@@ -32,22 +40,26 @@ export function Sidebar({
   activeSessionId: string | null
   onOpenSession: (id: string) => void
 }) {
-  const activeRef = useRef<HTMLLIElement>(null)
-
+  // "Текущая" — не скролл к уже открытой сессии, а переход к самой свежей
+  // (sessions[0], список отсортирован по last_at DESC на бэкенде, см.
+  // web/sessions_store.py) — на случай если открыта старая сессия из
+  // списка или пустой новый чат, а хочется вернуться к тому, с чем
+  // реально сейчас работаешь.
+  const mostRecentId = sessions[0]?.session_id
   const goToCurrent = () => {
-    activeRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    if (mostRecentId) onOpenSession(mostRecentId)
   }
 
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <span className="brand-mark" aria-hidden="true" />
-        flowAI
+        <span className="brand-mark" aria-hidden="true">F</span>
+        FlowAI
       </div>
 
       <button className="folder-btn" onClick={onPickFolder} title={projectPath}>
         <IconFolder />
-        <span className="folder-btn-path">{projectPath}</span>
+        <span className="folder-btn-path">{shortenPath(projectPath, homePath)}</span>
       </button>
 
       <button className="new-chat-btn" onClick={onNewChat}>
@@ -68,7 +80,7 @@ export function Sidebar({
 
       <div className="session-list-header">
         <span className="session-list-label">Сессии</span>
-        {activeSessionId && (
+        {mostRecentId && mostRecentId !== activeSessionId && (
           <button className="goto-current-btn" onClick={goToCurrent} title="Перейти к текущей сессии">
             Текущая <IconChevronRight />
           </button>
@@ -76,7 +88,7 @@ export function Sidebar({
       </div>
       <ul className="session-list">
         {sessions.map((s) => (
-          <li key={s.session_id} ref={s.session_id === activeSessionId ? activeRef : undefined}>
+          <li key={s.session_id}>
             <button
               className={'session-item' + (s.session_id === activeSessionId ? ' active' : '')}
               onClick={() => onOpenSession(s.session_id)}
