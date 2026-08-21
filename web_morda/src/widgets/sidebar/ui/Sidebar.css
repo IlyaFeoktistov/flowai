@@ -1,0 +1,135 @@
+.sidebar {
+  background: var(--bg-elevated);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 14px 12px;
+  gap: 10px;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+  padding: 4px 6px 2px;
+}
+
+.folder-btn,
+.new-chat-btn,
+.command-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text-dim);
+  transition: background-color 0.12s, color 0.12s;
+}
+
+.folder-btn:hover,
+.new-chat-btn:hover,
+.command-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.folder-btn {
+  border-color: var(--border);
+  font-size: 13px;
+}
+
+.folder-btn-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.new-chat-btn {
+  border-color: var(--border);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sidebar-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
+}
+
+.command-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.command-nav-item {
+  font-size: 13.5px;
+}
+
+.session-list-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+  padding: 4px 8px;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-item {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.session-item:hover {
+  background: var(--bg-hover);
+}
+
+.session-item.active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.session-preview {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+
+.session-empty {
+  padding: 8px 10px;
+}

@@ -1,0 +1,219 @@
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100vh;
+}
+
+.chat-scroll {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.chat-inner {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 32px 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.chat-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: var(--text-faint);
+}
+
+/* ---------- messages ---------- */
+
+.msg {
+  display: flex;
+}
+
+.msg-user {
+  justify-content: flex-end;
+}
+
+.msg-assistant {
+  justify-content: flex-start;
+}
+
+.msg-bubble {
+  max-width: 78%;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+}
+
+.msg-user .msg-bubble {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg);
+  padding: 10px 14px;
+}
+
+.msg-assistant .msg-bubble {
+  max-width: 100%;
+}
+
+.msg-bubble p {
+  margin: 0 0 0.7em;
+}
+.msg-bubble p:last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- turn (live/completed detail trace) ---------- */
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.turn-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+}
+
+.turn-stage {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
+.turn-text {
+  line-height: 1.6;
+}
+.turn-text p {
+  margin: 0 0 0.7em;
+}
+.turn-text p:last-child {
+  margin-bottom: 0;
+}
+
+.turn-thinking,
+.turn-tool {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.turn-thinking summary,
+.turn-tool summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dim);
+  list-style: none;
+}
+.turn-thinking summary::-webkit-details-marker,
+.turn-tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.turn-thinking-body {
+  padding: 0 12px 10px 32px;
+  color: var(--text-faint);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.tool-name {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.tool-args-preview {
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.tool-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex-shrink: 0;
+}
+.tool-dot.running {
+  background: var(--accent-1);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.turn-tool-body {
+  padding: 0 12px 12px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.turn-tool-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.turn-plan {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 13.5px;
+  color: var(--text-dim);
+}
+.turn-plan li.done {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.turn-permission,
+.turn-ask-user {
+  border: 1px solid var(--warn-soft);
+  background: var(--warn-soft);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ask-user-question {
+  font-weight: 500;
+}
+
+.turn-error {
+  color: var(--danger);
+  font-size: 13.5px;
+}
+
+.turn-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-grad);
+  animation: pulse 1s ease-in-out infinite;
+  align-self: flex-start;
+}

@@ -19,6 +19,29 @@ Ctrl+C останавливает только его). Бэкенд отдел�
 намеренно не включили в `make dev`, чтобы `--reload`/логи uvicorn не
 мешались в одном терминале с логами Vite.
 
+## Структура фронтенда (`web_morda/src/`) — Feature-Sliced Design
+
+```
+app/        — точка сборки: App.tsx (композиция), styles/global.css (токены/reset), App.css
+widgets/    — sidebar (сайдбар целиком), chat-panel (лента + TurnView)
+features/   — send-message, pick-folder, view-doctor, check-updates,
+              clean-storage, view-usage, manage-memory, view-plugins,
+              edit-settings — один слайс = одно самостоятельное действие
+              пользователя, каждый со своим ui/ (+ api/, если ходит в сеть)
+entities/   — chat (типы хода/сообщений + useChatSocket), session (список
+              сессий), project (текущая папка) — доменные модели + их API
+shared/     — ui (Icons, Modal, kit.css — общие .btn/.code-block/...),
+              api (client.ts — общий fetch-хелпер), lib (markdown.tsx)
+```
+
+Импорты: `@/...` (алиас на `src/`, настроен и в `tsconfig.app.json`, и в
+`vite.config.ts` — держать оба в синхроне) для всего, что пересекает
+границу слайса; внутри одного слайса (например `features/view-doctor/ui/`
+→ `features/view-doctor/api/`) — обычные относительные `./`/`../`. Каждый
+слайс отдаёт наружу только то, что реально нужно, через свой `index.ts`
+(публичный API слайса) — соседние слои не лезут во внутренние файлы друг
+друга напрямую.
+
 `--ws-ping-timeout 300` — не опционально: холодный старт локальной модели
 (`expert_streaming.py`'s `ensure_running` поднимает llama-server
 подпроцесс и синхронно поллит его health-check `time.sleep`'ом, блокируя

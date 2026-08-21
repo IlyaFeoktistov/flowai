@@ -1,0 +1,108 @@
+/* Generic cross-slice primitives — reused by widgets/*, features/* and the
+   markdown renderer (shared/lib). Feature/widget-specific styles live next
+   to their own component instead. */
+
+.brand-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: var(--accent-grad);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.brand-mark-lg {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+}
+
+.btn {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn:hover {
+  background: var(--bg-hover);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--accent-grad);
+  border: none;
+  color: #0b0c0e;
+  font-weight: 600;
+}
+
+.btn-danger {
+  border-color: var(--danger-soft);
+  color: var(--danger);
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+}
+.btn-row.wrap {
+  flex-wrap: wrap;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+}
+.icon-btn:hover {
+  color: var(--text);
+}
+
+.code-block {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  margin: 0;
+}
+
+.code-block-lang {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+
+.report-text {
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.warn-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.dim {
+  color: var(--text-faint);
+}
+
+.error-text {
+  color: var(--danger);
+  font-size: 13px;
+}

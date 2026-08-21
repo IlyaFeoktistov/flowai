@@ -16,6 +16,14 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* FSD: @ — абсолютный импорт от src/, для всего КРОМЕ импортов внутри
+       одного слайса (те остаются относительными, ./ или ../). baseUrl не
+       нужен — moduleResolution: "bundler" резолвит paths от расположения
+       этого tsconfig без него (baseUrl отдельно от paths deprecated в TS6). */
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,
