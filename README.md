@@ -331,6 +331,8 @@ make run_web
 `.venv/bin/uvicorn`, а не голый `uvicorn`, важен и при ручном запуске —
 без активного `.venv` PATH может подсунуть системный uvicorn без
 зависимостей проекта (`ModuleNotFoundError: No module named 'dotenv'`).
+Если предыдущий запуск не завершился штатно и порты 8000/5173 заняты —
+`make stop_web` их освобождает.
 
 FastAPI-бэкенд на `http://localhost:8000` (REST `/api/v1/*` + WS
 `/api/v1/ws/chat`), фронтенд `web_morda/` (React+TS+Vite) — тот же агент,

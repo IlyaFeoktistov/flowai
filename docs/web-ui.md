@@ -29,6 +29,16 @@ make run_web   # из корня репозитория
 (`ModuleNotFoundError: No module named 'dotenv'`); тот же принцип нужен
 и при ручном запуске бэкенда отдельно от `make run_web`.
 
+Если `make run_web` не завершился штатно (закрыли терминал вместо
+Ctrl+C, `uvicorn --reload` перезапустился на середине хода и т.п.) —
+следующий запуск падает на `[Errno 98] Address already in use`.
+`make stop_web` находит и убивает то, что реально держит порты 8000/5173
+(`fuser -n tcp`, через `/proc`, не текстовый поиск по командной строке —
+`pgrep -f "uvicorn main:app"` нашёл бы и убил сам себя, раз этот же
+текст есть и в командной строке шелла, который выполняет рецепт), плюс
+их дочерние multiprocessing-воркеры (faster-whisper/Chatterbox сами
+порт не слушают, `fuser` их не видит).
+
 ## Структура фронтенда (`web_morda/src/`) — Feature-Sliced Design
 
 ```
