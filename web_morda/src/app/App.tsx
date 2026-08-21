@@ -115,6 +115,20 @@ function App() {
     return null
   }, [chat.entries])
 
+  // Пользователь мог кликнуть "Новый чат"/открыть другую сессию РАНЬШЕ,
+  // чем разрешится автооткрытие последней сессии выше (listSessions() —
+  // реальный сетевой round-trip, не мгновенный) — без этой отметки
+  // запоздавший chat.openSession(latest) из того эффекта перехватил бы
+  // (закрыл) сокет уже начатого пользователем чата.
+  const handleNewChat = () => {
+    didAutoOpenRef.current = true
+    chat.startNewChat()
+  }
+  const handleOpenSession = (id: string) => {
+    didAutoOpenRef.current = true
+    chat.openSession(id)
+  }
+
   return (
     <div className="app">
       <ToastStack toasts={chat.errors} onDismiss={chat.dismissError} />
@@ -124,10 +138,10 @@ function App() {
         onPickFolder={() => setShowFolderPicker(true)}
         commands={COMMANDS}
         onOpenCommand={(key) => setOpenCommand(key as CommandKind)}
-        onNewChat={chat.startNewChat}
+        onNewChat={handleNewChat}
         sessions={sessions}
         activeSessionId={chat.sessionId}
-        onOpenSession={chat.openSession}
+        onOpenSession={handleOpenSession}
       />
 
       <main className="chat-panel">
