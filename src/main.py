@@ -412,7 +412,26 @@ async def ws_chat(ws: WebSocket):
             use_main = app_settings.get("voice_mode") or not app_settings.get("pipeline_mode")
             stream_fn = main_stream_chat if use_main else pipeline_stream_chat
             mid_turn_queue = asyncio.Queue() if use_main else None
-            stream_kwargs = {"on_event": send_safe}
+
+            # answer_seen — трекает, приходил ли хоть один настоящий
+            # answer_chunk за этот ход. agent.py's stream_chat на recursion-
+            # limit/context-overflow/generation-error (после исчерпания
+            # попыток) не кидает исключение — он yield'ит готовое дружелюбное
+            # сообщение и завершается штатно, ДО того, как модель вообще
+            # произвела хоть один токен через on_event. CLI это видит (читает
+            # выдачу генератора напрямую), а веб — нет: answer_start/chunk/end
+            # это ЕДИНСТВЕННЫЙ канал, которым текст попадает в UI, и здесь он
+            # просто не вызывается — ход тихо завершался бы пустым, без
+            # единого слова и без ошибки.
+            answer_seen = False
+
+            async def on_event_wrapper(payload: dict) -> None:
+                nonlocal answer_seen
+                if payload.get("type") == "answer_chunk":
+                    answer_seen = True
+                await send_safe(payload)
+
+            stream_kwargs = {"on_event": on_event_wrapper}
             if use_main:
                 stream_kwargs["mid_turn_queue"] = mid_turn_queue
 
@@ -427,6 +446,10 @@ async def ws_chat(ws: WebSocket):
             current_turn_task = asyncio.create_task(run_turn())
             try:
                 final_text = await current_turn_task
+                if not answer_seen and final_text:
+                    await send_safe({"type": "answer_start"})
+                    await send_safe({"type": "answer_chunk", "text": final_text})
+                    await send_safe({"type": "answer_end"})
             except asyncio.CancelledError:
                 # Остановлено кнопкой "стоп" — то, что модель уже успела
                 # написать, уже дошло до фронтенда через answer_chunk;
