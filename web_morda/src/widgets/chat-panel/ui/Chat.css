@@ -214,6 +214,10 @@
   font-family: var(--font-mono);
   color: var(--text-faint);
   margin-top: -2px;
+  /* Тот же отступ, что у .tool-dot внутри .turn-tool summary (1px border +
+     12px padding-left) — чтобы текст статистики не торчал левее, чем
+     точки тулов/ответа над ним. */
+  margin-left: 13px;
 }
 
 .turn-footer-dim {
@@ -227,4 +231,8 @@
   background: var(--accent-grad);
   animation: pulse 1s ease-in-out infinite;
   align-self: flex-start;
+  /* Выравнивает точку по центру с .tool-dot внутри карточек тулов выше —
+     без этого точка "всё ещё отвечает" торчала у самого левого края,
+     а точки тулов сидят с отступом (border+padding их summary). */
+  margin-left: 13px;
 }
