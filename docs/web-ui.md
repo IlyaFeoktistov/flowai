@@ -180,8 +180,26 @@ interactive stdin), сервер по-настоящему ГЕНЕРИРУЕТ 
 закрывает `episodic` — `.cancel()` только просит остановиться, сама
 отмена доставляется асинхронно, и `episodic.close()` до того, как
 `process_turns` реально доходит до своего `except CancelledError` (там
-же он дописывает "остановлено пользователем" в историю), давало гонку
-`ProgrammingError: Cannot operate on a closed database`.
+же он дописывает итог хода в историю), давало гонку `ProgrammingError:
+Cannot operate on a closed database`.
+
+`except CancelledError` в `process_turns` на самом деле ловит ДВЕ разные
+причины, и `stop_requested`-флаг (выставляется только `receive_loop`'s
+`elif mtype == "stop":`) различает их: явный клик "стоп" пишет в историю
+"⚠️ Ход остановлен пользователем." и НЕ выходит из `process_turns` —
+то же соединение продолжает ждать следующее сообщение. Разрыв
+соединения (`ws_chat`'s outer `finally` отменяет саму задачу
+`processor_task`, когда `receive_loop` поймал реальный
+`WebSocketDisconnect`) — это НЕ клик "стоп" (`stop_requested` остаётся
+`False`), пишет честную "⚠️ Соединение прервалось во время хода." и
+**re-raise**'ит `CancelledError` дальше, реально завершая
+`process_turns`. Раньше обе причины были неразличимы (одинаковый текст
+"остановлено пользователем" на любую отмену) и, что серьёзнее, вторая
+ветка молча продолжала `while True: await inbound.get()` на мёртвом
+соединении НАВСЕГДА — `receive_loop` уже не жив, класть в `inbound`
+больше некому, так что `process_turns` (и его `episodic`-соединение)
+утекали бы на каждый разрыв связи посреди хода, а `ws_chat`'s
+`finally`-`gather` завис бы, ожидая эту задачу до конца жизни процесса.
 
 Bash/write-подтверждения (`ask_permissions` в `/settings`) — тоже
 процесс-глобальные (`tools/confirm.py`'s `_always_approve`/

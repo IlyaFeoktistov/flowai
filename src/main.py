@@ -353,6 +353,13 @@ async def ws_chat(ws: WebSocket):
     # веб-эквивалент). None у обоих значит "ходов сейчас нет".
     current_turn_task: asyncio.Task | None = None
     mid_turn_queue: asyncio.Queue | None = None
+    # Различает ДВЕ причины, по которым current_turn_task может получить
+    # CancelledError: явный клик "стоп" (receive_loop's "stop" ниже) vs.
+    # отмена process_turns целиком из-за реального разрыва соединения
+    # (ws_chat's outer finally, см. его же комментарий) — без этого флага
+    # process_turns не может их отличить и молча подписывал бы разрыв
+    # связи как "остановлено пользователем", хотя никто не жал стоп.
+    stop_requested = False
 
     async def send_safe(payload: dict) -> None:
         try:
@@ -371,7 +378,7 @@ async def ws_chat(ws: WebSocket):
     # блокировался бы на await stream_fn(...) и не смог бы вычитывать
     # permission_response, которые могут прийти ПОКА этот же ход ещё идёт.
     async def receive_loop() -> None:
-        nonlocal current_turn_task, mid_turn_queue
+        nonlocal current_turn_task, mid_turn_queue, stop_requested
         while True:
             raw = await ws.receive_text()
             data = json.loads(raw)
@@ -399,10 +406,11 @@ async def ws_chat(ws: WebSocket):
                     await inbound.put(text)
             elif mtype == "stop":
                 if current_turn_task is not None and not current_turn_task.done():
+                    stop_requested = True
                     current_turn_task.cancel()
 
     async def process_turns() -> None:
-        nonlocal current_turn_task, mid_turn_queue
+        nonlocal current_turn_task, mid_turn_queue, stop_requested
         while True:
             text = await inbound.get()
             if not text:
@@ -468,12 +476,36 @@ async def ws_chat(ws: WebSocket):
                     await send_safe({"type": "answer_chunk", "text": final_text})
                     await send_safe({"type": "answer_end"})
             except asyncio.CancelledError:
-                # Остановлено кнопкой "стоп" — то, что модель уже успела
-                # написать, уже дошло до фронтенда через answer_chunk;
-                # здесь только фиксируем итог в истории/episodic и явно
-                # сообщаем фронтенду, что это была отмена, а не обрыв связи.
-                final_text = "⚠️ Ход остановлен пользователем."
-                await send_safe({"type": "stopped"})
+                if stop_requested:
+                    # Явный клик "стоп" — то, что модель уже успела
+                    # написать, уже дошло до фронтенда через answer_chunk;
+                    # здесь только фиксируем итог в истории/episodic и явно
+                    # сообщаем фронтенду, что это была отмена, а не обрыв
+                    # связи. НЕ re-raise — process_turns продолжает жить и
+                    # ждать следующее сообщение на этом же соединении.
+                    final_text = "⚠️ Ход остановлен пользователем."
+                    stop_requested = False
+                    await send_safe({"type": "stopped"})
+                else:
+                    # Разрыв соединения — ws_chat's outer finally отменяет
+                    # ИМЕННО эту задачу (processor_task), когда receive_loop
+                    # поймал реальный WebSocketDisconnect, а не клик "стоп".
+                    # "остановлено пользователем" тут было бы неправдой —
+                    # никто не жал стоп, соединение просто исчезло. send_safe
+                    # всё равно уйдёт в никуда (клиент уже отключился), но
+                    # процесс/эту задачу нужно ДЕЙСТВИТЕЛЬНО завершить, а не
+                    # молча проглотить отмену и уйти на следующий круг
+                    # `while True: await inbound.get()` — класть в inbound
+                    # больше некому (receive_loop тоже уже мёртв), так что
+                    # без re-raise эта корутина (и её episodic-соединение)
+                    # висела бы веки вечные, а ws_chat's finally-gather ждал
+                    # бы её до конца жизни процесса.
+                    final_text = "⚠️ Соединение прервалось во время хода."
+                    messages.append({"role": "assistant", "content": final_text})
+                    episodic.append("assistant", final_text)
+                    current_turn_task = None
+                    mid_turn_queue = None
+                    raise
             except Exception as e:
                 # cli.py's эквивалент (см. его же try/except вокруг
                 # stream_chat) печатает ошибку и красиво завершает ход, не
