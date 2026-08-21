@@ -9,6 +9,14 @@
   color: var(--text-faint);
 }
 
+.composer-attachments {
+  max-width: 760px;
+  margin: 0 auto 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .input-bar-inner {
   max-width: 760px;
   margin: 0 auto;
@@ -58,4 +66,14 @@
 .send-btn:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+.stop-btn {
+  background: var(--danger);
+  color: #1a0e0d;
+}
+
+.input-bar > .voice-orb-wrap {
+  max-width: 760px;
+  margin: 0 auto 10px;
 }

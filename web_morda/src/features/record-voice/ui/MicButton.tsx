@@ -1,19 +1,14 @@
 import { IconMic } from '@/shared/ui'
-import { useVoiceRecorder } from '../model/useVoiceRecorder'
+import type { RecorderState } from '../model/useVoiceRecorder'
 import './MicButton.css'
 
-export function MicButton({ onTranscribed }: { onTranscribed: (text: string) => void }) {
-  const { state, toggle } = useVoiceRecorder(onTranscribed)
-
-  const label =
-    state === 'recording' ? 'Остановить запись' : state === 'transcribing' ? 'Распознаю…' : 'Голосовой ввод'
-
+export function MicButton({ state, onClick }: { state: RecorderState; onClick: () => void }) {
+  const label = state === 'recording' ? 'Остановить запись' : 'Голосовой ввод'
   return (
     <button
       type="button"
       className={'mic-btn' + (state === 'recording' ? ' recording' : '')}
-      onClick={toggle}
-      disabled={state === 'transcribing'}
+      onClick={onClick}
       aria-label={label}
       title={label}
     >

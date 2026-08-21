@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 import '@/shared/ui/kit.css'
 import 'katex/dist/katex.min.css'
@@ -53,6 +53,22 @@ function App() {
     if (!chat.isStreaming) refreshSessions()
   }, [chat.isStreaming, refreshSessions])
 
+  // Для войс-режима (InputBar's TTS-озвучка ответа) — текст последнего
+  // ответа ассистента, откуда бы он ни пришёл (текущий ход или уже
+  // сохранённая история).
+  const lastAnswerText = useMemo(() => {
+    for (let i = chat.entries.length - 1; i >= 0; i--) {
+      const entry = chat.entries[i]
+      if (entry.kind === 'message') {
+        return entry.role === 'assistant' ? entry.content : null
+      }
+      const textItems = entry.items.filter((it) => it.kind === 'text')
+      const last = textItems[textItems.length - 1]
+      return last && last.kind === 'text' ? last.text : null
+    }
+    return null
+  }, [chat.entries])
+
   return (
     <div className="app">
       <Sidebar
@@ -69,7 +85,13 @@ function App() {
       <main className="chat-panel">
         <Chat entries={chat.entries} onRespondPermission={chat.respondPermission} onRespondAskUser={chat.respondAskUser} />
         {chat.error && <div className="banner-error">{chat.error}</div>}
-        <InputBar streaming={chat.isStreaming} queuedCount={chat.queuedCount} onSend={chat.sendMessage} />
+        <InputBar
+          streaming={chat.isStreaming}
+          pendingCount={chat.pendingCount}
+          lastAnswerText={lastAnswerText}
+          onSend={chat.sendMessage}
+          onStop={chat.stopCurrentTurn}
+        />
       </main>
 
       {showFolderPicker && (

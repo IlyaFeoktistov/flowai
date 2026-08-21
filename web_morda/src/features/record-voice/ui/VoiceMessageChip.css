@@ -1,0 +1,90 @@
+.voice-chip {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 6px 10px;
+  max-width: 320px;
+}
+
+.voice-chip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-chip-play,
+.voice-chip-transcribe,
+.voice-chip-remove {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+}
+.voice-chip-play {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-grad);
+  color: #0b0c0e;
+}
+.voice-chip-transcribe {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-1);
+}
+.voice-chip-transcribe:hover {
+  background: var(--bg-hover);
+}
+.voice-chip-transcribe:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.voice-chip-remove {
+  color: var(--text-faint);
+}
+.voice-chip-remove:hover {
+  color: var(--text);
+}
+.voice-chip-remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+.voice-chip-wave {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  min-width: 80px;
+}
+.voice-chip-wave span {
+  flex: 1;
+  background: var(--accent-1);
+  border-radius: 2px;
+  min-height: 3px;
+}
+
+.voice-chip-duration {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.voice-chip-transcript {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}

@@ -1,1 +1,5 @@
 export { MicButton } from './ui/MicButton'
+export { VoiceOrb } from './ui/VoiceOrb'
+export { VoiceMessageChip } from './ui/VoiceMessageChip'
+export { useVoiceRecorder, type VoiceRecording, type RecorderState } from './model/useVoiceRecorder'
+export { transcribe, speak } from './api/api'

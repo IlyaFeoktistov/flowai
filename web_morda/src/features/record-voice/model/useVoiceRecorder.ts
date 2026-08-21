@@ -1,41 +1,100 @@
 import { useCallback, useRef, useState } from 'react'
-import { transcribe } from '../api/api'
 
-export type RecorderState = 'idle' | 'recording' | 'transcribing'
+export type RecorderState = 'idle' | 'recording'
 
-// Toggle-to-record, not a fixed duration — click starts, click again (or
-// calling toggle() a second time) stops and uploads for transcription.
-// Recording happens entirely in the browser (MediaRecorder); the backend
-// only does STT (ui/audio.py's transcribe(), faster-whisper) on the
-// resulting blob — see main.py's /transcribe.
-export function useVoiceRecorder(onTranscribed: (text: string) => void) {
+export interface VoiceRecording {
+  blob: Blob
+  waveform: number[] // normalized 0..1 amplitude bars, fixed length (see BAR_COUNT)
+  durationMs: number
+}
+
+const BAR_COUNT = 32
+
+function downsampleToBars(samples: number[], count: number): number[] {
+  if (samples.length === 0) return new Array(count).fill(0.1)
+  const bars: number[] = []
+  const bucket = samples.length / count
+  for (let i = 0; i < count; i++) {
+    const from = Math.floor(i * bucket)
+    const to = Math.max(from + 1, Math.floor((i + 1) * bucket))
+    let peak = 0
+    for (let j = from; j < to && j < samples.length; j++) peak = Math.max(peak, samples[j])
+    bars.push(Math.max(0.08, peak))
+  }
+  return bars
+}
+
+// Toggle-to-record, not a fixed duration — click starts, click again stops.
+// Recording (MediaRecorder) AND the waveform (AnalyserNode RMS sampled via
+// requestAnimationFrame) both happen client-side; onRecorded gets the raw
+// blob + a real amplitude waveform (not a fake/static one) once stopped —
+// transcription is a SEPARATE, on-demand step (see record-voice/api's
+// transcribe + the "T" button on VoiceMessageChip), not automatic here.
+export function useVoiceRecorder(onRecorded: (recording: VoiceRecording) => void) {
   const [state, setState] = useState<RecorderState>('idle')
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const streamRef = useRef<MediaStream | null>(null)
+  const audioCtxRef = useRef<AudioContext | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const samplesRef = useRef<number[]>([])
+  const rafRef = useRef(0)
+  const startedAtRef = useRef(0)
+
+  // Named function expression (not a useCallback referencing its own const
+  // binding) — a plain recursive rAF loop, sidesteps the "read while its
+  // declaration is being initialized" lint warning a self-referencing
+  // useCallback would trigger, even though that pattern is safe here too.
+  const sampleLoopRef = useRef<() => void>(undefined)
+  sampleLoopRef.current = function sampleLoop() {
+    const analyser = analyserRef.current
+    if (!analyser) return
+    const data = new Uint8Array(analyser.fftSize)
+    analyser.getByteTimeDomainData(data)
+    let sumSq = 0
+    for (let i = 0; i < data.length; i++) {
+      const v = (data[i] - 128) / 128
+      sumSq += v * v
+    }
+    const rms = Math.sqrt(sumSq / data.length)
+    samplesRef.current.push(Math.min(1, rms * 4))
+    rafRef.current = requestAnimationFrame(() => sampleLoopRef.current?.())
+  }
 
   const start = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
       chunksRef.current = []
+      samplesRef.current = []
+      startedAtRef.current = Date.now()
+
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      const audioCtx = new AudioCtx()
+      const source = audioCtx.createMediaStreamSource(stream)
+      const analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 512
+      source.connect(analyser)
+      audioCtxRef.current = audioCtx
+      analyserRef.current = analyser
+      rafRef.current = requestAnimationFrame(() => sampleLoopRef.current?.())
+
       const recorder = new MediaRecorder(stream)
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data)
       }
-      recorder.onstop = async () => {
+      recorder.onstop = () => {
+        cancelAnimationFrame(rafRef.current)
         streamRef.current?.getTracks().forEach((t) => t.stop())
         streamRef.current = null
-        setState('transcribing')
-        try {
-          const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' })
-          const { text } = await transcribe(blob)
-          if (text) onTranscribed(text)
-        } catch {
-          // мик/сеть подвели — тихо возвращаемся в idle, текста просто не будет
-        } finally {
-          setState('idle')
-        }
+        audioCtxRef.current?.close().catch(() => {})
+        audioCtxRef.current = null
+        analyserRef.current = null
+
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' })
+        const durationMs = Date.now() - startedAtRef.current
+        onRecorded({ blob, waveform: downsampleToBars(samplesRef.current, BAR_COUNT), durationMs })
+        setState('idle')
       }
       recorderRef.current = recorder
       recorder.start()
@@ -43,12 +102,12 @@ export function useVoiceRecorder(onTranscribed: (text: string) => void) {
     } catch {
       setState('idle')
     }
-  }, [onTranscribed])
+  }, [onRecorded])
 
   const toggle = useCallback(() => {
     if (state === 'recording') {
       recorderRef.current?.stop()
-    } else if (state === 'idle') {
+    } else {
       start()
     }
   }, [state, start])
