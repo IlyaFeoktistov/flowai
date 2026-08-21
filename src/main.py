@@ -22,8 +22,10 @@ the socket mid-turn otherwise.
 """
 import asyncio
 import base64
+import faulthandler
 import json
 import os
+import signal
 import tempfile
 from pathlib import Path
 
@@ -70,6 +72,16 @@ prompts.set_web_mode(True)
 # проекта. Домашняя папка — нейтральный старт, дальше пользователь выбирает
 # реальный проект через folder-picker (POST /project, тоже os.chdir).
 os.chdir(os.path.expanduser("~"))
+
+# Диагностика на случай зависания event loop'а целиком (наблюдалось живьём:
+# порт слушается, процесс жив, но НИ ОДИН новый коннект, включая /health, не
+# принимается — растущий SYN-backlog на `ss -ltn`, при этом причина ещё не
+# локализована). SIGKILL/SIGABRT такого процесса теряет единственную
+# зацепку — стек всех потоков на момент зависания. `kill -USR1 <pid>`
+# печатает его в stderr (тот же терминал, что и обычный лог uvicorn) БЕЗ
+# завершения процесса — можно снять диагностику и решить, убивать или нет,
+# вместо гадания вслепую.
+signal.signal(signal.SIGUSR1, lambda *_: faulthandler.dump_traceback())
 
 app = FastAPI(title="Flowio AI")
 
