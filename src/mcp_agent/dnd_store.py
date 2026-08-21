@@ -13,24 +13,7 @@ import sqlite3
 from datetime import datetime
 
 import storage
-
-
-def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
-    """CREATE TABLE IF NOT EXISTS only covers a table that doesn't exist
-    AT ALL yet — it does nothing once the table already exists with an
-    older column set. Columns like gold/level/xp/current_threat/... added
-    to the CREATE statement above after a table already exists (with far
-    fewer columns) would otherwise silently never appear in that
-    already-created database, causing "no such column: xp" on an
-    already-in-progress game. Adds whatever's missing from
-    `columns` ({name: "TYPE DEFAULT ..."}) — safe to call every time,
-    every column added here should also exist in the CREATE TABLE above
-    (this only helps an ALREADY-existing table catch up; a table created
-    fresh right now already has everything from CREATE TABLE)."""
-    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    for name, decl in columns.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+from storage import ensure_columns as _ensure_columns
 
 
 def _conn() -> sqlite3.Connection:

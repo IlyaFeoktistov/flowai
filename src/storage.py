@@ -47,6 +47,29 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    """The project's schema-evolution primitive — see docs/persistence.md's
+    "Миграции" section for the full convention. `CREATE TABLE IF NOT
+    EXISTS` only covers a table that doesn't exist AT ALL yet — it does
+    nothing once the table already exists with an older column set. A
+    column added to that CREATE statement after real installs already have
+    the table (with fewer columns) would otherwise silently never appear
+    for them, causing "no such column: X" the first time old data meets
+    new code. Adds whatever's missing from `columns` ({name: "TYPE DEFAULT
+    ..."}) — safe to call every time a module connects, cheap (one PRAGMA
+    read); every column added here should also exist in that module's own
+    CREATE TABLE statement (this only helps an ALREADY-existing table
+    catch up — a table created fresh right now already has everything
+    from CREATE TABLE). Was local to mcp_agent/dnd_store.py (the only
+    caller so far) — moved here so the NEXT module that needs to add a
+    column to an existing table reuses this instead of copy-pasting its
+    own private version."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, decl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def _project_hash(repo_path: str) -> str:
     return hashlib.sha256(os.path.abspath(repo_path).encode()).hexdigest()[:16]
 
