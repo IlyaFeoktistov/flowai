@@ -1,13 +1,22 @@
 import { useEffect, useState } from 'react'
 import { Modal } from '@/shared/ui'
-import { getSettings, setSetting } from '../api/api'
+import { getModels, getSettings, setSetting } from '../api/api'
 import './SettingsModal.css'
+
+// Те же три ключа, что в терминале помечены типом "ollama_model"
+// (ui/tui/settings.py:_ITEMS) — выбор из уже установленных моделей, а не
+// произвольный текст.
+const MODEL_KEYS = new Set(['chat_model', 'vision_model', 'voice_chat_model'])
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<Record<string, unknown> | null>(null)
+  const [models, setModels] = useState<string[]>([])
   const refresh = () => getSettings().then(setSettings)
   useEffect(() => {
     refresh()
+    getModels()
+      .then((r) => setModels(r.models))
+      .catch(() => {})
   }, [])
 
   const setKey = (key: string, value: unknown) => {
@@ -29,6 +38,17 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   <input type="checkbox" checked={value} onChange={(e) => setKey(key, e.target.checked)} />
                   <span className="switch-track" />
                 </label>
+              ) : MODEL_KEYS.has(key) && typeof value === 'string' ? (
+                <select className="settings-input" value={value} onChange={(e) => setKey(key, e.target.value)}>
+                  {/* текущее значение может быть моделью, которой уже нет в
+                      `ollama list` (переименована/удалена) — не терять его молча */}
+                  {!models.includes(value) && <option value={value}>{value} (не установлена)</option>}
+                  {models.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
               ) : typeof value === 'number' ? (
                 <input
                   className="settings-input"
