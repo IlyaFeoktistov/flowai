@@ -173,7 +173,7 @@ export function InputBar({
         <textarea
           ref={ref}
           className="input-textarea"
-          placeholder={streaming ? 'Можно писать дальше — сообщение подключится к текущему ответу…' : 'Спроси flowAI…'}
+          placeholder={streaming ? 'Можно писать дальше — сообщение подключится к текущему ответу…' : 'Спроси FlowAI…'}
           rows={1}
           onKeyDown={onKeyDown}
           onInput={autoGrow}

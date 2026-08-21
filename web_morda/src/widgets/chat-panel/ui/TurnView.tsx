@@ -1,6 +1,114 @@
+import { useEffect, useState } from 'react'
 import type { ToolChild, Turn, TurnItem } from '@/entities/chat'
 import { renderMarkdown } from '@/shared/lib'
-import { IconThinking, IconTool } from '@/shared/ui'
+import { Collapsible, IconThinking, IconTool } from '@/shared/ui'
+
+// Те же "прикольные надписи" и тот же ~4 символа/токен эвристик, что
+// ui/stream.py's _THINKING_PHRASES/_tok_approx — портированы буквально,
+// не придуманы заново, чтобы веб выглядел как терминал, а не как отдельный
+// стиль (см. _ai_header/_format_duration там же).
+const THINKING_PHRASES = [
+  'думаю', 'шевелю извилинами', 'включаю мозги', 'подбираю слова',
+  'варю мысли', 'советуюсь с нейронами', 'гружу идеи',
+]
+const TOOL_RUNNING_PHRASES = [
+  'выполняю тулы', 'копаюсь в файлах', 'дёргаю рычаги',
+  'колдую с инструментами', 'жму на кнопки', 'кручу гайки',
+]
+const PROCESSING_PHRASES = [
+  'обрабатываю', 'перевариваю результат', 'раскладываю по полочкам',
+  'сверяю показания', 'анализирую улов', 'изучаю добычу',
+]
+const GENERATING_PHRASES = ['печатаю', 'строчу ответ', 'накидываю мысль', 'выдаю мысль', 'пишу']
+
+type Phase = 'thinking' | 'tool' | 'processing' | 'generating'
+
+function currentPhase(items: TurnItem[]): Phase | null {
+  const last = items[items.length - 1]
+  if (!last) return null
+  switch (last.kind) {
+    case 'thinking':
+      return last.open ? 'thinking' : 'processing'
+    case 'tool':
+      return last.status === 'running' ? 'tool' : 'processing'
+    case 'text':
+      return last.open ? 'generating' : null
+    case 'stage':
+    case 'plan':
+    case 'mid_turn':
+      return 'processing'
+    default:
+      return null
+  }
+}
+
+function phrasesFor(phase: Phase): readonly string[] {
+  switch (phase) {
+    case 'thinking': return THINKING_PHRASES
+    case 'tool': return TOOL_RUNNING_PHRASES
+    case 'processing': return PROCESSING_PHRASES
+    case 'generating': return GENERATING_PHRASES
+  }
+}
+
+function estimateTokens(items: TurnItem[]): number {
+  let chars = 0
+  for (const it of items) {
+    if (it.kind === 'thinking' || it.kind === 'text') chars += it.text.length
+  }
+  return Math.max(0, Math.round(chars / 4))
+}
+
+function formatDuration(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds))
+  const secs = s % 60
+  const mins = Math.floor(s / 60) % 60
+  const hours = Math.floor(s / 3600)
+  if (hours) return `${hours}ч ${mins}м ${secs}с`
+  if (mins) return `${mins}м ${secs}с`
+  return `${secs}с`
+}
+
+// Живой тикающий счётчик, пока ход не завершён (оценка по символам — тот же
+// компромисс, что и в терминале, точных чисел от модели ещё нет), и точные
+// цифры из "stats"-события (agent.py/pipeline.py) после. Фраза перевыбирается
+// только при смене фазы, не на каждый тик — иначе рябило бы каждые 400мс.
+function TurnFooter({ turn }: { turn: Turn }) {
+  const [now, setNow] = useState(() => Date.now())
+  const [phrase, setPhrase] = useState('')
+  const phase = currentPhase(turn.items)
+
+  useEffect(() => {
+    if (turn.complete) return
+    const id = setInterval(() => setNow(Date.now()), 400)
+    return () => clearInterval(id)
+  }, [turn.complete])
+
+  // Перевыбирается только когда фаза реально меняется (эффект, а не во
+  // время рендера) — иначе StrictMode-двойной вызов рендера или прерванный
+  // concurrent-рендер могли бы перекатить фразу без смены фазы.
+  useEffect(() => {
+    setPhrase(phase ? phrasesFor(phase)[Math.floor(Math.random() * phrasesFor(phase).length)] : '')
+  }, [phase])
+
+  const endMs = turn.completedAt ?? now
+  const elapsedSec = (endMs - turn.startedAt) / 1000
+  const tok = turn.stats ? turn.stats.tokensOut : estimateTokens(turn.items)
+  if (tok === 0 && elapsedSec < 1) return null
+
+  const label = !turn.complete && phrase ? `${phrase} · ` : ''
+  const delegateTok = turn.stats && (turn.stats.delegateTokensIn || turn.stats.delegateTokensOut)
+    ? turn.stats.delegateTokensIn + turn.stats.delegateTokensOut
+    : 0
+
+  return (
+    <div className="turn-footer">
+      {label}
+      {tok} tok · {formatDuration(elapsedSec)}
+      {delegateTok > 0 && <span className="turn-footer-dim"> (из них делегат: {delegateTok} tok)</span>}
+    </div>
+  )
+}
 
 const STAGE_LABELS: Record<string, string> = {
   analyzer: 'Анализатор',
@@ -199,7 +307,11 @@ function TurnItemView({
         </details>
       )
     case 'text':
-      return <div className="turn-text">{renderMarkdown(item.text)}</div>
+      return (
+        <Collapsible>
+          <div className="turn-text">{renderMarkdown(item.text)}</div>
+        </Collapsible>
+      )
     case 'tool':
       return <ToolItem item={item} />
     case 'plan':
@@ -229,7 +341,9 @@ export function TurnView({
   return (
     <div className="turn">
       <div className="msg msg-user">
-        <div className="msg-bubble">{turn.userText}</div>
+        <div className="msg-bubble">
+          <Collapsible>{turn.userText}</Collapsible>
+        </div>
       </div>
       <div className="turn-detail">
         {turn.items.map((item) => (
@@ -242,6 +356,7 @@ export function TurnView({
         ))}
         {!turn.complete && <span className="turn-live-dot" aria-label="генерирует" />}
       </div>
+      <TurnFooter turn={turn} />
     </div>
   )
 }

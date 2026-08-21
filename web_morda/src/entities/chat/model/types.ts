@@ -55,12 +55,29 @@ export type TurnItem =
   | { kind: 'mid_turn'; id: string; text: string }
   | { kind: 'stopped'; id: string }
 
+// agent.py/pipeline.py's "stats" событие — реальные счётчики токенов (не
+// оценка), приходит один раз в конце хода, перед "done". До этого момента
+// TurnFooter (widgets/chat-panel) показывает локальную ~оценку по длине
+// уже пришедшего текста, тем же приёмом, что ui/stream.py's _tok_approx.
+export interface TurnStats {
+  tokensIn: number
+  tokensOut: number
+  tokensInContent: number
+  durationMs: number
+  genDurationMs: number
+  delegateTokensIn: number
+  delegateTokensOut: number
+}
+
 export interface Turn {
   kind: 'turn'
   id: string
   userText: string
   items: TurnItem[]
   complete: boolean
+  startedAt: number
+  completedAt?: number
+  stats?: TurnStats
 }
 
 export interface HistoryMessage {
