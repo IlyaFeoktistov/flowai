@@ -44,6 +44,7 @@ README.md's "Установка".
 ## Тесты
 
 ```bash
+make test                     # весь набор одной командой (см. Makefile)
 pytest                        # весь набор
 pytest tests/test_plugins.py  # один файл
 pytest -k dnd                 # по имени
