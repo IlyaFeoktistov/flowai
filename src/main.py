@@ -226,6 +226,7 @@ async def ws_chat(ws: WebSocket):
     await ws.send_json({"type": "session_started", "session_id": session_id})
 
     bridge = WebBridge(ws.send_json)
+    inbound: asyncio.Queue[str] = asyncio.Queue()
 
     async def send_safe(payload: dict) -> None:
         try:
@@ -233,19 +234,29 @@ async def ws_chat(ws: WebSocket):
         except Exception:
             pass
 
-    try:
+    # receive_loop и process_turns ДОЛЖНЫ идти конкурентно, не последовательно
+    # (было именно так и это был баг): пока process_turns сидит внутри
+    # stream_fn, ожидая ответ на permission_request/ask_user_request через
+    # WebBridge, тот же самый цикл не может параллельно вызвать
+    # ws.receive_text() ещё раз — сообщение с ответом пользователя так и
+    # осталось бы непрочитанным в сокете до конца ХОДА, то есть навсегда,
+    # раз сам ход ждёт именно этого ответа. user_message тоже идёт через
+    # очередь, а не обрабатывается прямо в receive_loop — иначе тот же цикл
+    # блокировался бы на await stream_fn(...) и не смог бы вычитывать
+    # permission_response, которые могут прийти ПОКА этот же ход ещё идёт.
+    async def receive_loop() -> None:
         while True:
             raw = await ws.receive_text()
             data = json.loads(raw)
             mtype = data.get("type")
-
             if mtype in ("permission_response", "ask_user_response"):
                 bridge.resolve(data)
-                continue
-            if mtype != "user_message":
-                continue
+            elif mtype == "user_message":
+                await inbound.put((data.get("text") or "").strip())
 
-            text = (data.get("text") or "").strip()
+    async def process_turns() -> None:
+        while True:
+            text = await inbound.get()
             if not text:
                 continue
             if _turn_lock.locked():
@@ -267,9 +278,30 @@ async def ws_chat(ws: WebSocket):
             messages.append({"role": "assistant", "content": final_text})
             episodic.append("assistant", final_text)
             await send_safe({"type": "turn_complete", "session_id": session_id})
+
+    receiver_task = asyncio.create_task(receive_loop())
+    processor_task = asyncio.create_task(process_turns())
+    try:
+        done, pending = await asyncio.wait(
+            {receiver_task, processor_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        # И receive_loop (реальный disconnect), и process_turns (падение
+        # хода) — обе ветки бесконечные, так что "завершилась" здесь всегда
+        # значит "упала с исключением", не "закончила работу штатно".
+        for task in done:
+            exc = task.exception()
+            if exc is not None and not isinstance(exc, WebSocketDisconnect):
+                raise exc
     except WebSocketDisconnect:
         pass
     finally:
+        # Отменяет process_turns, даже если он застрял на середине хода
+        # (например ждёт ответа на permission_request, которого от
+        # отключившегося клиента больше не будет) — иначе оборванная
+        # вкладка держала бы _turn_lock до конца времён, блокируя вообще
+        # ВСЕ будущие ходы на этом процессе.
+        receiver_task.cancel()
+        processor_task.cancel()
         bridge.cancel_all()
         episodic.close()
 
