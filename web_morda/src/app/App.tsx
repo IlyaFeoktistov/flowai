@@ -52,19 +52,44 @@ function App() {
   // refreshSessions() (после каждого хода, см. ниже) выдёргивал бы
   // пользователя обратно в последнюю сессию, даже если он сейчас смотрит
   // другую.
+  //
+  // С ретраями: make run_web поднимает бэкенд и фронт КОНКУРЕНТНО, без
+  // синхронизации — vite обычно готов раньше, чем FastAPI успевает
+  // стартовать (или посреди --reload-перезапуска после правки бэкенда).
+  // Без ретрая первый неудачный fetch тут просто тихо проглатывался
+  // (.catch(() => {})) и список сессий оставался пустым НАВСЕГДА, пока
+  // страницу не перезагрузишь руками.
   const didAutoOpenRef = useRef(false)
   useEffect(() => {
-    getProject().then((r) => {
-      setProjectPath(r.path)
-      setHomePath(r.home)
-    })
-    listSessions().then((list) => {
-      setSessions(list)
-      if (!didAutoOpenRef.current && list.length > 0) {
-        didAutoOpenRef.current = true
-        chat.openSession(list[0].session_id)
+    let cancelled = false
+
+    const loadWithRetry = async () => {
+      // 20 попыток * 750мс = 15с — с запасом покрывает холодный старт
+      // бэкенда (~5.3с на этой машине: FastAPI импортирует mcp_agent целиком
+      // при первом старте процесса, не мгновенно).
+      for (let attempt = 0; attempt < 20; attempt++) {
+        try {
+          const [project, list] = await Promise.all([getProject(), listSessions()])
+          if (cancelled) return
+          setProjectPath(project.path)
+          setHomePath(project.home)
+          setSessions(list)
+          if (!didAutoOpenRef.current && list.length > 0) {
+            didAutoOpenRef.current = true
+            chat.openSession(list[0].session_id)
+          }
+          return
+        } catch {
+          if (cancelled) return
+          await new Promise((r) => setTimeout(r, 750))
+        }
       }
-    }).catch(() => {})
+    }
+
+    loadWithRetry()
+    return () => {
+      cancelled = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
