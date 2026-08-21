@@ -6,7 +6,7 @@ import { getProject } from '@/entities/project'
 import { listSessions } from '@/entities/session'
 import type { SessionSummary } from '@/entities/session'
 import { useChatSocket } from '@/entities/chat'
-import { ToastStack } from '@/shared/ui'
+import { BackendLoader, ToastStack } from '@/shared/ui'
 import { Sidebar } from '@/widgets/sidebar'
 import { Chat } from '@/widgets/chat-panel'
 import { InputBar } from '@/features/send-message'
@@ -32,6 +32,7 @@ const COMMANDS: { key: CommandKind; label: string }[] = [
 ]
 
 function App() {
+  const [backendReady, setBackendReady] = useState(false)
   const [projectPath, setProjectPath] = useState('')
   const [homePath, setHomePath] = useState('')
   const [sessions, setSessions] = useState<SessionSummary[]>([])
@@ -51,26 +52,30 @@ function App() {
   // разговора без явного действия пользователя удивляло больше, чем
   // помогало, плюс порождало отдельный класс гонок с "Новый чат".
   //
-  // С ретраями: make run_web поднимает бэкенд и фронт КОНКУРЕНТНО, без
-  // синхронизации — vite обычно готов раньше, чем FastAPI успевает
-  // стартовать (или посреди --reload-перезапуска после правки бэкенда).
-  // Без ретрая первый неудачный fetch тут просто тихо проглатывался
-  // (.catch(() => {})) и список сессий оставался пустым НАВСЕГДА, пока
-  // страницу не перезагрузишь руками.
+  // С ретраями, БЕЗ ограничения по числу попыток: make run_web поднимает
+  // бэкенд и фронт КОНКУРЕНТНО, без синхронизации — vite обычно готов
+  // раньше, чем FastAPI успевает стартовать (замерено ~5.3с холодного
+  // старта на разработческой машине — импортирует mcp_agent целиком; ещё
+  // дольше при --reload-перезапуске бэкенда посреди уже открытой вкладки).
+  // Раньше ретрай был ограничен 20 попытками (~15с) и без единого визуального
+  // сигнала — если бэкенд не успевал, список сессий тихо оставался пустым
+  // НАВСЕГДА без ретрая дальше, а пользователь тем временем мог уже
+  // напечатать и отправить сообщение, которое тут же падало connection
+  // refused. Теперь ждём сколько нужно (backendReady=false рисует
+  // BackendLoader вместо всего приложения — набрать и отправить запрос,
+  // которому нечего слушать, физически нельзя) и ретраим без верхней границы.
   useEffect(() => {
     let cancelled = false
 
     const loadWithRetry = async () => {
-      // 20 попыток * 750мс = 15с — с запасом покрывает холодный старт
-      // бэкенда (~5.3с на этой машине: FastAPI импортирует mcp_agent целиком
-      // при первом старте процесса, не мгновенно).
-      for (let attempt = 0; attempt < 20; attempt++) {
+      for (;;) {
         try {
           const [project, list] = await Promise.all([getProject(), listSessions()])
           if (cancelled) return
           setProjectPath(project.path)
           setHomePath(project.home)
           setSessions(list)
+          setBackendReady(true)
           return
         } catch {
           if (cancelled) return
@@ -106,6 +111,10 @@ function App() {
     }
     return null
   }, [chat.entries])
+
+  if (!backendReady) {
+    return <BackendLoader />
+  }
 
   return (
     <div className="app">
