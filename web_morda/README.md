@@ -1,32 +1,55 @@
-# React + TypeScript + Vite
+# web_morda — веб-интерфейс FlowAI
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Локальный веб-фронтенд (React + TypeScript + Vite) поверх того же
+агента, что и терминальный `cli.py`, — не отдельная реализация, а ещё
+один потребитель уже существующего событийного потока и permission-
+моста, которые терминальный TUI и так использует. Бэкенд — `src/main.py`
+(FastAPI, REST `/api/v1/*` + WebSocket `/api/v1/ws/chat`), в этой папке
+только фронтенд.
 
-Currently, two official plugins are available:
+Полное описание протокола, архитектуры бэкенда и всех особенностей UI
+(инъекция сообщений по ходу генерации, вложенность `delegate`, голосовой
+режим, сворачивание длинных сообщений и т.д.) — в
+[`docs/web-ui.md`](../docs/web-ui.md) в корне репозитория. Этот файл —
+только про сам `web_morda/`.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Запуск
 
-## React Compiler
+Из корня репозитория одной командой — поднимает бэкенд, фронтенд и
+SearXNG разом:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+make run_web
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Если после нештатного завершения порты 8000/5173 заняты —
+`make stop_web` их освобождает.
+
+Запустить только фронтенд (бэкенд должен быть поднят отдельно,
+`.venv/bin/uvicorn main:app` из `src/`):
+
+```bash
+npm install   # один раз
+npm run dev
+```
+
+## Стек и структура
+
+React + TypeScript + Vite, [Feature-Sliced
+Design](https://feature-sliced.design/) — `src/app` (композиция) →
+`src/widgets` (сайдбар, лента чата) → `src/features` (одно действие
+пользователя = один слайс: отправка сообщения, голосовой ввод,
+вложение файла, папка, доктор/обновления/очистка/...) → `src/entities`
+(доменные модели: чат, сессия, проект) → `src/shared` (общие ui/api/lib
+без знания о домене). Импорт `@/...` (алиас на `src/`, настроен и в
+`tsconfig.app.json`, и в `vite.config.ts`) для всего, что пересекает
+границу слайса; внутри одного слайса — обычные относительные `./`.
+
+## Команды
+
+```bash
+npm run dev      # dev-сервер с HMR
+npm run build    # tsc -b + production-сборка в dist/
+npm run lint     # oxlint
+npm run preview  # локально посмотреть production-сборку
+```
