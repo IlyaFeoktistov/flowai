@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import '@/shared/ui/kit.css'
 import 'katex/dist/katex.min.css'
@@ -52,6 +52,13 @@ function App() {
   // разговора без явного действия пользователя удивляло больше, чем
   // помогало, плюс порождало отдельный класс гонок с "Новый чат".
   //
+  // ИСКЛЮЧЕНИЕ — ?session=<id> в адресной строке (см. эффект ниже, который
+  // его туда пишет при каждой смене chat.sessionId): это ПЕРЕЗАГРУЗКА
+  // страницы на уже открытой сессии, не "первый заход" — в этом случае
+  // нужно вернуться именно в неё, а не начинать новый чат. Пустой URL
+  // (первый визит, открытие с закладки на голый корень) — new chat, как
+  // выше.
+  //
   // С ретраями, БЕЗ ограничения по числу попыток: make run_web поднимает
   // бэкенд и фронт КОНКУРЕНТНО, без синхронизации — vite обычно готов
   // раньше, чем FastAPI успевает стартовать (замерено ~5.3с холодного
@@ -64,6 +71,16 @@ function App() {
   // refused. Теперь ждём сколько нужно (backendReady=false рисует
   // BackendLoader вместо всего приложения — набрать и отправить запрос,
   // которому нечего слушать, физически нельзя) и ретраим без верхней границы.
+  // didInitFromUrlRef — без него эффект СИНХРОНИЗАЦИИ URL ниже (зависит от
+  // chat.sessionId, а тот стартует null) срабатывал бы уже на самом первом
+  // рендере и СТИРАЛ ?session=<id> из адресной строки ДО того, как этот
+  // эффект вообще успевал его прочитать — реальный живой баг: перезагрузка
+  // страницы на сессии открывала пустой новый чат вместо неё. Флаг
+  // выставляется здесь и снимает эту гонку — эффект синхронизации ниже
+  // просто ничего не делает, пока сам факт "прочитали URL при старте" ещё
+  // не случился.
+  const didInitFromUrlRef = useRef(false)
+
   useEffect(() => {
     let cancelled = false
 
@@ -76,6 +93,9 @@ function App() {
           setHomePath(project.home)
           setSessions(list)
           setBackendReady(true)
+          const sessionParam = new URLSearchParams(window.location.search).get('session')
+          if (sessionParam) chat.openSession(sessionParam)
+          didInitFromUrlRef.current = true
           return
         } catch {
           if (cancelled) return
@@ -88,7 +108,26 @@ function App() {
     return () => {
       cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Держит ?session=<id> в адресной строке синхронным с реально открытой
+  // сессией — только этот параметр и отличает "перезагрузили страницу на
+  // сессии" (эффект выше её переоткроет) от "зашли в приложение первый
+  // раз" (эффект выше её проигнорирует, останется пустой новый чат).
+  // replaceState, не pushState — открытие сессии не должно плодить записи
+  // в истории браузера, там и так работает кнопка "назад" по факту через
+  // список сессий, а не через историю переходов.
+  useEffect(() => {
+    if (!didInitFromUrlRef.current) return
+    const url = new URL(window.location.href)
+    if (chat.sessionId) {
+      url.searchParams.set('session', chat.sessionId)
+    } else {
+      url.searchParams.delete('session')
+    }
+    window.history.replaceState(null, '', url)
+  }, [chat.sessionId])
 
   // Новая запись в списке слева появляется только после первой реплики —
   // подтягиваем список при каждом завершении хода, а не только при старте.
