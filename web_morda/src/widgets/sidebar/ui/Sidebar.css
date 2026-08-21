@@ -3,6 +3,11 @@
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  /* Grid items default to min-height: auto — without min-height: 0 here,
+     the sidebar grows to fit ALL content (including every session), and
+     .session-list's own overflow-y: auto never gets a chance to kick in. */
+  height: 100vh;
+  min-height: 0;
   min-width: 0;
   padding: 14px 12px;
   gap: 10px;
