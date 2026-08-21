@@ -53,3 +53,46 @@ export const IconPaperclip = () => (
     <path d="M21 11.5 12.4 20a4.5 4.5 0 0 1-6.4-6.4l8.6-8.5a3 3 0 0 1 4.2 4.2l-8.6 8.5a1.5 1.5 0 0 1-2.1-2.1l7.9-7.8" />
   </svg>
 )
+
+export const IconStop = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+    <rect x="5" y="5" width="14" height="14" rx="2" />
+  </svg>
+)
+
+export const IconPlay = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M7 5.5v13l11-6.5z" />
+  </svg>
+)
+
+export const IconPause = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+    <rect x="6" y="5" width="4" height="14" rx="1" />
+    <rect x="14" y="5" width="4" height="14" rx="1" />
+  </svg>
+)
+
+export const IconFileGeneric = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 2.5h8l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20V4A1.5 1.5 0 0 1 6.5 2.5Z" />
+    <path d="M14 2.5V8h5" />
+  </svg>
+)
+
+export const IconFileCode = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 2.5h8l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20V4A1.5 1.5 0 0 1 6.5 2.5Z" />
+    <path d="M14 2.5V8h5" />
+    <path d="m9.5 13-2 2 2 2M14.5 13l2 2-2 2" />
+  </svg>
+)
+
+export const IconFileImage = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 2.5h8l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20V4A1.5 1.5 0 0 1 6.5 2.5Z" />
+    <path d="M14 2.5V8h5" />
+    <circle cx="10" cy="13.2" r="1.2" />
+    <path d="m8 18 2.8-3 2 2 2.2-3.2L18 18" />
+  </svg>
+)

@@ -1,4 +1,4 @@
-import type { Turn, TurnItem } from '@/entities/chat'
+import type { ToolChild, Turn, TurnItem } from '@/entities/chat'
 import { renderMarkdown } from '@/shared/lib'
 import { IconThinking, IconTool } from '@/shared/ui'
 
@@ -22,7 +22,71 @@ function formatArgs(args: unknown): string {
   }
 }
 
+function ToolBody({ argsLabel, argsText, result }: { argsLabel: string; argsText: string; result?: string }) {
+  return (
+    <div className="turn-tool-body">
+      {argsText && (
+        <div>
+          <div className="turn-tool-label">{argsLabel}</div>
+          <pre className="code-block">{argsText}</pre>
+        </div>
+      )}
+      {result !== undefined && (
+        <div>
+          <div className="turn-tool-label">Результат</div>
+          <pre className="code-block">{result}</pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ToolChildRow({ child }: { child: ToolChild }) {
+  const argsText = formatArgs(child.args)
+  return (
+    <details className="turn-tool turn-tool-child">
+      <summary>
+        <span className={'tool-dot' + (child.status === 'running' ? ' running' : '')} />
+        <span className="tool-name">{child.name}</span>
+        {argsText && <span className="tool-args-preview">{argsText.slice(0, 60).replace(/\s+/g, ' ')}</span>}
+      </summary>
+      <ToolBody argsLabel="Аргументы" argsText={argsText} result={child.result} />
+    </details>
+  )
+}
+
+// delegate — не обычный тул: сам вызов сворачиваемый (как любой другой), а
+// под ним ВСЕГДА видно, какие sub-tool-calls он сделал (delegate_tool.py's
+// "delegate → X" события, см. entities/chat's pushDelegateChild) — то, ради
+// чего это отдельный компонент, а не ToolItem с доп. пропом.
+function DelegateItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
+  const argsText = formatArgs(item.args)
+  return (
+    <div className="turn-delegate">
+      <details className="turn-tool">
+        <summary>
+          <span className={'tool-dot' + (item.status === 'running' ? ' running' : '')} />
+          <IconTool />
+          <span className="tool-name">delegate</span>
+          {argsText && <span className="tool-args-preview">{argsText.slice(0, 80).replace(/\s+/g, ' ')}</span>}
+        </summary>
+        <ToolBody argsLabel="Задача" argsText={argsText} result={item.result} />
+      </details>
+      {item.children && item.children.length > 0 && (
+        <ul className="delegate-children">
+          {item.children.map((c) => (
+            <li key={c.id}>
+              <ToolChildRow child={c} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function ToolItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
+  if (item.name === 'delegate') return <DelegateItem item={item} />
   const argsText = formatArgs(item.args)
   return (
     <details className="turn-tool">
@@ -32,20 +96,7 @@ function ToolItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
         <span className="tool-name">{item.name}</span>
         {argsText && <span className="tool-args-preview">{argsText.slice(0, 80).replace(/\s+/g, ' ')}</span>}
       </summary>
-      <div className="turn-tool-body">
-        {argsText && (
-          <div>
-            <div className="turn-tool-label">Аргументы</div>
-            <pre className="code-block">{argsText}</pre>
-          </div>
-        )}
-        {item.result !== undefined && (
-          <div>
-            <div className="turn-tool-label">Результат</div>
-            <pre className="code-block">{item.result}</pre>
-          </div>
-        )}
-      </div>
+      <ToolBody argsLabel="Аргументы" argsText={argsText} result={item.result} />
     </details>
   )
 }
@@ -159,6 +210,10 @@ function TurnItemView({
       return <AskUserItem item={item} onRespond={onRespondAskUser} />
     case 'error':
       return <div className="turn-error">{item.message}</div>
+    case 'mid_turn':
+      return <div className="turn-mid-injected">📤 Добавлено по ходу: {item.text}</div>
+    case 'stopped':
+      return <div className="turn-stopped">⏹ Остановлено пользователем</div>
   }
 }
 

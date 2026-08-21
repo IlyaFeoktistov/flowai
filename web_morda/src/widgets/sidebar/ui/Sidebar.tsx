@@ -1,5 +1,6 @@
+import { useRef } from 'react'
 import type { SessionSummary } from '@/entities/session'
-import { IconFolder, IconPlus } from '@/shared/ui'
+import { IconFolder, IconPlus, IconChevronRight } from '@/shared/ui'
 import './Sidebar.css'
 
 function timeLabel(iso: string): string {
@@ -31,6 +32,12 @@ export function Sidebar({
   activeSessionId: string | null
   onOpenSession: (id: string) => void
 }) {
+  const activeRef = useRef<HTMLLIElement>(null)
+
+  const goToCurrent = () => {
+    activeRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
+
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -59,10 +66,17 @@ export function Sidebar({
 
       <div className="sidebar-divider" />
 
-      <div className="session-list-label">Сессии</div>
+      <div className="session-list-header">
+        <span className="session-list-label">Сессии</span>
+        {activeSessionId && (
+          <button className="goto-current-btn" onClick={goToCurrent} title="Перейти к текущей сессии">
+            Текущая <IconChevronRight />
+          </button>
+        )}
+      </div>
       <ul className="session-list">
         {sessions.map((s) => (
-          <li key={s.session_id}>
+          <li key={s.session_id} ref={s.session_id === activeSessionId ? activeRef : undefined}>
             <button
               className={'session-item' + (s.session_id === activeSessionId ? ' active' : '')}
               onClick={() => onOpenSession(s.session_id)}

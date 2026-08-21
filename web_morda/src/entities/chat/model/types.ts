@@ -5,6 +5,14 @@ export interface AskUserOption {
   description?: string
 }
 
+export interface ToolChild {
+  id: string
+  name: string
+  args: unknown
+  result?: string
+  status: 'running' | 'done'
+}
+
 // One item inside a live/just-completed turn's detail trace — everything
 // the terminal TUI (ui/stream.py) would have printed for this turn, minus
 // the parts that only matter live (footer/spinner phrases).
@@ -20,6 +28,10 @@ export type TurnItem =
       result?: string
       diff?: string
       status: 'running' | 'done'
+      // delegate → X sub-calls (delegate_tool.py) nest here instead of
+      // showing up as sibling tool cards — only ever populated when
+      // name === 'delegate'.
+      children?: ToolChild[]
     }
   | { kind: 'plan'; id: string; steps: string[]; doneIndexes: number[]; currentIndex: number | null }
   | {
@@ -38,6 +50,10 @@ export type TurnItem =
       resolved?: string
     }
   | { kind: 'error'; id: string; message: string }
+  // Сообщение, подложенное ПОКА этот же ход уже шёл (mid_turn_injected из
+  // agent.py) — не отдельный ход, а аннотация внутри текущего.
+  | { kind: 'mid_turn'; id: string; text: string }
+  | { kind: 'stopped'; id: string }
 
 export interface Turn {
   kind: 'turn'
