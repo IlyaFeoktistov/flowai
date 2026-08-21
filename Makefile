@@ -1,4 +1,4 @@
-.PHONY: test dev
+.PHONY: test run_web
 
 test:
 	.venv/bin/pytest -q
@@ -6,6 +6,6 @@ test:
 # SearXNG — фоновый инфраструктурный сервис (docker-compose.yml), поднимается
 # detached и продолжает жить после Ctrl+C; фронтенд — на переднем плане,
 # Ctrl+C останавливает именно его.
-dev:
+run_web:
 	docker compose up -d searxng
 	cd web_morda && npm run dev

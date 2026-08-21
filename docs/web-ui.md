@@ -10,13 +10,13 @@
 
 ```bash
 cd src && uvicorn main:app --reload --ws-ping-interval 20 --ws-ping-timeout 300
-make dev   # из корня репозитория — фронтенд (web_morda) + SearXNG detached
+make run_web   # из корня репозитория — фронтенд (web_morda) + SearXNG detached
 ```
 
-`make dev` (см. `Makefile`) — `docker compose up -d searxng` (фоном,
+`make run_web` (см. `Makefile`) — `docker compose up -d searxng` (фоном,
 переживает Ctrl+C) + `cd web_morda && npm run dev` (на переднем плане,
 Ctrl+C останавливает только его). Бэкенд отдельно, командой выше — его
-намеренно не включили в `make dev`, чтобы `--reload`/логи uvicorn не
+намеренно не включили в `make run_web`, чтобы `--reload`/логи uvicorn не
 мешались в одном терминале с логами Vite.
 
 ## Структура фронтенда (`web_morda/src/`) — Feature-Sliced Design
