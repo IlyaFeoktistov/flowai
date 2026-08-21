@@ -9,15 +9,25 @@
 ## Запуск
 
 ```bash
-cd src && uvicorn main:app --reload --ws-ping-interval 20 --ws-ping-timeout 300
-make run_web   # из корня репозитория — фронтенд (web_morda) + SearXNG detached
+make run_web   # из корня репозитория
 ```
 
-`make run_web` (см. `Makefile`) — `docker compose up -d searxng` (фоном,
-переживает Ctrl+C) + `cd web_morda && npm run dev` (на переднем плане,
-Ctrl+C останавливает только его). Бэкенд отдельно, командой выше — его
-намеренно не включили в `make run_web`, чтобы `--reload`/логи uvicorn не
-мешались в одном терминале с логами Vite.
+Одна команда, весь стек (см. `Makefile`):
+1. `docker compose up -d searxng` — фоновый инфраструктурный сервис,
+   переживает Ctrl+C (это единственный процесс, который НЕ останавливается
+   вместе с остальными — сознательно, SearXNG держать поднятым между
+   запусками дешевле, чем поднимать заново).
+2. `[ -d web_morda/node_modules ] || npm install` — подтягивает фронтенд-
+   зависимости сам, если ещё не ставились.
+3. Бэкенд (`.venv/bin/uvicorn main:app --reload --ws-ping-interval 20
+   --ws-ping-timeout 300`) и фронтенд (`npm run dev`) — конкурентно, оба
+   на переднем плане в одном терминале; `trap 'kill 0'` в recipe гарантирует,
+   что Ctrl+C убивает ОБА, а не только последний засунутый в фон job.
+
+`.venv/bin/uvicorn`, не голый `uvicorn`, — без активного `.venv` PATH
+может подхватить системный uvicorn без зависимостей проекта
+(`ModuleNotFoundError: No module named 'dotenv'`); тот же принцип нужен
+и при ручном запуске бэкенда отдельно от `make run_web`.
 
 ## Структура фронтенда (`web_morda/src/`) — Feature-Sliced Design
 

@@ -321,9 +321,16 @@ export PATH="$HOME/.local/bin:$PATH"
 ### Веб-интерфейс
 
 ```bash
-cd src && uvicorn main:app --reload --ws-ping-interval 20 --ws-ping-timeout 300
-make run_web   # фронтенд (web_morda) + SearXNG detached, см. Makefile
+make run_web
 ```
+
+Одной командой: бэкенд (`.venv/bin/uvicorn`) + фронтенд (`web_morda`,
+`npm install` сам подтянется, если `node_modules` ещё нет) + SearXNG
+(detached, переживает Ctrl+C) — сам Ctrl+C останавливает бэкенд и
+фронтенд разом (см. `Makefile`, `docs/web-ui.md`). Явный путь
+`.venv/bin/uvicorn`, а не голый `uvicorn`, важен и при ручном запуске —
+без активного `.venv` PATH может подсунуть системный uvicorn без
+зависимостей проекта (`ModuleNotFoundError: No module named 'dotenv'`).
 
 FastAPI-бэкенд на `http://localhost:8000` (REST `/api/v1/*` + WS
 `/api/v1/ws/chat`), фронтенд `web_morda/` (React+TS+Vite) — тот же агент,

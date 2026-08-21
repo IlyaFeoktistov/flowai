@@ -9,12 +9,16 @@ shapes or the on_event wire protocol, once web_morda actually has clients
 that need the old one kept alive; nothing does yet, so there's no v1/v2
 routing split to maintain here until then.
 
-Run: uvicorn main:app --reload --ws-ping-interval 20 --ws-ping-timeout 300
-(generous ws ping timeout — a cold local-model load, or a slow response on
-weak hardware, can legitimately block the event loop for tens of seconds;
-see expert_streaming.py's ensure_running, which polls with a blocking
-time.sleep — the default 20s ping timeout drops the socket mid-turn
-otherwise.)
+Run: `make run_web` from the repo root (backend + web_morda + SearXNG,
+see Makefile/docs/web-ui.md) — or manually:
+`.venv/bin/uvicorn main:app --reload --ws-ping-interval 20 --ws-ping-timeout 300`
+from `src/` (the `.venv/bin/` prefix matters: a bare `uvicorn` with no
+active venv can resolve to a system install missing this project's
+dependencies). Generous ws ping timeout — a cold local-model load, or a
+slow response on weak hardware, can legitimately block the event loop
+for tens of seconds; see expert_streaming.py's ensure_running, which
+polls with a blocking time.sleep — the default 20s ping timeout drops
+the socket mid-turn otherwise.
 """
 import asyncio
 import json
