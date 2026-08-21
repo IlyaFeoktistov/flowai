@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 import '@/shared/ui/kit.css'
 import 'katex/dist/katex.min.css'
@@ -44,14 +44,12 @@ function App() {
     listSessions().then(setSessions).catch(() => {})
   }, [])
 
-  // Открываем самую свежую сессию сразу при заходе в приложение — раньше
-  // WS-соединение вообще не поднималось, пока не отправишь первое
-  // сообщение, так что список сессий слева был виден, а сама последняя
-  // переписка — нет, пока её явно не открыть кликом. Только один раз за
-  // время жизни компонента (didAutoOpenRef) — иначе каждый повторный
-  // refreshSessions() (после каждого хода, см. ниже) выдёргивал бы
-  // пользователя обратно в последнюю сессию, даже если он сейчас смотрит
-  // другую.
+  // При заходе в приложение — сразу пустой новый чат (никакая старая
+  // сессия не открывается сама), только сайдбар подтягивает список для
+  // ручного выбора/кнопки "Текущая". Раньше тут авто-открывалась самая
+  // свежая сессия — от этого отказались: открытие чужого/старого
+  // разговора без явного действия пользователя удивляло больше, чем
+  // помогало, плюс порождало отдельный класс гонок с "Новый чат".
   //
   // С ретраями: make run_web поднимает бэкенд и фронт КОНКУРЕНТНО, без
   // синхронизации — vite обычно готов раньше, чем FastAPI успевает
@@ -59,7 +57,6 @@ function App() {
   // Без ретрая первый неудачный fetch тут просто тихо проглатывался
   // (.catch(() => {})) и список сессий оставался пустым НАВСЕГДА, пока
   // страницу не перезагрузишь руками.
-  const didAutoOpenRef = useRef(false)
   useEffect(() => {
     let cancelled = false
 
@@ -74,10 +71,6 @@ function App() {
           setProjectPath(project.path)
           setHomePath(project.home)
           setSessions(list)
-          if (!didAutoOpenRef.current && list.length > 0) {
-            didAutoOpenRef.current = true
-            chat.openSession(list[0].session_id)
-          }
           return
         } catch {
           if (cancelled) return
@@ -90,7 +83,6 @@ function App() {
     return () => {
       cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Новая запись в списке слева появляется только после первой реплики —
@@ -115,20 +107,6 @@ function App() {
     return null
   }, [chat.entries])
 
-  // Пользователь мог кликнуть "Новый чат"/открыть другую сессию РАНЬШЕ,
-  // чем разрешится автооткрытие последней сессии выше (listSessions() —
-  // реальный сетевой round-trip, не мгновенный) — без этой отметки
-  // запоздавший chat.openSession(latest) из того эффекта перехватил бы
-  // (закрыл) сокет уже начатого пользователем чата.
-  const handleNewChat = () => {
-    didAutoOpenRef.current = true
-    chat.startNewChat()
-  }
-  const handleOpenSession = (id: string) => {
-    didAutoOpenRef.current = true
-    chat.openSession(id)
-  }
-
   return (
     <div className="app">
       <ToastStack toasts={chat.errors} onDismiss={chat.dismissError} />
@@ -138,10 +116,10 @@ function App() {
         onPickFolder={() => setShowFolderPicker(true)}
         commands={COMMANDS}
         onOpenCommand={(key) => setOpenCommand(key as CommandKind)}
-        onNewChat={handleNewChat}
+        onNewChat={chat.startNewChat}
         sessions={sessions}
         activeSessionId={chat.sessionId}
-        onOpenSession={handleOpenSession}
+        onOpenSession={chat.openSession}
       />
 
       <main className="chat-panel">
