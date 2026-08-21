@@ -322,7 +322,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ```bash
 cd src && uvicorn main:app --reload --ws-ping-interval 20 --ws-ping-timeout 300
-cd web_morda && npm run dev
+make dev   # фронтенд (web_morda) + SearXNG detached, см. Makefile
 ```
 
 FastAPI-бэкенд на `http://localhost:8000` (REST `/api/v1/*` + WS

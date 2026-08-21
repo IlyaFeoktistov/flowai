@@ -10,8 +10,14 @@
 
 ```bash
 cd src && uvicorn main:app --reload --ws-ping-interval 20 --ws-ping-timeout 300
-cd web_morda && npm run dev
+make dev   # из корня репозитория — фронтенд (web_morda) + SearXNG detached
 ```
+
+`make dev` (см. `Makefile`) — `docker compose up -d searxng` (фоном,
+переживает Ctrl+C) + `cd web_morda && npm run dev` (на переднем плане,
+Ctrl+C останавливает только его). Бэкенд отдельно, командой выше — его
+намеренно не включили в `make dev`, чтобы `--reload`/логи uvicorn не
+мешались в одном терминале с логами Vite.
 
 `--ws-ping-timeout 300` — не опционально: холодный старт локальной модели
 (`expert_streaming.py`'s `ensure_running` поднимает llama-server
