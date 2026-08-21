@@ -24,6 +24,37 @@ import psutil
 
 import settings
 
+# Терминал (cli.py) не умеет рендерить LaTeX — модель должна писать формулы
+# plain-text/Unicode. web_morda (src/main.py) рендерит \(...\)/\[...\] через
+# KaTeX (shared/lib/markdown.tsx) — там ровно обратная инструкция, иначе
+# модель на веб-фронтенде избегала бы формул, которые фронтенд как раз умеет
+# красиво показать. main.py дёргает set_web_mode(True) один раз при
+# импорте — глобальный флаг на весь процесс, тем же принципом, что
+# tools/confirm.py's connect_app (какой "фронтенд" сейчас ведёт процесс).
+_web_mode = False
+
+
+def set_web_mode(enabled: bool) -> None:
+    global _web_mode
+    _web_mode = enabled
+
+
+def _math_notation_rule() -> str:
+    if _web_mode:
+        return (
+            "- Write math formulas in LaTeX notation: \\(...\\) for inline "
+            "math, \\[...\\] for a standalone display formula — the web "
+            "frontend renders both nicely (KaTeX). Example: "
+            "'\\(c \\approx 299{,}792{,}458\\) m/s'.\n"
+        )
+    return (
+        "- Never write LaTeX math notation (\\[ \\], \\( \\), \\text{}, "
+        "\\frac, \\approx, \\times, etc.) — this is a plain terminal, not a "
+        "browser with MathJax, so it prints literally instead of rendering. "
+        "Write formulas in plain text/Unicode instead: 'c ≈ 299,792,458 "
+        "m/s', not '\\[ c \\approx 299792458 \\]'.\n"
+    )
+
 
 # Не "угадываем" по языку проекта, какие интерпретаторы/тулчейны имеет смысл
 # искать — сканируем PATH через shutil.which (дёшево: только stat по
@@ -256,6 +287,7 @@ def _build_system_prompt(repo_path: str) -> str:
     )
     prompt = _SYSTEM_PROMPT_TEMPLATE.format(
         repo_path=repo_path, env_block=env_block, delegate_override=delegate_override,
+        math_notation_rule=_math_notation_rule(),
     )
     flowai_md = _read_flowai_md(repo_path)
     if flowai_md:
@@ -612,11 +644,7 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "— do not silently implement a plan you have evidence is flawed just "
     "because it's what was asked. Prioritize being correct over being "
     "agreeable.\n"
-    "- Never write LaTeX math notation (\\[ \\], \\( \\), \\text{{}}, \\frac, "
-    "\\approx, \\times, etc.) — this is a plain terminal, not a browser with "
-    "MathJax, so it prints literally instead of rendering. Write formulas "
-    "in plain text/Unicode instead: 'c ≈ 299,792,458 m/s', not "
-    "'\\[ c \\approx 299792458 \\]'.\n"
+    "{math_notation_rule}"
     # ЭТА строка должна оставаться самой последней во всём промпте — см.
     # докстринг _build_system_prompt и _VOICE_SYSTEM_PROMPT про lost-in-the-
     # middle: слабая/перегруженная модель теряет именно эту инструкцию и
@@ -717,11 +745,7 @@ _OPTIMIZED_SYSTEM_PROMPT_TEMPLATE = (
     "- If the user's own plan, diagnosis, or proposed fix is wrong, say so "
     "plainly and explain why before proceeding — do not silently implement "
     "a plan you have evidence is flawed just because it's what was asked.\n"
-    "- Never write LaTeX math notation (\\[ \\], \\( \\), \\text{{}}, \\frac, "
-    "\\approx, \\times, etc.) — this is a plain terminal, not a browser with "
-    "MathJax, so it prints literally instead of rendering. Write formulas "
-    "in plain text/Unicode instead: 'c ≈ 299,792,458 m/s', not "
-    "'\\[ c \\approx 299792458 \\]'.\n"
+    "{math_notation_rule}"
     "- Respond in the language the user wrote in — this "
     "applies to your ENTIRE final answer, not just the intro sentence. "
     "THIS IS THE LAST LINE OF THIS PROMPT FOR A REASON — it's the rule "
@@ -753,7 +777,9 @@ def _build_optimized_system_prompt(repo_path: str) -> str:
     git_status_info = _detect_git_status(repo_path)
     if git_status_info:
         env_block += "\n\n" + git_status_info
-    prompt = _OPTIMIZED_SYSTEM_PROMPT_TEMPLATE.format(repo_path=repo_path, env_block=env_block)
+    prompt = _OPTIMIZED_SYSTEM_PROMPT_TEMPLATE.format(
+        repo_path=repo_path, env_block=env_block, math_notation_rule=_math_notation_rule(),
+    )
     flowai_md = _read_flowai_md(repo_path)
     if flowai_md:
         prompt += (

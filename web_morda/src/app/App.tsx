@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import './App.css'
 import '@/shared/ui/kit.css'
+import 'katex/dist/katex.min.css'
 import { getProject } from '@/entities/project'
 import { listSessions } from '@/entities/session'
 import type { SessionSummary } from '@/entities/session'
@@ -68,7 +69,7 @@ function App() {
       <main className="chat-panel">
         <Chat entries={chat.entries} onRespondPermission={chat.respondPermission} onRespondAskUser={chat.respondAskUser} />
         {chat.error && <div className="banner-error">{chat.error}</div>}
-        <InputBar disabled={chat.isStreaming} onSend={chat.sendMessage} />
+        <InputBar streaming={chat.isStreaming} queuedCount={chat.queuedCount} onSend={chat.sendMessage} />
       </main>
 
       {showFolderPicker && (

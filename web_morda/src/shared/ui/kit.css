@@ -84,6 +84,40 @@
   margin-bottom: 6px;
 }
 
+.table-scroll {
+  overflow-x: auto;
+  margin: 0 0 0.7em;
+}
+.table-scroll table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13.5px;
+}
+.table-scroll th,
+.table-scroll td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.table-scroll th {
+  background: var(--bg-inset);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.math-block {
+  overflow-x: auto;
+  margin: 0 0 0.7em;
+  text-align: center;
+}
+/* KaTeX ships its own dark-on-transparent glyphs — just make sure the
+   surrounding text color/size follow our theme instead of katex's default. */
+.math-block .katex {
+  color: var(--text);
+  font-size: 1.05em;
+}
+
 .report-text {
   white-space: pre-wrap;
   font-family: var(--font-mono);
