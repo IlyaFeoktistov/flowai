@@ -61,6 +61,15 @@ from web.sessions_store import get_session, list_sessions, next_seq  # noqa: E40
 # ведёт процесс.
 prompts.set_web_mode(True)
 
+# GET /project ниже отдаёт os.getcwd() как "текущий проект" — тот же принцип,
+# что и cli.py (папка, откуда запущен процесс). Для терминала это осмысленно
+# (пользователь сам cd'ит перед запуском), а для веба — нет: make run_web
+# делает `cd src && uvicorn ...`, так что без этого chdir дефолтом был бы
+# repo's src/, чисто случайность обвязки запуска, а не осмысленный выбор
+# проекта. Домашняя папка — нейтральный старт, дальше пользователь выбирает
+# реальный проект через folder-picker (POST /project, тоже os.chdir).
+os.chdir(os.path.expanduser("~"))
+
 app = FastAPI(title="Flowio AI")
 
 app.add_middleware(
@@ -97,7 +106,9 @@ async def health():
 
 @router.get("/project")
 async def get_project():
-    return {"path": os.getcwd()}
+    # home — не для навигации, только чтобы фронтенд мог показать "~/..."
+    # вместо полного пути в узкой кнопке сайдбара (см. Sidebar.tsx).
+    return {"path": os.getcwd(), "home": os.path.expanduser("~")}
 
 
 class ProjectPath(BaseModel):
@@ -423,6 +434,21 @@ async def ws_chat(ws: WebSocket):
                 # сообщаем фронтенду, что это была отмена, а не обрыв связи.
                 final_text = "⚠️ Ход остановлен пользователем."
                 await send_safe({"type": "stopped"})
+            except Exception as e:
+                # cli.py's эквивалент (см. его же try/except вокруг
+                # stream_chat) печатает ошибку и красиво завершает ход, не
+                # роняя весь процесс — без этой ветки любое настоящее
+                # исключение модели (сеть, 400 от локального сервера и
+                # т.п., НЕ пойманное как context-overflow внутри
+                # _stream_round) валило бы current_turn_task, а с ним и
+                # весь process_turns/ws_chat: клиент получал бы голый
+                # обрыв соединения без единого события, ход навсегда
+                # оставался бы "не завершённым" в UI (мигающая точка), а
+                # кнопка "стоп" пропадала бы просто как побочный эффект
+                # ws.onclose — снаружи выглядело бы как рассинхрон между
+                # кнопкой и индикатором, хотя причина одна.
+                final_text = f"⚠️ Ошибка хода: {e}"
+                await send_safe({"type": "error", "message": str(e)})
             finally:
                 # Сообщение могло уйти в mid_turn_queue уже ПОСЛЕ того, как
                 # ход фактически закончился (обычный конец, ошибка, стоп) —
