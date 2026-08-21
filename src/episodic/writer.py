@@ -29,6 +29,15 @@ class EpisodicWriter:
         self._seq = 0
         return self._session_id
 
+    def resume_session(self, session_id: str, next_seq: int) -> None:
+        """Continue writing into an EXISTING session_id (e.g. re-opened from
+        the web UI's session list) instead of starting a fresh one —
+        next_seq must be one past the highest seq already stored for it,
+        otherwise append() would collide with (session_id, seq) rows that
+        already exist."""
+        self._session_id = session_id
+        self._seq = next_seq
+
     def append(self, role: str, content: str) -> dict:
         if self._session_id is None:
             self.new_session()

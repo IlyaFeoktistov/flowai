@@ -27,6 +27,8 @@
   `.flowai/hooks`): слэш-команды, MCP-серверы, hooks.
 - [development.md](development.md) — layout `src/`, установка для
   разработки, запуск тестов, живые прогоны, отладка.
+- [web-ui.md](web-ui.md) — веб-интерфейс (`web_morda/` + `src/main.py`):
+  REST `/api/v1/*`, WS-протокол событий, сессии, permission-мост.
 
 Начать стоит с [architecture.md](architecture.md), если незнакомо
 общее устройство приложения, или прямо с нужной темы, если ищется

@@ -11,8 +11,9 @@ strip'ает префикс при сборке — снаружи всё выг
 
 - `src/cli.py` — интерактивный терминальный чат (prompt_toolkit + Rich),
   основной способ использования.
-- `src/main.py` — FastAPI HTTP-сервер, `POST /chat` (SSE-стриминг), тот
-  же движок, что и у CLI.
+- `src/main.py` — FastAPI-бэкенд веб-интерфейса (`web_morda/`):
+  REST `/api/v1/*` + WS `/api/v1/ws/chat` (событийный поток), тот же
+  движок, что и у CLI — см. [web-ui.md](web-ui.md).
 - `src/mcp_agent/run_cli.py` — раннер для одноразовых вызовов без TUI
   (`python3 src/mcp_agent/run_cli.py "задача"`), полезен для живых
   тестов агента без интерактивного ввода.

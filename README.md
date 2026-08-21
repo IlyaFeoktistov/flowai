@@ -318,15 +318,17 @@ export PATH="$HOME/.local/bin:$PATH"
 
 После этого достаточно открыть терминал в нужном проекте и вызвать просто `flowai`.
 
-### HTTP-сервер
+### Веб-интерфейс
 
 ```bash
-uvicorn main:app --reload
+cd src && uvicorn main:app --reload --ws-ping-interval 20 --ws-ping-timeout 300
+cd web_morda && npm run dev
 ```
 
-Сервер на `http://localhost:8000`, `POST /chat` со стримингом через SSE.
-
-> Поле `images` в теле запроса сейчас **не подключено** к vision-анализу (тот же путь, что и в CLI, — картинки нужно передавать через `analyze_image`, вызываемый агентом, а не сырым base64 в HTTP-теле). Актуально только для CLI-режима с локальной вставкой изображений (`/paste`, `Ctrl+V`).
+FastAPI-бэкенд на `http://localhost:8000` (REST `/api/v1/*` + WS
+`/api/v1/ws/chat`), фронтенд `web_morda/` (React+TS+Vite) — тот же агент,
+что и у CLI, просто веб-обёртка. Подробности протокола/эндпоинтов — см.
+[docs/web-ui.md](docs/web-ui.md).
 
 ---
 
@@ -354,6 +356,7 @@ flowai                      # или ./flowai / python3 src/cli.py, см. «За
 | [`docs/generative-features.md`](docs/generative-features.md) | Картинки/музыка/3D/голос |
 | [`docs/dnd-mode.md`](docs/dnd-mode.md) | Изолированный режим `/dnd` |
 | [`docs/development.md`](docs/development.md) | Для разработки самого flowai |
+| [`docs/web-ui.md`](docs/web-ui.md) | Веб-интерфейс: REST `/api/v1/*`, WS-протокол событий, сессии |
 
 Стоит начать с [`docs/architecture.md`](docs/architecture.md), если незнакомо общее устройство приложения, или сразу с нужной темы, если ищется что-то конкретное.
 
@@ -620,7 +623,8 @@ flowAI/
 ├── src/                    — весь код физически здесь, плоским layout (см. CLAUDE.md
 │   │                         про sources=["src"] — импорты снаружи выглядят как top-level)
 │   ├── cli.py              — консольный TUI-чат, entry point лончера
-│   ├── main.py             — FastAPI HTTP-сервер, POST /chat (SSE)
+│   ├── main.py             — FastAPI-бэкенд веб-интерфейса, REST /api/v1/* + WS /api/v1/ws/chat
+│   ├── web/                — web_morda's бэкенд-обвязка: WebBridge (permission-мост), sessions_store
 │   ├── settings.py         — все настройки (SQLite), читается /settings
 │   ├── expert_streaming.py — свой llama-server-форк (см. «Модели») вместо Ollama
 │   ├── compress.py         — сжатие истории при приближении к лимиту контекста
@@ -715,7 +719,8 @@ flowAI/
 │                             self_heal_enabled (см. finetune/README.md)
 ├── docs/                   — architecture.md, commands.md, development.md, dnd-mode.md,
 │                             generative-features.md, models.md, persistence.md, plugins.md,
-│                             tools-and-mcp-servers.md
+│                             tools-and-mcp-servers.md, web-ui.md
+├── web_morda/              — веб-фронтенд (React+TS+Vite), говорит с src/main.py — см. docs/web-ui.md
 ├── examples/                — plugins/hello-world (эталонный плагин), project-skills-hooks
 │                             (эталонные project-скиллы/хуки без манифеста)
 ├── plugins/                — глобальные плагины пользователя (gitignored, кроме .gitkeep)
