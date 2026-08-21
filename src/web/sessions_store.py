@@ -3,9 +3,42 @@ session sidebar — only "user"/"assistant" rows are real chat history; under
 DEBUG=1 the same table also collects raw pipeline events (cli.py's
 _DEBUG_SKIP_EVENTS comment), which must stay out of a reconstructed
 conversation."""
+import json
+
 import storage
 
 _CHAT_ROLES = ("user", "assistant")
+
+
+def _ensure_turn_traces_table(conn) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS turn_traces ("
+        "session_id TEXT NOT NULL, seq INTEGER NOT NULL, events_json TEXT NOT NULL, "
+        "PRIMARY KEY (session_id, seq))"
+    )
+
+
+def save_turn_trace(session_id: str, seq: int, events: list[dict]) -> None:
+    """seq — тот же seq, что достался ASSISTANT-строке этого хода в
+    episodic_messages (episodic.append()'s возвращаемый entry) — join'ится
+    с ней 1:1 в get_session() ниже. events — сырой список on_event-
+    payload'ов за весь ход (main.py's process_turns, за вычетом
+    permission_request/ask_user_request — они нерезолвимы задним числом,
+    см. её же комментарий), в точности то же, что улетело в вебсокет живьём.
+    Веб-only UI-удобство поверх episodic_messages, как и session_titles —
+    episodic сам хранит только финальный текст хода, полная трасса
+    (тулы/delegate/thinking) раньше пропадала при переоткрытии сессии."""
+    conn = storage.connect()
+    try:
+        _ensure_turn_traces_table(conn)
+        conn.execute(
+            "INSERT INTO turn_traces (session_id, seq, events_json) VALUES (?, ?, ?) "
+            "ON CONFLICT(session_id, seq) DO UPDATE SET events_json = excluded.events_json",
+            (session_id, seq, json.dumps(events)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _ensure_titles_table(conn) -> None:
@@ -73,12 +106,27 @@ def list_sessions(limit: int = 200) -> list[dict]:
 def get_session(session_id: str) -> list[dict]:
     conn = storage.connect()
     try:
+        _ensure_turn_traces_table(conn)
         rows = conn.execute(
-            "SELECT role, content, ts FROM episodic_messages "
+            "SELECT role, content, ts, seq FROM episodic_messages "
             "WHERE session_id = ? AND role IN (?, ?) ORDER BY seq ASC",
             (session_id, *_CHAT_ROLES),
         ).fetchall()
-        return [{"role": role, "content": content, "ts": ts} for role, content, ts in rows]
+        traces = dict(conn.execute(
+            "SELECT seq, events_json FROM turn_traces WHERE session_id = ?", (session_id,),
+        ).fetchall())
+        out = []
+        for role, content, ts, seq in rows:
+            msg = {"role": role, "content": content, "ts": ts}
+            # Только у ассистентских строк — see save_turn_trace's docstring
+            # за тем, почему seq совпадает 1:1. Сессии старше этой фичи
+            # просто не найдут своих trace-строк — get_session тогда
+            # отдаёт message БЕЗ "detail", фронтенд откатывается на плоский
+            # рендер (см. entities/chat's buildEntriesFromHistory).
+            if role == "assistant" and seq in traces:
+                msg["detail"] = json.loads(traces[seq])
+            out.append(msg)
+        return out
     finally:
         conn.close()
 

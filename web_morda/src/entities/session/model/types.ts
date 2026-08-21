@@ -14,4 +14,11 @@ export interface SessionMessage {
   role: 'user' | 'assistant'
   content: string
   ts: string
+  // Полная трасса хода (тулы/delegate/thinking/...) — только у assistant-
+  // строк, только для ходов ПОСЛЕ появления этой фичи (web/sessions_
+  // store.py:save_turn_trace) — старые сессии его не имеют, и entities/
+  // chat's buildEntriesFromHistory откатывается для них на плоский рендер.
+  // Сырые on_event-payload'ы как есть, минус permission_request/
+  // ask_user_request — см. save_turn_trace's докстринг.
+  detail?: (Record<string, unknown> & { type: string })[]
 }

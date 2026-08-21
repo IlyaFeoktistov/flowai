@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getSession } from '@/entities/session'
+import type { SessionMessage } from '@/entities/session'
 import type { AskUserOption, ConnectionStatus, ConversationEntry, Turn, TurnItem } from './types'
 
 let idSeed = 0
@@ -64,6 +65,170 @@ function updateDelegateChild(turn: Turn, id: string, result: string): Turn {
     }
   }
   return turn
+}
+
+// Восстанавливает полноценный Turn (тулы/delegate/thinking/...) из сырых
+// on_event-payload'ов, сохранённых бэкендом за ход (web/sessions_store.py:
+// save_turn_trace) — тот же набор case'ов, что и в handleEvent's switch
+// ниже, но синхронно и через ЛОКАЛЬНЫЕ переменные вместо ref'ов
+// (pendingTextRef/pendingThinkingRef там нужны для конкурентного живого
+// стрима, здесь весь ход уже целиком лежит в events, воспроизводится
+// одним проходом). Сознательно НЕ переиспользует handleEvent напрямую —
+// тот завязан на setEntries/currentTurnIdRef текущего соединения, а тут
+// собирается ГОТОВЫЙ Turn ДО того, как он попадёт в entries.
+function replayTurn(
+  userText: string,
+  startedAt: number,
+  completedAt: number,
+  events: (Record<string, unknown> & { type: string })[],
+): Turn {
+  let turn: Turn = { kind: 'turn', id: nextId(), userText, items: [], complete: true, startedAt, completedAt }
+  let pendingTextId: string | null = null
+  let pendingThinkingId: string | null = null
+
+  for (const event of events) {
+    switch (event.type) {
+      case 'stage_changed':
+        turn = pushItem(turn, { kind: 'stage', id: nextId(), stage: event.stage as string })
+        break
+      case 'thinking_start': {
+        const id = nextId()
+        pendingThinkingId = id
+        turn = pushItem(turn, { kind: 'thinking', id, text: '', open: true })
+        break
+      }
+      case 'thinking_chunk': {
+        if (!pendingThinkingId) break
+        const id = pendingThinkingId
+        turn = updateItem(turn, id, (i) => (i.kind === 'thinking' ? { ...i, text: i.text + (event.text as string) } : i))
+        break
+      }
+      case 'thinking_end': {
+        if (!pendingThinkingId) break
+        const id = pendingThinkingId
+        pendingThinkingId = null
+        turn = updateItem(turn, id, (i) => (i.kind === 'thinking' ? { ...i, open: false } : i))
+        break
+      }
+      case 'answer_start': {
+        const id = nextId()
+        pendingTextId = id
+        turn = pushItem(turn, { kind: 'text', id, text: '', open: true })
+        break
+      }
+      case 'answer_chunk': {
+        if (!pendingTextId) break
+        const id = pendingTextId
+        turn = updateItem(turn, id, (i) => (i.kind === 'text' ? { ...i, text: i.text + (event.text as string) } : i))
+        break
+      }
+      case 'answer_end': {
+        if (!pendingTextId) break
+        const id = pendingTextId
+        pendingTextId = null
+        turn = updateItem(turn, id, (i) => (i.kind === 'text' ? { ...i, open: false } : i))
+        break
+      }
+      case 'tool_start': {
+        const name = event.name as string
+        const id = event.id as string
+        const match = DELEGATE_CHILD_RE.exec(name)
+        if (match) {
+          turn = pushDelegateChild(turn, id, match[1], event.args)
+        } else {
+          turn = pushItem(turn, {
+            kind: 'tool',
+            id,
+            name,
+            args: event.args,
+            status: 'running',
+            ...(name === 'delegate' ? { children: [] } : {}),
+          })
+        }
+        break
+      }
+      case 'tool_end': {
+        const name = event.name as string
+        const id = event.id as string
+        const match = DELEGATE_CHILD_RE.exec(name)
+        if (match) {
+          turn = updateDelegateChild(turn, id, event.result as string)
+        } else {
+          turn = updateItem(turn, id, (i) =>
+            i.kind === 'tool'
+              ? { ...i, status: 'done', result: event.result as string, diff: event.diff as string | undefined }
+              : i,
+          )
+        }
+        break
+      }
+      case 'plan_steps':
+        turn = pushItem(turn, {
+          kind: 'plan',
+          id: nextId(),
+          steps: event.steps as string[],
+          doneIndexes: [],
+          currentIndex: null,
+        })
+        break
+      case 'plan_step_done':
+        turn = updateLastOfKind(turn, 'plan', (i) => ({
+          ...i,
+          doneIndexes: [...i.doneIndexes, event.index as number],
+        }))
+        break
+      case 'error':
+        turn = pushItem(turn, { kind: 'error', id: nextId(), message: event.message as string })
+        break
+      case 'stopped':
+        turn = pushItem(turn, { kind: 'stopped', id: nextId() })
+        break
+      case 'mid_turn_injected':
+        turn = pushItem(turn, { kind: 'mid_turn', id: nextId(), text: event.text as string })
+        break
+      case 'stats':
+        turn = {
+          ...turn,
+          stats: {
+            tokensIn: event.tokens_in as number,
+            tokensOut: event.tokens_out as number,
+            tokensInContent: event.tokens_in_content as number,
+            durationMs: event.duration_ms as number,
+            genDurationMs: event.gen_duration_ms as number,
+            delegateTokensIn: (event.delegate_tokens_in as number) ?? 0,
+            delegateTokensOut: (event.delegate_tokens_out as number) ?? 0,
+          },
+        }
+        break
+      default:
+        break
+    }
+  }
+  return turn
+}
+
+// Пары (user, assistant-с-detail) становятся полноценным Turn (тулы/
+// delegate/thinking видны, как в живом ходе); всё остальное — старые
+// сессии без detail (до этой фичи), либо любая другая форма — плоским
+// message-пузырём, как раньше. Пара определяется позиционно (i, i+1) —
+// process_turns пишет РОВНО один user + один assistant подряд на
+// top-level ход (мид-терн инъекции не получают своей строки в episodic,
+// они всё равно попадают в detail как mid_turn-элементы).
+function buildEntriesFromHistory(history: SessionMessage[]): ConversationEntry[] {
+  const out: ConversationEntry[] = []
+  let i = 0
+  while (i < history.length) {
+    const m = history[i]
+    const next = history[i + 1]
+    if (m.role === 'user' && next?.role === 'assistant' && next.detail) {
+      out.push(replayTurn(m.content, new Date(m.ts).getTime(), new Date(next.ts).getTime(), next.detail))
+      i += 2
+    } else {
+      out.push({ kind: 'message', id: nextId(), role: m.role, content: m.content })
+      i += 1
+    }
+  }
+  return out
 }
 
 function wsUrl(sessionId: string | null): string {
@@ -400,7 +565,7 @@ export function useChatSocket() {
       setPendingCount(0)
       setIsStreaming(false)
       const history = await getSession(id)
-      setEntries(history.map((m) => ({ kind: 'message', id: nextId(), role: m.role, content: m.content })))
+      setEntries(buildEntriesFromHistory(history))
       setSessionId(id)
       connect(id)
     },

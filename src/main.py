@@ -53,7 +53,7 @@ from mcp_agent import prompts  # noqa: E402
 from rag.index_code import reindex_code_from_disk  # noqa: E402
 from tools.confirm import connect_app as connect_confirm_app, _reset_session  # noqa: E402
 from web.bridge import WebBridge  # noqa: E402
-from web.sessions_store import get_session, list_sessions, next_seq, save_title  # noqa: E402
+from web.sessions_store import get_session, list_sessions, next_seq, save_title, save_turn_trace  # noqa: E402
 from mcp_agent.router import generate_session_title  # noqa: E402
 
 # Переключает mcp_agent/prompts.py's math_notation_rule на LaTeX-инструкцию —
@@ -325,7 +325,7 @@ async def _generate_and_save_title(session_id: str, first_user_text: str) -> Non
     refresh (already happens on every turn completion, see App.tsx)."""
     title = await generate_session_title(first_user_text)
     if title:
-        save_title(session_id, title)
+        await asyncio.to_thread(save_title, session_id, title)
 
 
 @router.websocket("/ws/chat")
@@ -449,11 +449,22 @@ async def ws_chat(ws: WebSocket):
             # просто не вызывается — ход тихо завершался бы пустым, без
             # единого слова и без ошибки.
             answer_seen = False
+            # Полная трасса хода (тулы/delegate/thinking/...) — то же, что
+            # улетело в вебсокет живьём, минус permission_request/
+            # ask_user_request (нерезолвимы задним числом — см.
+            # save_turn_trace's докстринг). Сохраняется в конце хода (все
+            # ветки ниже) через web/sessions_store.py:save_turn_trace, чтобы
+            # entities/chat's buildEntriesFromHistory могло воспроизвести
+            # полноценный Turn с элементами при переоткрытии сессии, а не
+            # только плоский финальный текст, как раньше.
+            turn_events: list[dict] = []
 
             async def on_event_wrapper(payload: dict) -> None:
                 nonlocal answer_seen
                 if payload.get("type") == "answer_chunk":
                     answer_seen = True
+                if payload.get("type") not in ("permission_request", "ask_user_request"):
+                    turn_events.append(payload)
                 await send_safe(payload)
 
             stream_kwargs = {"on_event": on_event_wrapper}
@@ -472,9 +483,9 @@ async def ws_chat(ws: WebSocket):
             try:
                 final_text = await current_turn_task
                 if not answer_seen and final_text:
-                    await send_safe({"type": "answer_start"})
-                    await send_safe({"type": "answer_chunk", "text": final_text})
-                    await send_safe({"type": "answer_end"})
+                    await on_event_wrapper({"type": "answer_start"})
+                    await on_event_wrapper({"type": "answer_chunk", "text": final_text})
+                    await on_event_wrapper({"type": "answer_end"})
             except asyncio.CancelledError:
                 if stop_requested:
                     # Явный клик "стоп" — то, что модель уже успела
@@ -502,7 +513,8 @@ async def ws_chat(ws: WebSocket):
                     # бы её до конца жизни процесса.
                     final_text = "⚠️ Соединение прервалось во время хода."
                     messages.append({"role": "assistant", "content": final_text})
-                    episodic.append("assistant", final_text)
+                    assistant_entry = episodic.append("assistant", final_text)
+                    await asyncio.to_thread(save_turn_trace, session_id, assistant_entry["seq"], turn_events)
                     current_turn_task = None
                     mid_turn_queue = None
                     raise
@@ -535,7 +547,14 @@ async def ws_chat(ws: WebSocket):
                 current_turn_task = None
 
             messages.append({"role": "assistant", "content": final_text})
-            episodic.append("assistant", final_text)
+            assistant_entry = episodic.append("assistant", final_text)
+            # to_thread — save_turn_trace's json.dumps+sqlite-write это
+            # синхронный блокирующий код; на длинном ходу (например с
+            # delegate) turn_events может накопить сотни событий, и не
+            # хочется рисковать держать этим весь event loop (а с ним и
+            # вообще все остальные соединения/ходы на процессе) в заложниках
+            # даже на короткое время.
+            await asyncio.to_thread(save_turn_trace, session_id, assistant_entry["seq"], turn_events)
             if is_first_turn:
                 asyncio.create_task(_generate_and_save_title(session_id, resolved_text))
             await send_safe({"type": "turn_complete", "session_id": session_id})
