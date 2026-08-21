@@ -53,7 +53,8 @@ from mcp_agent import prompts  # noqa: E402
 from rag.index_code import reindex_code_from_disk  # noqa: E402
 from tools.confirm import connect_app as connect_confirm_app, _reset_session  # noqa: E402
 from web.bridge import WebBridge  # noqa: E402
-from web.sessions_store import get_session, list_sessions, next_seq  # noqa: E402
+from web.sessions_store import get_session, list_sessions, next_seq, save_title  # noqa: E402
+from mcp_agent.router import generate_session_title  # noqa: E402
 
 # Переключает mcp_agent/prompts.py's math_notation_rule на LaTeX-инструкцию —
 # см. её докстринг: терминал не умеет рендерить формулы, web_morda умеет
@@ -316,6 +317,17 @@ async def settings_set_endpoint(body: SettingBody):
     return {"ok": True}
 
 
+async def _generate_and_save_title(session_id: str, first_user_text: str) -> None:
+    """Fire-and-forget background task (asyncio.create_task, never awaited
+    inline — see its call site) — a short LLM call is still real latency,
+    and nothing in the turn actually needs the title to be ready before
+    turn_complete. The sidebar just won't show it until the NEXT listSessions()
+    refresh (already happens on every turn completion, see App.tsx)."""
+    title = await generate_session_title(first_user_text)
+    if title:
+        save_title(session_id, title)
+
+
 @router.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket):
     await ws.accept()
@@ -404,6 +416,11 @@ async def ws_chat(ws: WebSocket):
             # cli.py делает это же разрешение только для НОВОГО хода, не
             # для мид-терн инъекции (см. receive_loop выше) — та же
             # асимметрия тут сознательно повторена.
+            # Только для НОВОЙ сессии (не для возобновлённой из sidebar) —
+            # messages стартует пустым только тогда, см. ws_chat выше
+            # (resume_session грузит историю в messages сразу при коннекте).
+            is_first_turn = len(messages) == 0
+
             resolved_text = ui_images.resolve_image_paths(text)
             messages.append({"role": "user", "content": resolved_text})
             episodic.append("user", resolved_text)
@@ -487,6 +504,8 @@ async def ws_chat(ws: WebSocket):
 
             messages.append({"role": "assistant", "content": final_text})
             episodic.append("assistant", final_text)
+            if is_first_turn:
+                asyncio.create_task(_generate_and_save_title(session_id, resolved_text))
             await send_safe({"type": "turn_complete", "session_id": session_id})
 
     receiver_task = asyncio.create_task(receive_loop())

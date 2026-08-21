@@ -8,9 +8,36 @@ import storage
 _CHAT_ROLES = ("user", "assistant")
 
 
+def _ensure_titles_table(conn) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_titles ("
+        "session_id TEXT PRIMARY KEY, title TEXT NOT NULL)"
+    )
+
+
+def save_title(session_id: str, title: str) -> None:
+    """Generated once, after a brand-new session's first turn (see
+    main.py's process_turns + mcp_agent/router.py:generate_session_title)
+    — not for every turn, and not backfilled for sessions that predate this
+    feature (list_sessions falls back to the raw first-message excerpt for
+    those, see below)."""
+    conn = storage.connect()
+    try:
+        _ensure_titles_table(conn)
+        conn.execute(
+            "INSERT INTO session_titles (session_id, title) VALUES (?, ?) "
+            "ON CONFLICT(session_id) DO UPDATE SET title = excluded.title",
+            (session_id, title),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def list_sessions(limit: int = 200) -> list[dict]:
     conn = storage.connect()
     try:
+        _ensure_titles_table(conn)
         rows = conn.execute(
             "SELECT session_id, MIN(ts), MAX(ts), COUNT(*) FROM episodic_messages "
             "WHERE role IN (?, ?) GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT ?",
@@ -18,17 +45,25 @@ def list_sessions(limit: int = 200) -> list[dict]:
         ).fetchall()
         sessions = []
         for session_id, started_at, last_at, count in rows:
-            preview_row = conn.execute(
-                "SELECT content FROM episodic_messages "
-                "WHERE session_id = ? AND role = 'user' ORDER BY seq ASC LIMIT 1",
+            title_row = conn.execute(
+                "SELECT title FROM session_titles WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
+            if title_row:
+                preview = title_row[0]
+            else:
+                preview_row = conn.execute(
+                    "SELECT content FROM episodic_messages "
+                    "WHERE session_id = ? AND role = 'user' ORDER BY seq ASC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                preview = preview_row[0][:200] if preview_row else ""
             sessions.append({
                 "session_id": session_id,
                 "started_at": started_at,
                 "last_at": last_at,
                 "message_count": count,
-                "preview": (preview_row[0][:200] if preview_row else ""),
+                "preview": preview,
             })
         return sessions
     finally:

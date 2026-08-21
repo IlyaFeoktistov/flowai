@@ -252,6 +252,40 @@ async def classify_intent(messages: list[dict]) -> dict:
     return dict(_FAIL_OPEN_FLAGS)
 
 
+_TITLE_PROMPT = (
+    "Summarize what this message is asking for in 3-6 words, as a short "
+    "chat title (same style as ChatGPT/Claude session titles) — a noun "
+    "phrase, not a sentence, no trailing punctuation. Respond with ONLY a "
+    "JSON object {\"title\": \"...\"}. Write the title in the SAME "
+    "LANGUAGE the message is written in."
+)
+
+
+async def generate_session_title(first_user_text: str) -> str | None:
+    """Web UI's session sidebar only (see web/sessions_store.py:save_title)
+    — the CLI has no session list to title. Reuses _get_classify_model
+    (same cached JSON-mode model as classify_intent, see its own docstring
+    for why not a raw ChatOllama) — cheap enough to call once per new
+    session without a visible delay in the turn it rides along with (fired
+    as a background task from main.py, never awaited inline). Returns None
+    on any failure — caller falls back to the raw first-message excerpt
+    that list_sessions already used before this feature existed."""
+    model = await _get_classify_model()
+    try:
+        resp = await model.ainvoke([
+            {"role": "system", "content": _TITLE_PROMPT},
+            {"role": "user", "content": first_user_text[:2000]},
+        ])
+        data = parse_json_loose(resp.content) or {}
+        title = data.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()[:80]
+        log_event("session_title_invalid", raw=str(resp.content))
+    except Exception as e:
+        log_event("session_title_failed", error=str(e))
+    return None
+
+
 async def _get_casual_agent():
     """Ноль тулов, ноль MCP-подпроцессов — НЕ вызывает agent_builder.py:
     _get_tools() вообще, в отличие от ролей пайплайна (mcp_agent/roles.py):
