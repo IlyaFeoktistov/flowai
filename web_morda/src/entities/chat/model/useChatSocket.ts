@@ -343,6 +343,54 @@ export function useChatSocket() {
         pushError(event.message as string)
       }
 
+      // thinking_start/answer_start (и их пары _end) вынесены из свитча
+      // ниже по той же причине, что mid_turn_injected/error выше, но с
+      // более серьёзными последствиями, чем задвоенный тост — ЖИВОЙ БАГ,
+      // найденный на этом самом коде: React 18 StrictMode в dev вызывает
+      // функцию-апдейтер setEntries ДВАЖДЫ и коммитит результат ПЕРВОГО
+      // вызова (второй — только для проверки чистоты), но `nextId()`
+      // ВНУТРИ апдейтера вызывался бы на каждый из двух вызовов заново —
+      // ref (pendingTextRef/pendingThinkingRef) в итоге запоминал id со
+      // ВТОРОГО вызова, а закоммиченный item уходил с id из ПЕРВОГО.
+      // Дальнейшие answer_chunk/thinking_chunk искали элемент по id из
+      // ref'а и НЕ НАХОДИЛИ его в массиве (там лежал другой id) — текст
+      // никогда не записывался, ответ оставался пустым до конца хода.
+      // Вынос наружу гарантирует, что id вычисляется РОВНО ОДИН РАЗ за
+      // реальное событие, и апдейтер, сколько бы раз его ни вызвали,
+      // получает уже готовый id, а не генерирует свой при каждом вызове.
+      if (event.type === 'thinking_start') {
+        const id = nextId()
+        pendingThinkingRef.current = id
+        setEntries((prev) => mapTurnItem(prev, turnId, (t) => pushItem(t, { kind: 'thinking', id, text: '', open: true })))
+        return
+      }
+      if (event.type === 'thinking_end') {
+        const id = pendingThinkingRef.current
+        pendingThinkingRef.current = null
+        if (id) {
+          setEntries((prev) =>
+            mapTurnItem(prev, turnId, (t) => updateItem(t, id, (i) => (i.kind === 'thinking' ? { ...i, open: false } : i))),
+          )
+        }
+        return
+      }
+      if (event.type === 'answer_start') {
+        const id = nextId()
+        pendingTextRef.current = id
+        setEntries((prev) => mapTurnItem(prev, turnId, (t) => pushItem(t, { kind: 'text', id, text: '', open: true })))
+        return
+      }
+      if (event.type === 'answer_end') {
+        const id = pendingTextRef.current
+        pendingTextRef.current = null
+        if (id) {
+          setEntries((prev) =>
+            mapTurnItem(prev, turnId, (t) => updateItem(t, id, (i) => (i.kind === 'text' ? { ...i, open: false } : i))),
+          )
+        }
+        return
+      }
+
       setEntries((prev) => {
         switch (event.type) {
           case 'stage_changed':
@@ -350,11 +398,6 @@ export function useChatSocket() {
               pushItem(t, { kind: 'stage', id: nextId(), stage: event.stage as string }),
             )
 
-          case 'thinking_start': {
-            const id = nextId()
-            pendingThinkingRef.current = id
-            return mapTurnItem(prev, turnId, (t) => pushItem(t, { kind: 'thinking', id, text: '', open: true }))
-          }
           case 'thinking_chunk': {
             const id = pendingThinkingRef.current
             if (!id) return prev
@@ -362,32 +405,13 @@ export function useChatSocket() {
               updateItem(t, id, (i) => (i.kind === 'thinking' ? { ...i, text: i.text + (event.text as string) } : i)),
             )
           }
-          case 'thinking_end': {
-            const id = pendingThinkingRef.current
-            pendingThinkingRef.current = null
-            if (!id) return prev
-            return mapTurnItem(prev, turnId, (t) =>
-              updateItem(t, id, (i) => (i.kind === 'thinking' ? { ...i, open: false } : i)),
-            )
-          }
 
-          case 'answer_start': {
-            const id = nextId()
-            pendingTextRef.current = id
-            return mapTurnItem(prev, turnId, (t) => pushItem(t, { kind: 'text', id, text: '', open: true }))
-          }
           case 'answer_chunk': {
             const id = pendingTextRef.current
             if (!id) return prev
             return mapTurnItem(prev, turnId, (t) =>
               updateItem(t, id, (i) => (i.kind === 'text' ? { ...i, text: i.text + (event.text as string) } : i)),
             )
-          }
-          case 'answer_end': {
-            const id = pendingTextRef.current
-            pendingTextRef.current = null
-            if (!id) return prev
-            return mapTurnItem(prev, turnId, (t) => updateItem(t, id, (i) => (i.kind === 'text' ? { ...i, open: false } : i)))
           }
 
           case 'tool_start': {
