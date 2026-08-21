@@ -1,1 +1,1 @@
-export { request, postJson, del } from './client'
+export { request, postJson, del, requestForm } from './client'

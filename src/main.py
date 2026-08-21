@@ -23,12 +23,13 @@ the socket mid-turn otherwise.
 import asyncio
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -37,6 +38,7 @@ from rich.text import Text
 import settings as app_settings  # noqa: E402
 import usage as usage_mod  # noqa: E402
 import memory_admin  # noqa: E402
+from ui import audio as ui_audio  # noqa: E402
 import clean as clean_mod  # noqa: E402
 from doctor import run_doctor  # noqa: E402
 from update import run_update  # noqa: E402
@@ -44,10 +46,17 @@ from episodic import EpisodicWriter  # noqa: E402
 from mcp_agent import plugins  # noqa: E402
 from mcp_agent.agent import stream_chat as main_stream_chat  # noqa: E402
 from mcp_agent.pipeline import stream_chat as pipeline_stream_chat  # noqa: E402
+from mcp_agent import prompts  # noqa: E402
 from rag.index_code import reindex_code_from_disk  # noqa: E402
 from tools.confirm import connect_app as connect_confirm_app, _reset_session  # noqa: E402
 from web.bridge import WebBridge  # noqa: E402
 from web.sessions_store import get_session, list_sessions, next_seq  # noqa: E402
+
+# Переключает mcp_agent/prompts.py's math_notation_rule на LaTeX-инструкцию —
+# см. её докстринг: терминал не умеет рендерить формулы, web_morda умеет
+# (KaTeX), поэтому один и тот же system-промпт зависит от того, кто сейчас
+# ведёт процесс.
+prompts.set_web_mode(True)
 
 app = FastAPI(title="Flowio AI")
 
@@ -196,6 +205,46 @@ class ReindexBody(BaseModel):
 @router.post("/reindex")
 async def reindex_endpoint(body: ReindexBody):
     return await reindex_code_from_disk(os.getcwd(), targets=body.targets)
+
+
+@router.get("/models")
+async def models_endpoint():
+    """Installed Ollama models — same source /doctor uses (`ollama list`
+    via the ollama package's AsyncClient), for the /settings model
+    selector's <select> options."""
+    import ollama
+    host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    try:
+        resp = await ollama.AsyncClient(host=host).list()
+        return {"models": [m.model for m in resp.models]}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+@router.post("/transcribe")
+async def transcribe_endpoint(audio: UploadFile = File(...)):
+    """Speech-to-text for the mic button — reuses ui/audio.py's transcribe()
+    (faster-whisper), the same STT the CLI's voice mode uses; only the
+    RECORDING side there is WSL/Windows-specific (powershell.exe + MCI),
+    transcribe() itself just takes a path and is portable. The browser does
+    the actual recording (MediaRecorder) and uploads the resulting blob
+    here instead of flowai capturing the mic itself.
+
+    transcribe() is a blocking, CPU-bound faster-whisper call — run via
+    asyncio.to_thread, not awaited directly, or it would stall the event
+    loop (same class of bug as expert_streaming.ensure_running, see
+    docs/web-ui.md) for the whole transcription, blocking every other
+    request/websocket on this process meanwhile."""
+    suffix = Path(audio.filename or "").suffix or ".webm"
+    data = await audio.read()
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        text = await asyncio.to_thread(ui_audio.transcribe, tmp_path)
+    finally:
+        os.unlink(tmp_path)
+    return {"text": text}
 
 
 @router.get("/settings")

@@ -1,0 +1,30 @@
+.mic-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.mic-btn:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.mic-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.mic-btn.recording {
+  color: var(--danger);
+  animation: mic-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--danger-soft); }
+  50% { box-shadow: 0 0 0 6px var(--danger-soft); }
+}

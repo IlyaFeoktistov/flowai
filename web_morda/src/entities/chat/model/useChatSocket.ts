@@ -44,12 +44,20 @@ export function useChatSocket() {
   const [status, setStatus] = useState<ConnectionStatus>('idle')
   const [isStreaming, setIsStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [queuedCount, setQueuedCount] = useState(0)
 
   const wsRef = useRef<WebSocket | null>(null)
   const currentTurnIdRef = useRef<string | null>(null)
   const pendingTextRef = useRef<string | null>(null)
   const pendingThinkingRef = useRef<string | null>(null)
   const pendingSendRef = useRef<string | null>(null)
+  // Сообщения, отправленные, пока уже идёт ход — сервер держит только один
+  // ход одновременно (_turn_lock в main.py), но инпут в UI НЕ блокируется:
+  // копятся здесь и уходят по одному, как только приходит turn_complete
+  // (см. startTurnRef ниже — вызывается из handleEvent, не из чистого
+  // reducer'а setEntries, иначе StrictMode задвоил бы отправку).
+  const pendingQueueRef = useRef<string[]>([])
+  const startTurnRef = useRef<(text: string) => void>(() => {})
 
   const closeSocket = useCallback(() => {
     wsRef.current?.close()
@@ -208,6 +216,16 @@ export function useChatSocket() {
             return prev
         }
       })
+
+      // Внимание: НЕ внутри setEntries(prev => ...) выше — тот updater
+      // React StrictMode вызывает дважды в dev, чтобы поймать нечистые
+      // редьюсеры; ws.send() там задвоил бы отправку следующего сообщения
+      // из очереди. handleEvent сама по себе так не вызывается.
+      if (event.type === 'turn_complete') {
+        const next = pendingQueueRef.current.shift()
+        setQueuedCount(pendingQueueRef.current.length)
+        if (next) startTurnRef.current(next)
+      }
     }
 
     function sendRaw(text: string) {
@@ -215,25 +233,43 @@ export function useChatSocket() {
     }
   }, [closeSocket])
 
-  const sendMessage = useCallback(
+  const startTurn = useCallback(
     (text: string) => {
-      const trimmed = text.trim()
-      if (!trimmed || isStreaming) return
-
       const turnId = nextId()
       currentTurnIdRef.current = turnId
       setIsStreaming(true)
-      setEntries((prev) => [...prev, { kind: 'turn', id: turnId, userText: trimmed, items: [], complete: false }])
+      setEntries((prev) => [...prev, { kind: 'turn', id: turnId, userText: text, items: [], complete: false }])
 
       const ws = wsRef.current
       if (!ws || ws.readyState !== WebSocket.OPEN) {
-        pendingSendRef.current = trimmed
+        pendingSendRef.current = text
         connect(sessionId)
         return
       }
-      ws.send(JSON.stringify({ type: 'user_message', text: trimmed }))
+      ws.send(JSON.stringify({ type: 'user_message', text }))
     },
-    [connect, isStreaming, sessionId],
+    [connect, sessionId],
+  )
+
+  useEffect(() => {
+    startTurnRef.current = startTurn
+  }, [startTurn])
+
+  // Инпут никогда не блокируется — сообщение, отправленное, пока уже идёт
+  // ход, просто встаёт в очередь (pendingQueueRef) и уйдёт само, как только
+  // придёт turn_complete текущего хода.
+  const sendMessage = useCallback(
+    (text: string) => {
+      const trimmed = text.trim()
+      if (!trimmed) return
+      if (currentTurnIdRef.current) {
+        pendingQueueRef.current.push(trimmed)
+        setQueuedCount(pendingQueueRef.current.length)
+        return
+      }
+      startTurn(trimmed)
+    },
+    [startTurn],
   )
 
   const respondPermission = useCallback((id: string, answer: 'y' | 'a' | 'n') => {
@@ -259,6 +295,8 @@ export function useChatSocket() {
     currentTurnIdRef.current = null
     pendingTextRef.current = null
     pendingThinkingRef.current = null
+    pendingQueueRef.current = []
+    setQueuedCount(0)
     setEntries([])
     setSessionId(null)
     setIsStreaming(false)
@@ -269,6 +307,8 @@ export function useChatSocket() {
     async (id: string) => {
       closeSocket()
       currentTurnIdRef.current = null
+      pendingQueueRef.current = []
+      setQueuedCount(0)
       setIsStreaming(false)
       const history = await getSession(id)
       setEntries(history.map((m) => ({ kind: 'message', id: nextId(), role: m.role, content: m.content })))
@@ -281,7 +321,19 @@ export function useChatSocket() {
   useEffect(() => closeSocket, [closeSocket])
 
   return useMemo(
-    () => ({ entries, sessionId, status, isStreaming, error, sendMessage, respondPermission, respondAskUser, startNewChat, openSession }),
-    [entries, sessionId, status, isStreaming, error, sendMessage, respondPermission, respondAskUser, startNewChat, openSession],
+    () => ({
+      entries,
+      sessionId,
+      status,
+      isStreaming,
+      queuedCount,
+      error,
+      sendMessage,
+      respondPermission,
+      respondAskUser,
+      startNewChat,
+      openSession,
+    }),
+    [entries, sessionId, status, isStreaming, queuedCount, error, sendMessage, respondPermission, respondAskUser, startNewChat, openSession],
   )
 }

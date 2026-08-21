@@ -34,14 +34,18 @@ make run_web   # из корня репозитория
 ```
 app/        — точка сборки: App.tsx (композиция), styles/global.css (токены/reset), App.css
 widgets/    — sidebar (сайдбар целиком), chat-panel (лента + TurnView)
-features/   — send-message, pick-folder, view-doctor, check-updates,
-              clean-storage, view-usage, manage-memory, view-plugins,
-              edit-settings — один слайс = одно самостоятельное действие
-              пользователя, каждый со своим ui/ (+ api/, если ходит в сеть)
+features/   — send-message, pick-folder, attach-file, record-voice,
+              view-doctor, check-updates, clean-storage, view-usage,
+              manage-memory, view-plugins, edit-settings — один слайс =
+              одно самостоятельное действие пользователя, каждый со
+              своим ui/ (+ api/, если ходит в сеть; record-voice ещё и
+              model/ — useVoiceRecorder держит состояние записи)
 entities/   — chat (типы хода/сообщений + useChatSocket), session (список
               сессий), project (текущая папка) — доменные модели + их API
-shared/     — ui (Icons, Modal, kit.css — общие .btn/.code-block/...),
-              api (client.ts — общий fetch-хелпер), lib (markdown.tsx)
+shared/     — ui (Icons, Modal, kit.css — общие .btn/.code-block/
+              .table-scroll/.math-block/...), api (client.ts — общий
+              fetch-хелпер, request/postJson/del + requestForm для
+              multipart), lib (markdown.tsx — таблицы/код/LaTeX через KaTeX)
 ```
 
 Импорты: `@/...` (алиас на `src/`, настроен и в `tsconfig.app.json`, и в
@@ -83,6 +87,8 @@ event loop) или просто медленная генерация на сл�
 | `GET /api/v1/plugins` | = `/plugin` |
 | `POST /api/v1/reindex` `{targets?}` | = `/reindex` |
 | `GET/POST /api/v1/settings` | сырой dict `settings._state` — без /settings-меню, просто key/value |
+| `GET /api/v1/models` | установленные Ollama-модели (`ollama list`) — для `<select>` в настройках (`chat_model`/`vision_model`/`voice_chat_model`) |
+| `POST /api/v1/transcribe` | multipart audio → `{text}`, STT через `ui/audio.py:transcribe` (faster-whisper) — см. "Голосовой ввод" ниже |
 
 Rich-разметка (`[bold]`/`[green]`/`[/]`) из `doctor.py`/`update.py`/
 `clean.py`/`plugins.py` (эти модули пишутся для терминала) вырезается на
@@ -163,3 +169,51 @@ tool-calls/промежуточные стадии пайплайна) видн�
 повторном открытии старой сессии из списка слева видны только финальные
 реплики, без вложенной трассировки. Это ограничение источника данных, не
 временное упрощение фронтенда.
+
+## Инпут никогда не блокируется — сообщения уходят по очереди
+
+Сервер по-прежнему ведёт только один ход одновременно (см. выше), но UI
+не заставляет пользователя ждать: `entities/chat/model/useChatSocket.ts`
+кладёт сообщение, отправленное во время уже идущего хода, в очередь
+(`pendingQueueRef`) и отправляет его само, как только приходит
+`turn_complete` текущего. Отправка следующего сообщения устроена так,
+чтобы НЕ происходить внутри `setEntries(prev => ...)` — React StrictMode
+в dev вызывает такие updater-функции дважды, чтобы ловить нечистые
+редьюсеры, и `ws.send()` там задвоил бы отправку.
+
+## Математика — LaTeX только в вебе
+
+`mcp_agent/prompts.py`'s `math_notation_rule()` — единственная разница
+между промптом для терминала и для веба: терминал не умеет рендерить
+LaTeX, поэтому там инструкция обратная ("никогда не пиши LaTeX, пиши
+Unicode/plain text"). `main.py` дёргает `prompts.set_web_mode(True)` один
+раз при импорте (глобальный флаг на процесс, тот же принцип, что и
+`tools/confirm.py`'s `connect_app` — "кто сейчас ведёт процесс"), и
+промпт вместо этого просит `\(...\)` (инлайн) / `\[...\]` (блок) —
+`shared/lib/markdown.tsx` рендерит оба варианта (и `$$...$$` тоже, на
+случай если модель всё равно собьётся на него) через KaTeX
+(`katex.renderToString`, `dangerouslySetInnerHTML` — это доверенный HTML
+самого katex, не пользовательский ввод).
+
+## Голосовой ввод — запись в браузере, распознавание на бэкенде
+
+Кнопка микрофона (`features/record-voice`) — не фиксированная длина, а
+toggle: клик стартует `MediaRecorder` прямо в браузере, повторный клик
+останавливает и грузит получившийся blob на `POST /api/v1/transcribe`.
+Само распознавание — `ui/audio.py:transcribe()` (faster-whisper), тот же
+код, что и голосовой режим CLI; ЗАПИСЬ звука в `ui/audio.py`
+WSL/Windows-специфична (powershell.exe + MCI, см. её собственный
+докстринг), но `transcribe()` — нет, ей всё равно, откуда взялся файл.
+`transcribe()` — блокирующий CPU-bound вызов, поэтому эндпоинт гонит его
+через `asyncio.to_thread`, а не напрямую `await` — иначе одна
+транскрипция вставала бы поперёк event loop'а и блокировала вообще все
+остальные запросы/вебсокеты на процессе (тот же класс проблемы, что и
+`expert_streaming.ensure_running`, см. выше).
+
+## Прикрепление файла
+
+Кнопка-скрепка (`features/attach-file`) читает выбранный файл через
+`File.text()` и вставляет его содержимое прямо в текст сообщения тем же
+форматом, что `ui/at_mentions.py`'s `@путь` — `"\n--- имя ---\n<содержимое>\n---"`
+— так что для модели неважно, каким путём текст файла попал в
+сообщение.

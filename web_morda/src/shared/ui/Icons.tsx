@@ -40,3 +40,16 @@ export const IconThinking = () => (
     <path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.4.3.6.8.6 1.3V16h6v-.9c0-.5.2-1 .6-1.3A6 6 0 0 0 12 3Z" />
   </svg>
 )
+
+export const IconMic = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="2" width="6" height="12" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0M12 18v4M8 22h8" />
+  </svg>
+)
+
+export const IconPaperclip = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 11.5 12.4 20a4.5 4.5 0 0 1-6.4-6.4l8.6-8.5a3 3 0 0 1 4.2 4.2l-8.6 8.5a1.5 1.5 0 0 1-2.1-2.1l7.9-7.8" />
+  </svg>
+)
