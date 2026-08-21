@@ -9,14 +9,15 @@ function shortenPath(path: string, home: string): string {
   return path
 }
 
+// Дата + время ВСЕГДА, не только для сессий не сегодняшнего дня — раньше
+// "сегодняшняя" сессия показывала голое время без даты, и через день
+// нельзя было понять, когда она реально была, не открывая её.
 function timeLabel(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
-  const now = new Date()
-  const sameDay = d.toDateString() === now.toDateString()
-  return sameDay
-    ? d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
-    : d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })
+  const date = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })
+  const time = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
+  return `${date} ${time}`
 }
 
 export function Sidebar({
