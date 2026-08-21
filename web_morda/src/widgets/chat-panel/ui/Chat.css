@@ -108,6 +108,23 @@
   background: var(--bg-elevated);
 }
 
+.turn-delegate {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Без этого <li> внутри списка шли сплошным слепком — ни отступа между
+   карточками, ни отступа от самой карточки delegate над ними. */
+.delegate-children {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .turn-thinking summary,
 .turn-tool summary {
   display: flex;
