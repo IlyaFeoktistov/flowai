@@ -83,7 +83,7 @@ from mcp_agent.debug_log import log_event  # noqa: E402
 from mcp_agent.delegate_tool import current_on_event as _delegate_on_event  # noqa: E402
 from mcp_agent.delegate_tool import _suppress_during_subagent_tools  # noqa: E402
 from mcp_agent.knowledge import format_knowledge, load_knowledge, maybe_auto_capture  # noqa: E402
-from mcp_agent.message_utils import _calls_by_id, _to_lc_messages, _tool_artifact_diff, _tool_text  # noqa: E402
+from mcp_agent.message_utils import _calls_by_id, _to_lc_messages, _tool_artifact_diagnostics, _tool_artifact_diff, _tool_text  # noqa: E402
 from mcp_agent.model_config import DEBUG, MAX_ATTEMPTS, RECURSION_LIMIT, TOOL_OUTPUT_CHAR_CAP  # noqa: E402
 from mcp_agent.self_heal import _LEAK_MARKER_START_RE, _LEAK_TAIL_MARGIN, _written_paths  # noqa: E402
 from mcp_agent.snapshots import _revert_turn_paths, clear_session_file_snapshots  # noqa: E402,F401 (re-exported for cli.py/run_cli.py)
@@ -348,9 +348,12 @@ async def _stream_round(
                             # model, ui/stream.py uses it to still render
                             # the real diff for the human.
                             diff = _tool_artifact_diff(getattr(m, "artifact", None))
+                            diagnostics = _tool_artifact_diagnostics(getattr(m, "artifact", None))
                             event = {"type": "tool_end", "name": m.name, "result": result_text[:TOOL_OUTPUT_CHAR_CAP], "id": m.tool_call_id}
                             if diff is not None:
                                 event["diff"] = diff
+                            if diagnostics is not None:
+                                event["diagnostics"] = diagnostics
                             await on_event(event)
                 emitted = len(msgs)
 

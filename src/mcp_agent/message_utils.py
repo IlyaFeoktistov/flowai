@@ -131,6 +131,20 @@ def _tool_artifact_diff(artifact: Any) -> str | None:
     return None
 
 
+def _tool_artifact_diagnostics(artifact: Any) -> list | None:
+    """Same carrier as _tool_artifact_diff, for the "diagnostics" key
+    write_file/edit_file (file_ops_server.py) add to structuredContent when
+    the edit introduced new LSP diagnostics — UI-only, never fed to the
+    model (it already saw a text summary of the same list in its own
+    tool-result text, see file_ops_server.py's _diagnostics_summary)."""
+    structured = getattr(artifact, "structured_content", None)
+    if isinstance(structured, dict):
+        diagnostics = structured.get("diagnostics")
+        if isinstance(diagnostics, list):
+            return diagnostics
+    return None
+
+
 def _dedupe_identical_tool_results(messages: list) -> list:
     """Между несколькими раундами тул-коллинга ВНУТРИ ОДНОГО хода (create_agent
     зовёт модель заново на каждый раунд, таща за собой всю историю) иногда

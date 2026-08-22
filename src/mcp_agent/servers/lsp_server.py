@@ -15,56 +15,35 @@ grep_search(pattern="def {query}"/"class {query}") — быстро и не тр
 multilspy/pylsp-jsonrpc, но обе рассчитаны на другой сценарий
 использования (embedding в конкретный tool, а не голый JSON-RPC поверх
 stdio под наш MCP-контракт). Reinvent здесь минимальный: framing
-(Content-Length) + request/response по id + одна notification
-(didOpen/didClose) — самодостаточно и не тянет лишних зависимостей.
+(Content-Length) + request/response по id + notifications
+(didOpen/didChange/publishDiagnostics) — самодостаточно и не тянет лишних
+зависимостей.
 
-Языковой сервер должен быть установлен и замаплен по расширению файла (см.
-_server_command). На старте это:
-  .py                → pylsp (python-lsp-server, requirements.txt)
-  .go                → gopls (go install, уже стоит в системе)
-  .ts/.tsx/.js/.jsx  → typescript-language-server --stdio (npm -g,
-                       tsserver умеет и TS, и JS одним процессом — отдельного
-                       JS-сервера не заводим, конфликтовать нечему)
-  .php               → phpactor language-server (composer global require
-                       phpactor/phpactor — не intelephense: у intelephense
-                       findReferences/rename заперты за платной лицензией,
-                       phpactor полностью открытый и бесплатный)
+Сама клиентская машинерия (LSPClient, запуск/маппинг серверов по
+расширению, поднятие/переиспользование по (команда, корень репозитория))
+живёт в _lsp_client.py — общий модуль, который использует ещё и
+file_ops_server.py (диагностика после write_file/edit_file). Этот файл —
+только форматирование под навигационные операции (goToDefinition/
+findReferences/hover/...); за то, какие языковые сервера установлены и
+почему, см. докстринг _lsp_client.py.
+
 Для незамапленного расширения или отсутствующего бинарника тул возвращает
 ошибку, а не падает молча — то же поведение, что у настоящего LSP-тула.
-
-Один языковой сервер на (команда, корень репозитория) поднимается лениво
-при первом обращении и живёт до конца процесса — переинициализация
-(indexing) стоит секунды, гонять её на каждый вызов нельзя.
 
 Запуск: python3 -m mcp_agent.servers.lsp_server
 """
 import asyncio
-import atexit
-import itertools
-import json
 import os
-import shutil
 import sys
-import urllib.parse
 
-from mcp.server.fastmcp import FastMCP
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _PROJECT_ROOT)
+
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+from mcp_agent.servers._lsp_client import _get_client, _path_from_uri  # noqa: E402
 
 mcp = FastMCP("lsp")
-
-_INIT_TIMEOUT = 20
-_REQUEST_TIMEOUT = 15
-
-_LANGUAGE_IDS = {
-    ".py": "python",
-    ".go": "go",
-    ".ts": "typescript",
-    ".tsx": "typescriptreact",
-    ".js": "javascript",
-    ".jsx": "javascriptreact",
-    ".php": "php",
-}
-
-_COMPOSER_GLOBAL_BIN = os.path.expanduser("~/.config/composer/vendor/bin")
 
 _OPS = (
     "goToDefinition", "findReferences", "hover", "documentSymbol",
@@ -89,227 +68,6 @@ def _supports(capabilities: dict, operation: str) -> bool:
     key = _OP_CAPABILITY[operation]
     value = capabilities.get(key)
     return value is not None and value is not False
-
-_child_procs: list[asyncio.subprocess.Process] = []
-
-
-@atexit.register
-def _cleanup_children():
-    # Точечный terminate() по каждому известному процессу, а не killpg —
-    # тот же принцип, что и в bash_server.py: осиротевший процесс —
-    # меньшая беда, чем случайно затронуть что-то за пределами этого
-    # дерева. atexit синхронный, await здесь невозможен — best-effort.
-    for proc in _child_procs:
-        if proc.returncode is None:
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-
-
-def _pylsp_path() -> str | None:
-    path = os.path.join(os.path.dirname(sys.executable), "pylsp")
-    return path if os.path.exists(path) else None
-
-
-def _phpactor_path() -> str | None:
-    found = shutil.which("phpactor")
-    if found:
-        return found
-    local = os.path.join(_COMPOSER_GLOBAL_BIN, "phpactor")
-    return local if os.path.exists(local) else None
-
-
-def _server_command(ext: str) -> list[str] | None:
-    if ext == ".py":
-        pylsp = _pylsp_path()
-        return [pylsp] if pylsp else None
-    if ext == ".go":
-        gopls = shutil.which("gopls")
-        return [gopls] if gopls else None
-    if ext in (".ts", ".tsx", ".js", ".jsx"):
-        tsserver = shutil.which("typescript-language-server")
-        return [tsserver, "--stdio"] if tsserver else None
-    if ext == ".php":
-        phpactor = _phpactor_path()
-        return [phpactor, "language-server"] if phpactor else None
-    return None
-
-
-def _uri(path: str) -> str:
-    return "file://" + urllib.parse.quote(os.path.abspath(path))
-
-
-def _path_from_uri(uri: str) -> str:
-    return urllib.parse.unquote(uri[len("file://"):]) if uri.startswith("file://") else uri
-
-
-def _find_root(path: str) -> str:
-    cur = os.path.dirname(os.path.abspath(path)) or "."
-    start = cur
-    while True:
-        if os.path.isdir(os.path.join(cur, ".git")):
-            return cur
-        parent = os.path.dirname(cur)
-        if parent == cur:
-            return start
-        cur = parent
-
-
-class LSPClient:
-    def __init__(self, cmd: list[str], root: str):
-        self.cmd = cmd
-        self.root = root
-        self.proc: asyncio.subprocess.Process | None = None
-        self._id_counter = itertools.count(1)
-        self._pending: dict[int, asyncio.Future] = {}
-        self._opened: dict[str, int] = {}  # uri -> hash(content)
-        self._call_lock = asyncio.Lock()
-        self.server_capabilities: dict = {}
-
-    async def start(self):
-        self.proc = await asyncio.create_subprocess_exec(
-            *self.cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        _child_procs.append(self.proc)
-        asyncio.create_task(self._read_loop())
-        result = await self._request("initialize", {
-            "processId": os.getpid(),
-            "rootUri": _uri(self.root),
-            "capabilities": {
-                "textDocument": {
-                    "hover": {"contentFormat": ["plaintext", "markdown"]},
-                    "definition": {},
-                    "references": {},
-                    "implementation": {},
-                    "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
-                    "callHierarchy": {},
-                },
-                "workspace": {"symbol": {}},
-            },
-        }, timeout=_INIT_TIMEOUT)
-        # Заявленные capabilities реально отличаются по серверам (живой
-        # прогон: pylsp вообще не умеет workspace/symbol и callHierarchy —
-        # запрос падает "Method Not Found" вместо пустого результата, а
-        # phpactor репортит documentSymbolProvider как [] вместо true/объекта
-        # при том, что метод у него РАБОТАЕТ). Сохраняем как есть, проверка
-        # на поддержку — по ключу "объявлено вообще, не None/False", не по
-        # truthiness значения, см. _supports().
-        self.server_capabilities = (result or {}).get("capabilities", {})
-        self._notify("initialized", {})
-
-    async def _read_loop(self):
-        reader = self.proc.stdout
-        try:
-            while True:
-                headers = {}
-                while True:
-                    line = await reader.readline()
-                    if not line or line in (b"\r\n", b"\n"):
-                        break
-                    key, _, value = line.decode("ascii", errors="replace").partition(":")
-                    headers[key.strip().lower()] = value.strip()
-                if not line:
-                    break
-                length = int(headers.get("content-length", 0) or 0)
-                if length <= 0:
-                    continue
-                body = await reader.readexactly(length)
-                try:
-                    msg = json.loads(body)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(msg.get("id"), int) and ("result" in msg or "error" in msg):
-                    fut = self._pending.pop(msg["id"], None)
-                    if fut and not fut.done():
-                        fut.set_result(msg)
-                # Notifications (diagnostics, log messages, window/showMessage
-                # и т.п.) нам не нужны — тул только читает, не подписывается
-                # на изменения состояния.
-        except (asyncio.IncompleteReadError, ValueError, ConnectionResetError):
-            pass
-        finally:
-            for fut in self._pending.values():
-                if not fut.done():
-                    fut.set_exception(RuntimeError("language server exited"))
-
-    def _write(self, payload: dict):
-        data = json.dumps(payload).encode("utf-8")
-        header = f"Content-Length: {len(data)}\r\n\r\n".encode("ascii")
-        self.proc.stdin.write(header + data)
-
-    def _notify(self, method: str, params: dict):
-        self._write({"jsonrpc": "2.0", "method": method, "params": params})
-
-    async def _request(self, method: str, params: dict, timeout: float = _REQUEST_TIMEOUT):
-        msg_id = next(self._id_counter)
-        fut = asyncio.get_event_loop().create_future()
-        self._pending[msg_id] = fut
-        self._write({"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params})
-        await self.proc.stdin.drain()
-        try:
-            msg = await asyncio.wait_for(fut, timeout=timeout)
-        finally:
-            self._pending.pop(msg_id, None)
-        if "error" in msg:
-            raise RuntimeError(msg["error"].get("message", str(msg["error"])))
-        return msg.get("result")
-
-    async def request(self, method: str, params: dict, timeout: float = _REQUEST_TIMEOUT):
-        # Один in-flight запрос за раз на сервер — упрощает жизнь придирчивым
-        # реализациям (pylsp последовательно обрабатывает stdin), нагрузка
-        # здесь не настолько высокая, чтобы это было узким местом.
-        async with self._call_lock:
-            return await self._request(method, params, timeout=timeout)
-
-    async def ensure_open(self, path: str) -> str:
-        uri = _uri(path)
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-        digest = hash(text)
-        if self._opened.get(uri) == digest:
-            return uri
-        if uri in self._opened:
-            self._notify("textDocument/didClose", {"textDocument": {"uri": uri}})
-        ext = os.path.splitext(path)[1]
-        self._notify("textDocument/didOpen", {
-            "textDocument": {
-                "uri": uri,
-                "languageId": _LANGUAGE_IDS.get(ext, "plaintext"),
-                "version": 1,
-                "text": text,
-            },
-        })
-        self._opened[uri] = digest
-        return uri
-
-
-_clients: dict[tuple, LSPClient] = {}
-_clients_lock = asyncio.Lock()
-
-
-async def _get_client(path: str) -> LSPClient:
-    ext = os.path.splitext(path)[1]
-    cmd = _server_command(ext)
-    if not cmd:
-        raise RuntimeError(
-            f"No LSP server configured/installed for '{ext or path}' files "
-            "(currently wired up: Python/pylsp, Go/gopls, TS+JS/"
-            "typescript-language-server, PHP/phpactor)"
-        )
-    root = _find_root(path)
-    key = (tuple(cmd), root)
-    async with _clients_lock:
-        client = _clients.get(key)
-        if client is None:
-            client = LSPClient(cmd, root)
-            await client.start()
-            _clients[key] = client
-    return client
-
 
 def _loc_to_str(uri: str, rng: dict) -> str:
     line = rng["start"]["line"] + 1
@@ -417,7 +175,7 @@ async def lsp(operation: str, filePath: str, line: int = 1, character: int = 1, 
 
     try:
         client = await _get_client(filePath)
-        uri = await client.ensure_open(filePath)
+        uri, _ = await client.ensure_open(filePath)
     except Exception as e:
         return f"Error: {e}"
 

@@ -831,9 +831,26 @@ class StreamDisplay:
             # back to `result` for anything that still puts a diff there.
             diff_text = event.get("diff") or result
             diffish = _format_file_edit_result(name, pending_args, diff_text) if name in _FILE_EDIT_TOOL_NAMES and diff_text else None
+            # Same carrier as diff — write_file/edit_file's new-diagnostics
+            # list (file_ops_server.py's LSP-diagnostics-after-edit feature).
+            # Only needed in the `diffish` branch below: there, `result`
+            # (which already has the diagnostics summary appended — see
+            # file_ops_server.py's _text_result) is discarded in favor of
+            # rendering just the diff, so without this the diagnostics would
+            # silently never reach the terminal at all. The plain-`result`
+            # branch doesn't need it — the summary is already part of the
+            # text it renders line-by-line.
+            diag_list = event.get("diagnostics") if name in _FILE_EDIT_TOOL_NAMES else None
+            diag_line = (
+                f"[yellow]     ⚠ Найдено {len(diag_list)} новых диагностических "
+                f"проблем{'ы' if len(diag_list) == 1 else ''} — см. текст результата тула[/]"
+                if diag_list else None
+            )
             if diffish:
                 diff_header, body = diffish
                 lines = [f"[bright_black]     └ {_escape_markup(diff_header)}[/]", *body]
+                if diag_line:
+                    lines.append(diag_line)
                 self._fill_tool_result(fold, trigger_text, lines, start_expanded=True)
             elif result:
                 lines = result.splitlines()

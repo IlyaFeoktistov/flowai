@@ -62,6 +62,7 @@ from mcp.types import CallToolResult, TextContent  # noqa: E402
 
 from storage import connect, data_dir  # noqa: E402
 from utils.parsing import unified_diff_at  # noqa: E402
+from mcp_agent.servers._lsp_client import _get_client  # noqa: E402
 
 mcp = FastMCP("file_ops")
 
@@ -166,22 +167,102 @@ def _require_fresh_read(path: str) -> str | None:
     return None
 
 
-def _text_result(text: str, *, diff: str | None = None) -> CallToolResult:
+def _text_result(
+    text: str,
+    *,
+    diff: str | None = None,
+    diagnostics_text: str | None = None,
+    diagnostics: list | None = None,
+) -> CallToolResult:
     """Success shape for write_file/edit_file: a short confirmation for the
     model (it already knows what it just wrote — echoing the diff back would
     only cost tokens for no new information), with the full diff (if any)
     carried in structuredContent instead. That field doesn't reach the
     model's context at all — langchain-mcp-adapters exposes it as the
     ToolMessage's `artifact` — but the UI (ui/stream.py) reads it from there
-    to still render the real diff for the human."""
+    to still render the real diff for the human.
+
+    diagnostics_text (if given) IS appended to the model-facing text — unlike
+    the diff, new LSP diagnostics are exactly the kind of thing the model
+    needs to see and react to in the same turn (see _diagnostics_summary).
+    diagnostics (the structured list backing that text) rides in
+    structuredContent alongside diff, for the UI to render separately."""
+    if diagnostics_text:
+        text = f"{text}\n\n{diagnostics_text}"
+    structured = {}
+    if diff:
+        structured["diff"] = diff
+    if diagnostics:
+        structured["diagnostics"] = diagnostics
     return CallToolResult(
         content=[TextContent(type="text", text=text)],
-        structuredContent=({"diff": diff} if diff else None),
+        structuredContent=(structured or None),
     )
 
 
 def _text_error(message: str) -> CallToolResult:
     return _text_result(f"Error: {message}")
+
+
+async def _get_lsp_client_quiet(path: str):
+    """Best-effort LSP client for `path`'s extension, or None if none is
+    configured/installed, or it fails to start — the diagnostics-after-edit
+    feature below is purely additive, it must never turn a write/edit that
+    would otherwise succeed into an error."""
+    try:
+        return await _get_client(path)
+    except Exception:
+        return None
+
+
+async def _diagnostics_snapshot(client, path: str) -> list[dict] | None:
+    """None means "unknown" (no client, or the server didn't respond in
+    time) — callers must not treat that as "no issues"."""
+    if client is None:
+        return None
+    try:
+        return await client.diagnostics_for(path)
+    except Exception:
+        return None
+
+
+_SEVERITY_NAMES = {1: "error", 2: "warning", 3: "info", 4: "hint"}
+_MAX_DIAGNOSTIC_LINES = 10
+
+
+def _diag_key(d: dict) -> tuple:
+    start = ((d.get("range") or {}).get("start")) or {}
+    return (start.get("line"), start.get("character"), d.get("severity"), d.get("message"))
+
+
+def _format_diagnostic(path: str, d: dict) -> str:
+    start = ((d.get("range") or {}).get("start")) or {}
+    line = (start.get("line") or 0) + 1
+    char = (start.get("character") or 0) + 1
+    severity = _SEVERITY_NAMES.get(d.get("severity"), "info")
+    source = d.get("source")
+    suffix = f" ({source})" if source else ""
+    return f"{path}:{line}:{char} {severity}: {(d.get('message') or '').strip()}{suffix}"
+
+
+def _diagnostics_summary(path: str, before: list[dict] | None, after: list[dict] | None) -> tuple[str, list] | None:
+    """New diagnostics introduced by this write/edit — after minus before,
+    compared by position+severity+message (see _diag_key; a diagnostic that
+    merely shifted lines from an unrelated change above it can misread as
+    "new" — an inherent limit of positional diffing, not fixed here). None
+    if either side is unknown (can't safely diff) or nothing new showed up."""
+    if before is None or after is None:
+        return None
+    seen_before = {_diag_key(d) for d in before}
+    new_diags = [d for d in after if _diag_key(d) not in seen_before]
+    if not new_diags:
+        return None
+    shown = new_diags[:_MAX_DIAGNOSTIC_LINES]
+    lines = [_format_diagnostic(path, d) for d in shown]
+    if len(new_diags) > len(shown):
+        lines.append(f"... and {len(new_diags) - len(shown)} more")
+    text = f"Found {len(new_diags)} new diagnostic issue(s):\n  " + "\n  ".join(lines)
+    return text, new_diags
 
 
 @mcp.tool()
@@ -257,7 +338,18 @@ async def write_file(path: str, content: str) -> CallToolResult:
     never actually seen. Returns a short confirmation only, not the diff —
     the change is already known to you (you just wrote it) and is shown to
     the user separately. Rejects content over 10MB — for a file that large,
-    this is very likely the wrong tool for the job."""
+    this is very likely the wrong tool for the job.
+
+    If a language server is configured for this file's extension (Python,
+    Go, TypeScript/JavaScript, PHP — see _lsp_client.py), the result also
+    reports any NEW diagnostic issues (errors/warnings) this write
+    introduced, e.g. "Found 1 new diagnostic issue: path.py:12:5 error: ...".
+    That's a REAL error from the project's actual language server, not a
+    guess — treat it the same as a failed test or a compiler error: fix it
+    with edit_file before moving on, don't just note it and continue as if
+    the write succeeded cleanly. Silent if there's nothing new, or no
+    language server is available for this extension — don't rely on its
+    absence to mean the file is clean."""
     path = path.strip()
     if not path:
         return _text_error("path is required")
@@ -279,6 +371,11 @@ async def write_file(path: str, content: str) -> CallToolResult:
         original = None
         is_new = True
 
+    lsp_client = await _get_lsp_client_quiet(path)
+    # A brand-new file has no "before" to diff against — skip that LSP
+    # round-trip entirely, this is the common, latency-sensitive case.
+    before_diags = [] if is_new else await _diagnostics_snapshot(lsp_client, path)
+
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -289,12 +386,22 @@ async def write_file(path: str, content: str) -> CallToolResult:
         return _text_error(str(e))
     _last_read_mtime[path] = os.path.getmtime(path)
 
+    after_diags = await _diagnostics_snapshot(lsp_client, path)
+    diag = _diagnostics_summary(path, before_diags, after_diags)
+    diag_text, diag_list = diag if diag else (None, None)
+
     if is_new:
-        return _text_result(f"Created {path!r} ({len(content.splitlines())} lines).")
+        return _text_result(
+            f"Created {path!r} ({len(content.splitlines())} lines).",
+            diagnostics_text=diag_text, diagnostics=diag_list,
+        )
     diff = unified_diff_at((original or "").splitlines(keepends=True), content.splitlines(keepends=True), path, 1)
     if not diff:
-        return _text_result(f"Wrote {path!r} (content unchanged).")
-    return _text_result(f"Updated {path!r}.", diff=diff)
+        return _text_result(
+            f"Wrote {path!r} (content unchanged).",
+            diagnostics_text=diag_text, diagnostics=diag_list,
+        )
+    return _text_result(f"Updated {path!r}.", diff=diff, diagnostics_text=diag_text, diagnostics=diag_list)
 
 
 @mcp.tool()
@@ -310,7 +417,18 @@ async def edit_file(path: str, old_string: str, new_string: str, replace_all: bo
     it on disk since — refuses otherwise, to avoid blindly editing content
     never actually seen. Returns a short confirmation only, not the diff —
     the change is already known to you (you specified old_string/new_string
-    yourself) and is shown to the user separately."""
+    yourself) and is shown to the user separately.
+
+    If a language server is configured for this file's extension (Python,
+    Go, TypeScript/JavaScript, PHP — see _lsp_client.py), the result also
+    reports any NEW diagnostic issues (errors/warnings) this edit
+    introduced, e.g. "Found 1 new diagnostic issue: path.py:12:5 error: ...".
+    That's a REAL error from the project's actual language server, not a
+    guess — treat it the same as a failed test or a compiler error: fix it
+    with another edit_file call before moving on, don't just note it and
+    continue as if the edit succeeded cleanly. Silent if there's nothing
+    new, or no language server is available for this extension — don't
+    rely on its absence to mean the file is clean."""
     path = path.strip()
     if not path:
         return _text_error("path is required")
@@ -336,6 +454,9 @@ async def edit_file(path: str, old_string: str, new_string: str, replace_all: bo
             "really want every occurrence replaced."
         )
 
+    lsp_client = await _get_lsp_client_quiet(path)
+    before_diags = await _diagnostics_snapshot(lsp_client, path)
+
     updated = original.replace(old_string, new_string) if replace_all else original.replace(old_string, new_string, 1)
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -344,10 +465,14 @@ async def edit_file(path: str, old_string: str, new_string: str, replace_all: bo
         return _text_error(str(e))
     _last_read_mtime[path] = os.path.getmtime(path)
 
+    after_diags = await _diagnostics_snapshot(lsp_client, path)
+    diag = _diagnostics_summary(path, before_diags, after_diags)
+    diag_text, diag_list = diag if diag else (None, None)
+
     diff = unified_diff_at(original.splitlines(keepends=True), updated.splitlines(keepends=True), path, 1)
     replacements = count if replace_all else 1
     msg = f"Edited {path!r} ({replacements} replacement{'s' if replace_all and count != 1 else ''})."
-    return _text_result(msg, diff=diff)
+    return _text_result(msg, diff=diff, diagnostics_text=diag_text, diagnostics=diag_list)
 
 
 def _sh(s: str) -> str:
