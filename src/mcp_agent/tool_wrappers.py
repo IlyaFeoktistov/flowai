@@ -10,6 +10,13 @@
 - _dedupe_read_tool/_invalidate_read_cache_tool/_wrap_read_invalidation —
   дедуп повторных чтений одного файла + инвалидация этого кэша после любой
   мутации, которая могла его устареть.
+- _track_read_mtime_tool/_require_fresh_read_tool — трекинг path->mtime по
+  read_file и отказ write_file/edit_file на путь, который в этой сессии не
+  читался (или изменился на диске с момента чтения) — живёт здесь, а не
+  внутри file_ops_server.py, потому что MultiServerMCPClient поднимает
+  новый подпроцесс на каждый вызов тула (см. докстринг
+  _track_read_mtime_tool), так что состояние внутри самого MCP-сервера не
+  переживает даже соседний вызов.
 - _add_verify_reminder/_add_regex_warning — дописывают напоминание/
   предупреждение прямо в description тула, видимое модели ДО вызова.
 - _bind_constant_args — прячет от модели аргументы, значение которых и так
@@ -28,6 +35,8 @@ _autofill_expected_lines) — новый edit_file адресуется по у�
 old_string, не по номеру строки, дрейф номеров при параллельных правках эту
 проблему не создаёт вообще.
 """
+import os
+
 from langchain_core.tools import BaseTool, StructuredTool
 
 from mcp_agent.message_utils import _content_text
@@ -218,6 +227,83 @@ def _wrap_read_invalidation(tool: BaseTool, read_history: dict) -> BaseTool:
     if tool.name in _WHOLE_CACHE_INVALIDATORS:
         return _invalidate_read_cache_tool(tool, read_history, lambda kw: None)
     return tool
+
+
+def _track_read_mtime_tool(tool: BaseTool, read_mtimes: dict) -> BaseTool:
+    """Records path -> mtime after every real read_file call — the state
+    _require_fresh_read_tool below checks before write_file/edit_file.
+
+    This can't live inside file_ops_server.py itself (where it used to be,
+    as a module-level dict): MultiServerMCPClient starts a brand-new session
+    — a fresh subprocess — for EVERY tool call when none is passed
+    explicitly (see langchain_mcp_adapters/client.py's own
+    MultiServerMCPClient.get_tools docstring: "A new session will be created
+    for each tool call"). A dict living inside that subprocess is empty
+    again before the very next call, so write_file/edit_file's freshness
+    guard was refusing every single write unconditionally, even seconds
+    after a real read_file call — the check has to live here instead, in
+    the main process, where read_mtimes actually survives across calls
+    (created once per repo_path in _build_tools, not cleared per-turn like
+    read_history — a file read several turns ago should still count as
+    read now)."""
+    original_coroutine = tool.coroutine
+    if original_coroutine is None:
+        return tool
+
+    async def _call(**kwargs):
+        content, artifact = await original_coroutine(**kwargs)
+        path = kwargs.get("path")
+        if path and not _content_text(content).strip().lower().startswith("error"):
+            try:
+                read_mtimes[path] = os.path.getmtime(path)
+            except OSError:
+                pass
+        return content, artifact
+
+    return _rewrap_tool(tool, coroutine=_call)
+
+
+def _require_fresh_read_tool(tool: BaseTool, read_mtimes: dict) -> BaseTool:
+    """Refuses write_file/edit_file on a path that exists but hasn't been
+    read via read_file this session (or that changed on disk since), so a
+    write/edit can never blindly clobber content the model never saw. See
+    _track_read_mtime_tool above for why this lives here instead of inside
+    file_ops_server.py."""
+    original_coroutine = tool.coroutine
+    if original_coroutine is None:
+        return tool
+
+    async def _call(**kwargs):
+        path = kwargs.get("path")
+        if path and os.path.exists(path):
+            last = read_mtimes.get(path)
+            if last is None:
+                return (
+                    f"Error: {path!r} exists and hasn't been read yet this "
+                    "session — call read_file on it first so you're not "
+                    "overwriting content you've never actually seen.",
+                    None,
+                )
+            try:
+                current = os.path.getmtime(path)
+            except OSError as e:
+                return (f"Error: {e}", None)
+            if current > last:
+                return (
+                    f"Error: {path!r} has changed on disk since you last read "
+                    "it (another process, a linter, or the user may have "
+                    "modified it) — call read_file again before writing.",
+                    None,
+                )
+        content, artifact = await original_coroutine(**kwargs)
+        if path and not _content_text(content).strip().lower().startswith("error"):
+            try:
+                read_mtimes[path] = os.path.getmtime(path)
+            except OSError:
+                pass
+        return content, artifact
+
+    return _rewrap_tool(tool, coroutine=_call)
 
 
 # Дописывается к description write_file/edit_file, чтобы модель видела

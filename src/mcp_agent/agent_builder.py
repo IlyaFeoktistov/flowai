@@ -277,6 +277,8 @@ from mcp_agent.tool_wrappers import (
     _add_verify_reminder,
     _cap_tool_output,
     _dedupe_read_tool,
+    _require_fresh_read_tool,
+    _track_read_mtime_tool,
     _wrap_read_invalidation,
 )
 
@@ -365,7 +367,15 @@ async def _build_tools(repo_path: str | None = None):
     # read_history — {path: [key, ...]} для read_file, очищается в начале
     # каждого stream_chat (см. там же) и на каждом self-heal retry.
     read_history: dict = {}
+    # read_mtimes — {path: mtime}, живёт весь срок жизни ЭТОГО _build_tools
+    # (т.е. пока не инвалидирован _tools_cache) — в отличие от read_history
+    # НЕ очищается по ходам, см. _track_read_mtime_tool/_require_fresh_read_tool
+    # (tool_wrappers.py) за тем, почему этот трекинг живёт здесь, а не внутри
+    # file_ops_server.py.
+    read_mtimes: dict = {}
+    tools = [_track_read_mtime_tool(t, read_mtimes) if t.name == "read_file" else t for t in tools]
     tools = [_dedupe_read_tool(t, read_history) if t.name == "read_file" else t for t in tools]
+    tools = [_require_fresh_read_tool(t, read_mtimes) if t.name in ("write_file", "edit_file") else t for t in tools]
     tools = [_wrap_read_invalidation(t, read_history) for t in tools]
     tools = [_add_verify_reminder(t) if t.name in ("write_file", "edit_file") else t for t in tools]
     tools = [_add_regex_warning(t) if t.name == "grep_search" else t for t in tools]

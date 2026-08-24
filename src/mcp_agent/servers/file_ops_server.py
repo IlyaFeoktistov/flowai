@@ -25,9 +25,14 @@ path) закрывает браузинг структуры проекта, wri
     (CallToolResult), откуда его берёт исключительно ui/stream.py для
     рендера человеку; модель получает одну строку-подтверждение.
   - write_file/edit_file требуют свежего read_file по этому пути перед
-    записью (_require_fresh_read, _last_read_mtime) — отказ, если путь
-    вообще не читался в этой сессии или изменился на диске с момента
-    чтения, чтобы не перезаписать вслепую то, чего модель не видела.
+    записью — отказ, если путь вообще не читался в этой сессии или
+    изменился на диске с момента чтения, чтобы не перезаписать вслепую то,
+    чего модель не видела. Сама проверка (read_mtimes) живёт СНАРУЖИ, в
+    mcp_agent/tool_wrappers.py (_track_read_mtime_tool/
+    _require_fresh_read_tool), а не здесь: MultiServerMCPClient поднимает
+    новый подпроцесс на каждый вызов тула, так что module-level dict внутри
+    ЭТОГО процесса не пережил бы даже соседний вызов — состояние обязано
+    жить в основном процессе.
   - read_file/write_file/edit_file держат бинарный/размерный гард ПРЯМО
     внутри тула (NUL-байт в первых 8KB, 10MB потолок) — раньше это было
     внешней обёрткой в tool_wrappers.py, потому что чтение шло через
@@ -121,50 +126,6 @@ def _is_binary_file(path: str) -> bool:
     except OSError:
         return False
     return b"\x00" in chunk
-
-
-# path (as passed by the model, unnormalized — matches how read_file/write_file/
-# edit_file already key everything else in this module) -> mtime at the moment
-# read_file last successfully looked at it. Lives for this subprocess's whole
-# lifetime (same pattern as rag_server.py's own mtime caches), not reset per
-# turn — a file read several turns ago should still count as "read" now,
-# same as a human editor doesn't forget a file it opened earlier.
-#
-# Used by write_file/edit_file (see _require_fresh_read below) to refuse
-# touching a path the model hasn't actually looked at, or that changed on
-# disk since it did — so a write/edit can never blindly clobber content
-# the model never saw.
-_last_read_mtime: dict[str, float] = {}
-
-
-def _require_fresh_read(path: str) -> str | None:
-    """Guard shared by write_file/edit_file. Returns a bare error message
-    (no "Error: " prefix — callers pass it through _text_error, which adds
-    that) if the write should be refused, None if it's clear to proceed. A
-    path that doesn't exist yet is always fine (nothing to have read) —
-    this only guards against blindly overwriting/editing content never
-    seen, or seen before it changed underneath the model (another process,
-    a linter, the user)."""
-    if not os.path.exists(path):
-        return None
-    last = _last_read_mtime.get(path)
-    if last is None:
-        return (
-            f"{path!r} exists and hasn't been read yet this session — "
-            "call read_file on it first so you're not overwriting content "
-            "you've never actually seen."
-        )
-    try:
-        current = os.path.getmtime(path)
-    except OSError as e:
-        return str(e)
-    if current > last:
-        return (
-            f"{path!r} has changed on disk since you last read it "
-            "(another process, a linter, or the user may have modified it) "
-            "— call read_file again before writing."
-        )
-    return None
 
 
 def _text_result(
@@ -315,7 +276,6 @@ async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str
             lines = f.readlines()
     except OSError as e:
         return f"Error: {e}"
-    _last_read_mtime[path] = st.st_mtime
 
     total = len(lines)
     start = max(0, offset)
@@ -359,10 +319,6 @@ async def write_file(path: str, content: str) -> CallToolResult:
             f"the {_MAX_WRITABLE_CONTENT_BYTES // (1024 * 1024)}MB limit for "
             "a single write."
         )
-    guard_error = _require_fresh_read(path)
-    if guard_error:
-        return _text_error(guard_error)
-
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             original = f.read()
@@ -384,7 +340,6 @@ async def write_file(path: str, content: str) -> CallToolResult:
             f.write(content)
     except OSError as e:
         return _text_error(str(e))
-    _last_read_mtime[path] = os.path.getmtime(path)
 
     after_diags = await _diagnostics_snapshot(lsp_client, path)
     diag = _diagnostics_summary(path, before_diags, after_diags)
@@ -434,9 +389,6 @@ async def edit_file(path: str, old_string: str, new_string: str, replace_all: bo
         return _text_error("path is required")
     if old_string == new_string:
         return _text_error("old_string and new_string must differ")
-    guard_error = _require_fresh_read(path)
-    if guard_error:
-        return _text_error(guard_error)
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             original = f.read()
@@ -463,7 +415,6 @@ async def edit_file(path: str, old_string: str, new_string: str, replace_all: bo
             f.write(updated)
     except OSError as e:
         return _text_error(str(e))
-    _last_read_mtime[path] = os.path.getmtime(path)
 
     after_diags = await _diagnostics_snapshot(lsp_client, path)
     diag = _diagnostics_summary(path, before_diags, after_diags)
