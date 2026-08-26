@@ -12,6 +12,7 @@ ask_permission() action/detail) и две guard-мидлвари
 дождавшись ответа на свой же ask_user.
 """
 import os
+import traceback
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
@@ -21,6 +22,7 @@ from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 
 import settings
+from mcp_agent.debug_log import log_event
 from mcp_agent.message_utils import _find_call_by_id
 from mcp_agent.model_config import ASK_USER_FINALIZE_NUM_PREDICT
 from tools.confirm import ask_permission, ask_user_question
@@ -173,6 +175,12 @@ class _ToolErrorGuardMiddleware(AgentMiddleware):
         try:
             return await handler(request)
         except Exception as e:
+            log_event(
+                "tool_call_exception",
+                name=request.tool_call["name"],
+                args=request.tool_call.get("args"),
+                traceback=traceback.format_exc(),
+            )
             return ToolMessage(
                 content=f"Error running `{request.tool_call['name']}`: {e}",
                 name=request.tool_call["name"],
