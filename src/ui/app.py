@@ -653,6 +653,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("/settings", "model and GPU settings"),
     ("/memory",   "view and delete remembered facts/knowledge"),
     ("/plugin",   "list installed plugins/skills/hooks and what each provides"),
+    ("/plan",     "plan mode: investigate and write a plan, no edits (/plan task — start right away)"),
+    ("/build",    "build mode; runs the latest saved plan (/build extra — with extra instructions)"),
     ("/dnd",      "D&D mode: list saves / new game / continue / exit"),
     ("/inventory", "current D&D character's inventory (D&D mode only)"),
     ("/status",    "current D&D character/world status: who/where/when/health/party (D&D mode only)"),
@@ -827,6 +829,10 @@ class FlowAIApp:
         self._context_limit: int | None = None
         self._recap_text: str = ""
         self._queue_size: int = 0
+        # plan/build (mcp_agent/work_mode.py) — per-session UI state, not a
+        # persisted setting: silently starting a later session in plan mode
+        # would look like the agent refusing to edit anything.
+        self.work_mode: str = "build"
         self._flash_hint_text: str = ""
         self._flash_hint_handle = None
         # Mid-turn messages waiting for the next graph-step boundary (cli.py's
@@ -1194,7 +1200,7 @@ class FlowAIApp:
                 return [("class:footer-hints",
                          "  ↑↓·выбор   1-9·быстрый выбор   Enter·подтвердить   Esc·пропустить")]
             parts = [("class:footer-hints",
-                      " Tab·команды  ↑↓·история  Alt+V·вставить картинку  Alt+R·голосовой ввод  мышь·выделить и скопировать  Ctrl+C·стоп  Ctrl+D·выход")]
+                      " Tab·команды  Shift+Tab·план/build  ↑↓·история  Alt+V·вставить картинку  Alt+R·голосовой ввод  мышь·выделить и скопировать  Ctrl+C·стоп  Ctrl+D·выход")]
             if self._queue_size > 0:
                 parts.append(("class:footer-queue", f"  ·  +{self._queue_size} в очереди"))
             return parts
@@ -1202,7 +1208,7 @@ class FlowAIApp:
         hints_win = VSplit([
             Window(content=hints_ctrl, height=1, style="class:footer"),
             Window(
-                content=FormattedTextControl(self._context_text),
+                content=FormattedTextControl(self._context_text_with_mode),
                 height=1, dont_extend_width=True, style="class:footer",
             ),
         ])
@@ -1259,6 +1265,7 @@ class FlowAIApp:
             "footer-context":                   "#89b4fa",
             "footer-steer":                     "#a6adc8 italic",
             "footer-flash":                     "ansigreen bold",
+            "footer-mode-plan":                 "bg:#f9e2af #1e1e2e bold",
             "footer-context-high":              "#f38ba8 bold",
             "auto-suggestion":                  "#6c7086 italic",
             "completion-menu.completion":              "bg:#1e1e2e #cdd6f4",
@@ -1466,6 +1473,10 @@ class FlowAIApp:
                 self._active_task.cancel()
             elif self._buffer.text:
                 self._buffer.reset()
+
+        @kb.add("s-tab", filter=~is_blocking)
+        def _toggle_work_mode(event):
+            self.toggle_work_mode()
 
         @kb.add("tab", filter=~is_blocking)
         def _tab(event):
@@ -1785,6 +1796,26 @@ class FlowAIApp:
         except RuntimeError:
             self._flash_hint_text = ""
         self.invalidate()
+
+    def set_work_mode(self, mode: str) -> None:
+        self.work_mode = mode
+        self.invalidate()
+
+    def toggle_work_mode(self) -> None:
+        import settings as _s
+        if _s.get("pipeline_mode") and not _s.get("voice_mode"):
+            self.flash_hint("plan/build работает только в основном режиме — выключи «агентный режим» в /settings", 3)
+            return
+        self.set_work_mode("build" if self.work_mode == "plan" else "plan")
+        self.flash_hint("режим: план — только чтение и план, без правок" if self.work_mode == "plan"
+                        else "режим: build — агент правит код")
+
+    def _context_text_with_mode(self):
+        parts = []
+        if self.work_mode == "plan":
+            parts.append(("class:footer-mode-plan", " ⏸ план "))
+            parts.append(("", " "))
+        return parts + list(self._context_text())
 
     def add_pending_steer(self, text: str) -> None:
         self._pending_steers.append(text)

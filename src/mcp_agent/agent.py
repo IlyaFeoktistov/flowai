@@ -78,6 +78,7 @@ import settings  # noqa: E402
 from ui.console import debug_print  # noqa: E402
 from mcp_agent import prompts  # noqa: E402
 from mcp_agent.agent_builder import _get_agent, preload_chat_model  # noqa: E402
+from mcp_agent.work_mode import PLAN, PLAN_MODE_INSTRUCTION, current_work_mode  # noqa: E402
 from mcp_agent.ask_user_tool import _ask_decisions  # noqa: E402
 from mcp_agent.compaction import is_context_overflow_error  # noqa: E402
 from mcp_agent.debug_log import log_event  # noqa: E402
@@ -520,6 +521,13 @@ def _summarize_round(round_msgs: list, verdict: dict) -> str:
     return "\n".join(lines)
 
 
+async def _plan_mode_verdict(round_msgs: list, new_tool_msgs: list, round_final_text: str) -> dict:
+    """plan mode: the main verdict judges whether the requested change was
+    actually made — the one thing plan mode forbids — so it would flag
+    every correct plan as a failure. The plan text itself is the result."""
+    return {"relevant": bool(round_final_text.strip()), "reason": "plan mode: the plan is the answer"}
+
+
 async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) -> Any:
     """mid_turn_queue — опциональная asyncio.Queue[str], проброшенная
     насквозь в _stream_round (см. её докстринг) — cli.py кладёт туда
@@ -590,6 +598,10 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
 
     task_text = messages[-1].get("content", "")
     lc_messages = _to_lc_messages(messages)
+    plan_mode = current_work_mode.get() == PLAN
+    if plan_mode and lc_messages:
+        role, content = lc_messages[-1]
+        lc_messages[-1] = (role, content + PLAN_MODE_INSTRUCTION)
     # Auto-inject knowledge вместо того, чтобы полагаться на модель, которая
     # ДОЛЖНА сама вызвать get_knowledge (system prompt это явно требует —
     # см. prompts.py): за всю историю проекта update_knowledge вызывался
@@ -635,6 +647,11 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     # его "не relevant" (ask_user-спасение в run_stage не завязано на
     # max_attempts и остаётся живым независимо от этого тумблера).
     max_attempts_effective = MAX_ATTEMPTS if settings.get("self_heal_enabled") else 1
+    # plan mode: the self-heal verdict judges "was the change actually made"
+    # — exactly what plan mode forbids, so its retries would only push the
+    # model toward blocked writes.
+    if plan_mode:
+        max_attempts_effective = 1
 
     # Тот же self-heal движок, что и у mcp_agent/pipeline.py (recursion-
     # limit/context-overflow/ResponseError-восстановление, разбор утёкшей
@@ -648,7 +665,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     stage_result = await run_stage(
         agent, payload, on_event,
         judge_model=judge_model, tools_by_name=tools_by_name, read_history=read_history,
-        verdict_fn=make_main_verdict(judge_model, task_text, on_event),
+        verdict_fn=_plan_mode_verdict if plan_mode else make_main_verdict(judge_model, task_text, on_event),
         guidance_fn=main_guidance,
         max_attempts=max_attempts_effective, recursion_limit=RECURSION_LIMIT,
         stage_name="main", mid_turn_queue=mid_turn_queue,

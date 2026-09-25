@@ -93,6 +93,7 @@ from mcp_agent.snapshots import clear_session_file_snapshots
 import model_lifecycle
 import update
 from compress import compress_history, should_compress
+from mcp_agent import work_mode
 from episodic import EpisodicWriter
 from memory import get_store, DEFAULT_USER
 from rag import EMBED_MODEL, VectorStore
@@ -298,6 +299,8 @@ _HELP_ROWS: list[tuple[str, str, str]] = [
     ("/memory", "", "что помнит нейронка, точечное/полное удаление"),
     ("/dnd", "", "D&D-режим: список сохранений / новая игра"),
     ("/plugin", "", "список установленных плагинов и что каждый даёт"),
+    ("/plan", "[задача]", "режим план (Shift+Tab): только чтение и план в .flowai/plans/, правки заблокированы"),
+    ("/build", "[уточнения]", "режим build; если есть свежий план — выполнить его"),
     ("/clear", "", "очистить историю"),
     ("/help", "", "эта справка"),
     ("!", "команда", "выполнить shell-команду, вывод сразу уйдёт нейронке"),
@@ -467,6 +470,8 @@ async def main() -> None:
     _active_handle_task: asyncio.Task | None = None
     _current_text: str = ""         # raw text being processed in current turn
     _suppress_echo = False          # True when combined message already echoed via amendment hint
+    # Plan saved by this session's last plan-mode turn — `/build` runs it.
+    _pending_plan_path = None
     # Мид-терн стир: сообщение, пришедшее ПОКА текущий
     # ход уже не в фазе "жду первого токена" (тот случай уже покрыт amend-
     # combine чуть ниже), кладётся сюда вместо _pending — mcp_agent/agent.py:
@@ -582,7 +587,7 @@ async def main() -> None:
 
     async def _handle_input(raw: str) -> None:
         """Handle a single line of user input submitted from the TUI."""
-        nonlocal _waiting_for_model, _current_text, _suppress_echo, _music_task, _talk_speech
+        nonlocal _waiting_for_model, _current_text, _suppress_echo, _music_task, _talk_speech, _pending_plan_path
         nonlocal _dnd_active, _dnd_game_id, _dnd_messages, _mid_turn_queue
         user_input = raw.strip()
         if not user_input:
@@ -625,6 +630,39 @@ async def main() -> None:
             cmd      = parts[0].lower()
             cmd_args = parts[1] if len(parts) > 1 else ""
         else:
+            cmd = cmd_args = ""
+
+        # plan/build (mcp_agent/work_mode.py) — only the main agent has them;
+        # `/plan task` and `/build` (with a pending plan) become real turns.
+        if cmd in ("/plan", "/build"):
+            if _settings.get("pipeline_mode") and not _settings.get("voice_mode"):
+                console.print("[yellow]  plan/build работает только в основном режиме — выключи «агентный режим» в /settings[/]\n")
+                return
+            if cmd == "/plan":
+                app.set_work_mode(work_mode.PLAN)
+                if not cmd_args:
+                    console.print("[dim]  ⏸ режим план: агент только читает и составляет план, правки заблокированы. "
+                                  "План сохранится в .flowai/plans/, выполнить — /build[/]\n")
+                    return
+                user_input = cmd_args
+            else:
+                app.set_work_mode(work_mode.BUILD)
+                named = work_mode.plans_dir(os.getcwd()) / cmd_args.split()[0] if cmd_args.strip() else None
+                if named is not None and named.is_file():
+                    _pending_plan_path, cmd_args = named, cmd_args.partition(" ")[2]
+                if _pending_plan_path is None:
+                    latest = work_mode.latest_plan(os.getcwd())
+                    hint = f" Последний сохранённый план: {latest} — /build {latest.name} выполнит его." if latest else ""
+                    if not cmd_args:
+                        console.print(f"[dim]  ▶ режим build.{escape(hint)}[/]\n")
+                        return
+                if _pending_plan_path is not None:
+                    console.print(f"\n[green bold] You ›[/] /build {escape(cmd_args)}[dim]  (план: {escape(str(_pending_plan_path))})[/]\n")
+                    user_input = work_mode.build_task_from_plan(_pending_plan_path, cmd_args)
+                    _pending_plan_path = None
+                    _suppress_echo = True
+                else:
+                    user_input = cmd_args
             cmd = cmd_args = ""
 
         if cmd in ("/help", "/?"):
@@ -1315,6 +1353,8 @@ async def main() -> None:
         # непрерывный тред — тот же приём "продолжить тем же thread_id с
         # новым HumanMessage" там не годится без отдельной проработки.
         _mid_turn_queue = asyncio.Queue() if use_main else None
+        turn_mode = app.work_mode if use_main else work_mode.BUILD
+        work_mode.current_work_mode.set(turn_mode)
         stream_kwargs = {"on_event": _on_event}
         if use_main:
             stream_kwargs["mid_turn_queue"] = _mid_turn_queue
@@ -1366,6 +1406,17 @@ async def main() -> None:
             asyncio.create_task(_index_dialog_bg(entry))
         elif stopped:
             messages.pop()
+
+        if turn_mode == work_mode.PLAN and not stopped and display.full_response.strip():
+            try:
+                _pending_plan_path = work_mode.save_plan(os.getcwd(), model_input, display.full_response)
+                console.print(
+                    f"[yellow]  📝 план сохранён: {escape(str(_pending_plan_path))}[/]\n"
+                    "[dim]     /build — выполнить его (можно дописать уточнения: /build …); "
+                    "файл можно поправить руками до запуска[/]\n"
+                )
+            except OSError as e:
+                console.print(f"[red]  ✗ не удалось сохранить план: {escape(str(e))}[/]\n")
 
         # Voice mode speaks as text streams in (see ui/stream.py:
         # StreamDisplay._feed_speech/_flush_speech_round) — no post-hoc

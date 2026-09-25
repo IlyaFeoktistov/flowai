@@ -140,6 +140,12 @@ Rich-разметка (`[bold]`/`[green]`/`[/]`) из `doctor.py`/`update.py`/
 - `{"type": "user_message", "text": "..."}` — уходит немедленно, ВСЕГДА
   (см. "Инпут никогда не блокируется" ниже за тем, что сервер с ним делает)
 - `{"type": "stop"}` — прервать текущий ход (кнопка "стоп" вместо "отправить")
+- `{"type": "set_mode", "mode": "plan"|"build"}` — режим хода основного агента
+  (per-connection; сервер отвечает `mode_changed`, после переподключения
+  фронт шлёт его заново). `/plan`/`/build` в тексте сообщения работают так
+  же, как в CLI; команда без хода подтверждается `command_handled`. После
+  plan-хода — событие `plan_saved {path}` (карточка «Выполнить план» шлёт
+  `/build <файл>`). См. [commands.md](commands.md#plan--build).
 - `{"type": "permission_response", "id": "...", "answer": "y"|"a"|"n"}`
 - `{"type": "ask_user_response", "id": "...", "answer": "..."}`
 

@@ -87,7 +87,7 @@ _ITEMS = [
     ("модель",            "chat_model",        "ollama_model"),
     ("спрашивать разрешения", "ask_permissions", "toggle"),
     ("автопроверка ответа", "self_heal_enabled", "toggle"),
-    ("новый пайплайн", "pipeline_mode", "toggle"),
+    ("агентный режим", "pipeline_mode", "toggle"),
     ("простые ответы без тулов", "casual_answers_enabled", "toggle"),
     ("оптимизированные тулы", "optimized_tools", "toggle"),
     ("делегировать поиск кода", "always_delegate_search", "toggle"),

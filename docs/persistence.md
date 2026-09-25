@@ -155,3 +155,7 @@ constraint'ами) это была бы церемония ради церемо
 flowAI, поэтому сохраняются в открытый проект
 (`<repo_path>/generated/...`), а не в `data_dir()` — см.
 [generative-features.md](generative-features.md).
+
+Так же и планы plan-режима — `<repo_path>/.flowai/plans/<дата>-<тема>.md`
+(см. [commands.md](commands.md#plan--build)): это артефакт работы над
+проектом, его можно поправить руками и выполнить `/build <файл>`.

@@ -244,7 +244,7 @@ def on_commit(command: str, repo_path: str) -> str | None:
 
 Реализация — `mcp_agent/plugin_hooks.py:PluginHookMiddleware`, подключена
 в общий middleware-стек (`agent_builder.py:_base_agent_middleware`) — то
-есть действует и в новом пайплайне (любая роль), и в основном агенте.
+есть действует и в агентном режиме (любая роль), и в основном агенте.
 
 `pre_commit` триггерится только по ПЕРВОМУ сегменту команды до `&&`/`;`/`|`
 — хук не может проверить коммит, который ему не показали.

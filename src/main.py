@@ -50,6 +50,7 @@ from update import run_update  # noqa: E402
 from episodic import EpisodicWriter  # noqa: E402
 from mcp_agent import plugins  # noqa: E402
 from mcp_agent import skills as skill_mod  # noqa: E402
+from mcp_agent import work_mode  # noqa: E402
 from mcp_agent.agent import stream_chat as main_stream_chat  # noqa: E402
 from mcp_agent.pipeline import stream_chat as pipeline_stream_chat  # noqa: E402
 from mcp_agent import prompts  # noqa: E402
@@ -421,6 +422,10 @@ async def ws_chat(ws: WebSocket):
     # process_turns не может их отличить и молча подписывал бы разрыв
     # связи как "остановлено пользователем", хотя никто не жал стоп.
     stop_requested = False
+    # plan/build (mcp_agent/work_mode.py) — per connection, like the CLI's
+    # per-session app.work_mode; pending_plan — what `/build` would run.
+    work_mode_state = work_mode.BUILD
+    pending_plan: Path | None = None
 
     async def send_safe(payload: dict) -> None:
         try:
@@ -438,13 +443,26 @@ async def ws_chat(ws: WebSocket):
     # очередь, а не обрабатывается прямо в receive_loop — иначе тот же цикл
     # блокировался бы на await stream_fn(...) и не смог бы вычитывать
     # permission_response, которые могут прийти ПОКА этот же ход ещё идёт.
+    def _main_agent_mode_available() -> bool:
+        return bool(app_settings.get("voice_mode") or not app_settings.get("pipeline_mode"))
+
+    async def _set_mode(mode: str) -> None:
+        nonlocal work_mode_state
+        if mode == work_mode.PLAN and not _main_agent_mode_available():
+            await send_safe({"type": "error", "message": "plan/build работает только в основном режиме — выключи «агентный режим» (pipeline_mode) в настройках"})
+            mode = work_mode.BUILD
+        work_mode_state = mode
+        await send_safe({"type": "mode_changed", "mode": mode})
+
     async def receive_loop() -> None:
         nonlocal current_turn_task, mid_turn_queue, stop_requested
         while True:
             raw = await ws.receive_text()
             data = json.loads(raw)
             mtype = data.get("type")
-            if mtype in ("permission_response", "ask_user_response"):
+            if mtype == "set_mode":
+                await _set_mode(work_mode.PLAN if data.get("mode") == work_mode.PLAN else work_mode.BUILD)
+            elif mtype in ("permission_response", "ask_user_response"):
                 bridge.resolve(data)
             elif mtype == "user_message":
                 text = (data.get("text") or "").strip()
@@ -471,11 +489,30 @@ async def ws_chat(ws: WebSocket):
                     current_turn_task.cancel()
 
     async def process_turns() -> None:
-        nonlocal current_turn_task, mid_turn_queue, stop_requested
+        nonlocal current_turn_task, mid_turn_queue, stop_requested, pending_plan
         while True:
             text = await inbound.get()
             if not text:
                 continue
+
+            # `/plan [task]` / `/build [extra]` — same semantics as cli.py.
+            build_plan_task = None
+            head, _, rest = text.strip().partition(" ")
+            if head in ("/plan", "/build"):
+                await _set_mode(work_mode.PLAN if head == "/plan" else work_mode.BUILD)
+                if head == "/build":
+                    plan_path = pending_plan
+                    named = work_mode.plans_dir(os.getcwd()) / rest.split()[0] if rest.strip() else None
+                    if named is not None and named.is_file():
+                        plan_path, rest = named, rest.partition(" ")[2]
+                    if plan_path is not None:
+                        build_plan_task = work_mode.build_task_from_plan(plan_path, rest)
+                        pending_plan = None
+                if not rest.strip() and build_plan_task is None:
+                    await send_safe({"type": "command_handled"})
+                    continue
+                if head == "/plan" or build_plan_task is None:
+                    text = rest
 
             # Плейсхолдер [Image-N] -> реальный абсолютный путь ТОЛЬКО для
             # того, что реально идёт модели/в историю — эхо в turn_started
@@ -496,13 +533,15 @@ async def ws_chat(ws: WebSocket):
             # what the user typed, the model gets the skill's instructions.
             expanded = skill_mod.expand_slash_command(resolved_text, os.getcwd())
             plugins.current_skill_restriction.set(expanded[1] if expanded else None)
-            model_text = expanded[0] if expanded else resolved_text
+            model_text = build_plan_task or (expanded[0] if expanded else resolved_text)
             messages.append({"role": "user", "content": model_text})
             episodic.append("user", resolved_text)
             await send_safe({"type": "turn_started", "text": text})
 
             use_main = app_settings.get("voice_mode") or not app_settings.get("pipeline_mode")
             stream_fn = main_stream_chat if use_main else pipeline_stream_chat
+            turn_mode = work_mode_state if use_main else work_mode.BUILD
+            work_mode.current_work_mode.set(turn_mode)
             mid_turn_queue = asyncio.Queue() if use_main else None
 
             # answer_seen — трекает, приходил ли хоть один настоящий
@@ -618,6 +657,12 @@ async def ws_chat(ws: WebSocket):
 
             messages.append({"role": "assistant", "content": final_text})
             assistant_entry = episodic.append("assistant", final_text)
+            if turn_mode == work_mode.PLAN and final_text.strip() and not final_text.startswith("⚠️"):
+                try:
+                    pending_plan = work_mode.save_plan(os.getcwd(), resolved_text, final_text)
+                    await on_event_wrapper({"type": "plan_saved", "path": str(pending_plan)})
+                except OSError as e:
+                    await send_safe({"type": "error", "message": f"не удалось сохранить план: {e}"})
             # to_thread — save_turn_trace's json.dumps+sqlite-write это
             # синхронный блокирующий код; на длинном ходу (например с
             # delegate) turn_events может накопить сотни событий, и не

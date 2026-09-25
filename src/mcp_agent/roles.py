@@ -110,7 +110,7 @@ def _project_read_tools(has_shell: bool) -> set[str]:
 def _apply_optimized_filter(names: set[str]) -> set[str]:
     """settings.optimized_tools (see optimized_tools.py's own docstring)
     used to be scoped to ONLY the main monolithic agent — "работает
-    только когда 'новый пайплайн' ВЫКЛ" (see ui/tui/settings.py's toggle
+    только когда 'агентный режим' ВЫКЛ" (see ui/tui/settings.py's toggle
     hint, updated alongside this). Direct instruction (2026-08-14): same
     toggle should narrow every new-pipeline role's tool set too, not just
     the main agent's. The file_ops_server.py consolidation (read_file/write_file/

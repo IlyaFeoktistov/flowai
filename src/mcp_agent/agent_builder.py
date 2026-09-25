@@ -44,6 +44,7 @@ from mcp_agent.debug_log import log_event
 from mcp_agent.delegate_tool import _DelegateNudgeMiddleware, build_delegate_tool
 from mcp_agent.web_read_tool import build_web_read_tool
 from mcp_agent import skills as md_skills
+from mcp_agent import work_mode
 from mcp_agent.message_utils import _DedupeToolResultsMiddleware
 from mcp_agent.optimized_tools import build_optimized_tools
 from mcp_agent import plugins
@@ -827,6 +828,32 @@ class _InvestigationReadOnlyBashMiddleware(AgentMiddleware):
         )
 
 
+class _PlanModeMiddleware(AgentMiddleware):
+    """plan mode (mcp_agent/work_mode.py): only read-only tools, bash only
+    for read-only commands. No-op in build mode (the default, and always for
+    pipeline roles, which never set work_mode)."""
+
+    async def awrap_tool_call(self, request, handler):
+        if work_mode.current_work_mode.get() != work_mode.PLAN:
+            return await handler(request)
+        name = request.tool_call["name"]
+        allowed = name in work_mode.PLAN_ALLOWED_TOOLS
+        if allowed and name in ("bash", "bash_bg"):
+            allowed = _is_read_only_bash_command(str((request.tool_call.get("args") or {}).get("command", "")))
+        if allowed:
+            return await handler(request)
+        return ToolMessage(
+            content=(
+                f"Denied: '{name}' is not available in PLAN mode — this turn only "
+                "investigates and plans, it never writes files or runs mutating "
+                "commands. Put this change into your plan as a step instead."
+            ),
+            name=name,
+            tool_call_id=request.tool_call["id"],
+            status="error",
+        )
+
+
 class _NoBashSelfFixMiddleware(AgentMiddleware):
     """Every role with both bash and real write tools (coder, quick_fix)
     or bash alone with no write tools at all (verifier) must still make
@@ -966,6 +993,7 @@ def _base_agent_middleware(
         _ToolErrorGuardMiddleware(),
         _UnloadImageGenBeforeGenModelMiddleware(),
         plugins.SkillToolRestrictionMiddleware(),
+        _PlanModeMiddleware(),
         *(pre_hitl or ()),
         hitl_middleware,
         _AskUserGuardMiddleware(),
@@ -1024,6 +1052,10 @@ async def _build_agent(repo_path: str | None = None):
         system_prompt = _build_optimized_system_prompt(resolved_repo_path)
     else:
         system_prompt = _build_system_prompt(resolved_repo_path)
+    plan_mode = not voice_mode and work_mode.current_work_mode.get() == work_mode.PLAN
+    if plan_mode:
+        system_prompt += work_mode.PLAN_SYSTEM_PROMPT_SECTION
+        prompts._SYSTEM_PROMPT_TOKENS_ESTIMATE = len(system_prompt) // 4
     num_keep = _compute_num_keep(prompts._SYSTEM_PROMPT_TOKENS_ESTIMATE)
 
     # reasoning=... -> Ollama's "think" API field. Живой замер на этой машине:
@@ -1139,6 +1171,11 @@ async def _build_agent(repo_path: str | None = None):
     # there's at least one skill, so its schema doesn't cost tokens for nothing.
     if not voice_mode and md_skills.discover_skills(resolved_repo_path):
         agent_tools.append(md_skills.build_skill_tool(resolved_repo_path))
+    # plan mode: write tools aren't in the schema at all, so the model plans
+    # instead of reaching for them (_PlanModeMiddleware stays as a backstop,
+    # e.g. for bash commands, which stay available for read-only use).
+    if plan_mode:
+        agent_tools = [t for t in agent_tools if t.name in work_mode.PLAN_ALLOWED_TOOLS]
 
     # Отдельный от "tools_loaded" в _build_tools лог — тот пишется ДО
     # optimized_tools/voice_mode/delegate, то есть показывает "что подняли из
@@ -1403,7 +1440,7 @@ async def _get_agent(repo_path: str | None = None):
     create_agent, без повторного подъёма подпроцессов."""
     current_model = settings.get("chat_model")
     current_key = (
-        current_model, settings.get("voice_mode"), repo_path or os.getcwd(),
+        current_model, settings.get("voice_mode"), repo_path or os.getcwd(), work_mode.current_work_mode.get(),
         settings.get("optimized_tools"), settings.get("always_delegate_search"),
         settings.get("expert_streaming_enabled"), tuple(sorted(model_params.effective(current_model).items())),
         md_skills.fingerprint(repo_path or os.getcwd()),
