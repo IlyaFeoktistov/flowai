@@ -9,7 +9,7 @@ import { useChatSocket } from '@/entities/chat'
 import { BackendLoader, ToastStack } from '@/shared/ui'
 import { Sidebar } from '@/widgets/sidebar'
 import { Chat } from '@/widgets/chat-panel'
-import { InputBar } from '@/features/send-message'
+import { InputBar, type SlashCommand } from '@/features/send-message'
 import { FolderPicker } from '@/features/pick-folder'
 import { DoctorModal } from '@/features/view-doctor'
 import { UpdateModal } from '@/features/check-updates'
@@ -42,6 +42,28 @@ function App() {
   const [openCommand, setOpenCommand] = useState<CommandKind | null>(null)
 
   const chat = useChatSocket()
+
+  // Встроенные команды CLI (ui/app.py's COMMANDS), у которых в вебе есть
+  // аналог: большинство открывает ту же модалку, что и кнопка сайдбара.
+  // Чисто терминальные (/gen, /music, /dnd, /paste...) сюда не входят.
+  const openModal = (key: CommandKind) => () => setOpenCommand(key)
+  const builtinCommands = useMemo<SlashCommand[]>(
+    () => [
+      { name: '/plan', description: 'режим план: исследование только на чтение, без правок (/plan задача — сразу начать)' },
+      { name: '/build', description: 'режим build; выполняет свежий план (/build уточнения — с доп. указаниями)' },
+      { name: '/clear', description: 'новый чат', run: () => chat.startNewChat() },
+      { name: '/doctor', description: 'проверка Ollama/модели/MCP-серверов/хранилища', run: openModal('doctor') },
+      { name: '/update', description: 'проверить и подтянуть обновления flowAI из git', run: openModal('update') },
+      { name: '/clean', description: 'почистить накопившийся хлам: логи/корзину/снапшоты/индексы', run: openModal('clean') },
+      { name: '/usage', description: 'статистика токенов', run: openModal('usage') },
+      { name: '/instances', description: 'загруженные модели, память, выгрузка', run: openModal('instances') },
+      { name: '/memory', description: 'что помнит нейронка, удаление фактов', run: openModal('memory') },
+      { name: '/plugin', description: 'установленные плагины/скилы/хуки', run: openModal('plugins') },
+      { name: '/settings', description: 'настройки моделей и GPU', run: openModal('settings') },
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chat.startNewChat],
+  )
 
   const refreshSessions = useCallback(() => {
     listSessions().then(setSessions).catch(() => {})
@@ -188,6 +210,7 @@ function App() {
           context={chat.contextUsage}
           workMode={chat.workMode}
           onWorkModeChange={chat.setWorkMode}
+          builtinCommands={builtinCommands}
         />
       </main>
 

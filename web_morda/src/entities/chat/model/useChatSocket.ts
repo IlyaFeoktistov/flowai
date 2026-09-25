@@ -340,6 +340,16 @@ export function useChatSocket() {
       }
       if (event.type === 'command_handled') {
         setPendingCount((n) => Math.max(0, n - 1))
+        // Скил/плагин без задачи для модели — только побочный эффект; его
+        // вывод показываем в чате, как CLI печатает его в свою ленту.
+        if (typeof event.output === 'string') {
+          const output = event.output as string
+          setEntries((prev) => [
+            ...prev,
+            { kind: 'message', id: nextId(), role: 'user', content: displayFor(event.text as string) },
+            { kind: 'message', id: nextId(), role: 'assistant', content: output ? '```\n' + output + '\n```' : '_Команда выполнена._' },
+          ])
+        }
         return
       }
       if (event.type === 'session_started') {

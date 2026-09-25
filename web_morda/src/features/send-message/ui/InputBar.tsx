@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { IconSend, IconStop } from '@/shared/ui'
 import { AttachButton, AttachmentChip, attachmentToBlock, releaseAttachment, toAttachment, type Attachment } from '@/features/attach-file'
 import {
@@ -10,6 +10,9 @@ import {
   useVoiceRecorder,
   type VoiceRecording,
 } from '@/features/record-voice'
+import { listCommands } from '../api/api'
+import type { SlashCommand } from '../model/types'
+import { SlashMenu } from './SlashMenu'
 import './InputBar.css'
 
 interface PendingVoice {
@@ -27,7 +30,9 @@ export function InputBar({
   context,
   workMode,
   onWorkModeChange,
+  builtinCommands,
 }: {
+  builtinCommands: SlashCommand[]
   context: { tokens: number; limit: number | null } | null
   workMode: 'plan' | 'build'
   onWorkModeChange: (mode: 'plan' | 'build') => void
@@ -45,6 +50,30 @@ export function InputBar({
   const [awaitingVoiceReply, setAwaitingVoiceReply] = useState(false)
   const [speaking, setSpeaking] = useState(false)
   const wasStreamingRef = useRef(streaming)
+
+  // Слеш-меню — как _CmdCompleter в ui/app.py: видно, пока ввод начинается
+  // с "/" и в нём ещё нет пробела (дальше идут аргументы команды).
+  const [draft, setDraft] = useState('')
+  const [skillCommands, setSkillCommands] = useState<SlashCommand[]>([])
+  const [menuIndex, setMenuIndex] = useState(0)
+  const [menuDismissed, setMenuDismissed] = useState(false)
+  const menuQuery = draft.startsWith('/') && !/\s/.test(draft) ? draft : null
+  const menuOpen = menuQuery !== null
+
+  useEffect(() => {
+    if (!menuOpen) return
+    listCommands().then(setSkillCommands).catch(() => setSkillCommands([]))
+  }, [menuOpen])
+
+  const menuItems = useMemo(() => {
+    if (menuQuery === null) return []
+    // Встроенные не перекрываются скилом с тем же именем — как в CLI.
+    const builtinNames = new Set(builtinCommands.map((c) => c.name))
+    return [...builtinCommands, ...skillCommands.filter((c) => !builtinNames.has(c.name))].filter((c) =>
+      c.name.startsWith(menuQuery),
+    )
+  }, [menuQuery, builtinCommands, skillCommands])
+  const showMenu = !menuDismissed && menuItems.length > 0
 
   const { state: recorderState, toggle: toggleRecording } = useVoiceRecorder((recording) => {
     setPendingVoice({ recording, transcript: null, transcribing: false })
@@ -108,10 +137,43 @@ export function InputBar({
     }
   }
 
+  const setText = (text: string) => {
+    const el = ref.current
+    if (!el) return
+    el.value = text
+    el.setSelectionRange(text.length, text.length)
+    setDraft(text)
+    setMenuIndex(0)
+    setMenuDismissed(false)
+    autoGrow()
+  }
+
+  // Локальные команды (модалки, новый чат) выполняются во фронтенде и в
+  // чат не уходят; всё остальное — /plan, /build, скилы — обычное
+  // сообщение, бэкенд разбирает его сам.
+  const runLocal = (text: string): boolean => {
+    const [head, ...rest] = text.split(' ')
+    const cmd = builtinCommands.find((c) => c.name === head)
+    if (!cmd?.run) return false
+    cmd.run(rest.join(' ').trim())
+    setText('')
+    return true
+  }
+
+  const pickCommand = (cmd: SlashCommand) => {
+    if (cmd.run) {
+      runLocal(cmd.name)
+      return
+    }
+    setText(cmd.name + ' ')
+    ref.current?.focus()
+  }
+
   const submit = async () => {
     const el = ref.current
     const typed = el?.value.trim() ?? ''
     if (!typed && attachments.length === 0 && !pendingVoice) return
+    if (typed.startsWith('/') && attachments.length === 0 && !pendingVoice && runLocal(typed)) return
 
     let voiceText = ''
     const usedVoice = !!pendingVoice
@@ -142,9 +204,36 @@ export function InputBar({
       el.value = ''
       el.style.height = 'auto'
     }
+    setDraft('')
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showMenu) {
+      const selected = menuItems[Math.min(menuIndex, menuItems.length - 1)]
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        const step = e.key === 'ArrowDown' ? 1 : -1
+        setMenuIndex((i) => (i + step + menuItems.length) % menuItems.length)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setMenuDismissed(true)
+        return
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault()
+        setText(selected.name + ' ')
+        return
+      }
+      // Enter по уже полностью набранной команде — отправка (как в CLI);
+      // по недописанной — сначала подставить выбранную.
+      if (e.key === 'Enter' && !e.shiftKey && selected.name !== draft) {
+        e.preventDefault()
+        pickCommand(selected)
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       submit()
@@ -175,6 +264,14 @@ export function InputBar({
         </div>
       )}
       <div className="input-bar-inner">
+        {showMenu && (
+          <SlashMenu
+            items={menuItems}
+            selected={Math.min(menuIndex, menuItems.length - 1)}
+            onHover={setMenuIndex}
+            onPick={pickCommand}
+          />
+        )}
         <AttachButton onSelect={onAttachFiles} />
         <textarea
           ref={ref}
@@ -182,7 +279,12 @@ export function InputBar({
           placeholder={streaming ? 'Можно писать дальше — сообщение подключится к текущему ответу…' : 'Спроси FlowAI…'}
           rows={1}
           onKeyDown={onKeyDown}
-          onInput={autoGrow}
+          onInput={(e) => {
+            setDraft(e.currentTarget.value)
+            setMenuIndex(0)
+            setMenuDismissed(false)
+            autoGrow()
+          }}
         />
         <MicButton state={recorderState} onClick={toggleRecording} />
         {streaming ? (

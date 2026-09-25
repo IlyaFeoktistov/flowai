@@ -23,6 +23,7 @@ the socket mid-turn otherwise.
 import asyncio
 import base64
 import faulthandler
+import io
 import json
 import os
 import signal
@@ -36,6 +37,7 @@ from fastapi import APIRouter, FastAPI, File, UploadFile, WebSocket, WebSocketDi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from rich.console import Console
 from rich.text import Text
 from starlette.background import BackgroundTask
 
@@ -49,7 +51,6 @@ from doctor import run_doctor  # noqa: E402
 from update import run_update  # noqa: E402
 from episodic import EpisodicWriter  # noqa: E402
 from mcp_agent import plugins  # noqa: E402
-from mcp_agent import skills as skill_mod  # noqa: E402
 from mcp_agent import work_mode  # noqa: E402
 from mcp_agent.agent import stream_chat as main_stream_chat  # noqa: E402
 from mcp_agent.pipeline import stream_chat as pipeline_stream_chat  # noqa: E402
@@ -228,6 +229,45 @@ async def memory_delete_knowledge_endpoint(body: KnowledgeKey):
 @router.get("/plugins")
 async def plugins_endpoint():
     return {"report": _plain(plugins.describe_installed(os.getcwd()))}
+
+
+@router.get("/commands")
+async def commands_endpoint():
+    """Slash commands from skills/plugins for the input's `/` popup — the
+    same plugins.load_commands() source ui/app.py's _CmdCompleter lists.
+    Built-in commands are known to the frontend itself (most of them open a
+    modal there rather than reaching this backend)."""
+    return {"commands": [
+        {"name": f"/{name}", "description": info.get("help") or f"скил/плагин: {info.get('plugin', '?')}"}
+        for name, info in sorted(plugins.load_commands(os.getcwd()).items())
+    ]}
+
+
+async def _run_plugin_command(text: str) -> tuple[str | None, frozenset[str] | None, str] | None:
+    """`/<name> args` for a skill/plugin command — cli.py's same dispatch
+    (SKILL.md, .flowai/skills/*.py, global plugins). None if `text` isn't
+    one; otherwise (task for the model or None for a pure side-effect
+    command, allowed_tools, whatever the command printed)."""
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return None
+    head, _, args = stripped[1:].partition(" ")
+    command = plugins.load_commands(os.getcwd()).get(head)
+    if command is None:
+        return None
+    buf = io.StringIO()
+    out_console = Console(file=buf, force_terminal=False, color_system=None, width=100)
+    outcome = command["func"](args, out_console)
+    if hasattr(outcome, "__await__"):
+        outcome = await outcome
+    printed = buf.getvalue().strip()
+    if isinstance(outcome, plugins.SkillTask):
+        return outcome.render(), outcome.allowed_tools, printed
+    if isinstance(outcome, str):
+        return outcome, None, printed
+    if outcome is not None:
+        raise TypeError(f"скил /{head} вернул неожиданный тип: {type(outcome).__name__}")
+    return None, None, printed
 
 
 class ReindexBody(BaseModel):
@@ -530,10 +570,23 @@ async def ws_chat(ws: WebSocket):
             is_first_turn = len(messages) == 0
 
             resolved_text = ui_images.resolve_image_paths(text)
-            # `/<name> args` for a SKILL.md skill — same expansion cli.py
-            # does through plugins.load_commands; the sidebar/episodic keep
-            # what the user typed, the model gets the skill's instructions.
-            expanded = skill_mod.expand_slash_command(resolved_text, os.getcwd())
+            # `/<name> args` for a skill/plugin command — the sidebar/episodic
+            # keep what the user typed, the model gets the skill's task. A
+            # command with no task (pure side effect) ends here, its printed
+            # output goes back to the chat instead of a turn.
+            try:
+                expanded = None if build_plan_task else await _run_plugin_command(resolved_text)
+            except Exception as e:
+                await send_safe({"type": "error", "message": f"{text.split()[0]}: {e}"})
+                await send_safe({"type": "command_handled"})
+                continue
+            if expanded is not None and expanded[0] is None:
+                await send_safe({"type": "command_handled", "text": text, "output": expanded[2]})
+                continue
+            if expanded is not None and not expanded[0].strip():
+                await send_safe({"type": "error", "message": f"{text.split()[0]}: скил вернул пустую задачу"})
+                await send_safe({"type": "command_handled"})
+                continue
             plugins.current_skill_restriction.set(expanded[1] if expanded else None)
             model_text = build_plan_task or (expanded[0] if expanded else resolved_text)
             messages.append({"role": "user", "content": model_text})
