@@ -175,7 +175,7 @@ def _build_chat_model(
         # llama-server and reloaded the weights twice.
         ok, msg = expert_streaming.ensure_running(
             model_tag, num_ctx=params["num_ctx"], show_thinking=bool(settings.get("show_thinking")),
-            parallel=settings.get("parallel_slots") or 1,
+            parallel=settings.get("parallel_slots") or 1, no_mmap=bool(params["no_mmap"]),
         )
         if ok:
             extra_body = {
@@ -287,7 +287,8 @@ async def preload_chat_model(on_event=None) -> None:
         if settings.get("expert_streaming_enabled") and expert_streaming.is_built():
             thinking = bool(settings.get("show_thinking"))
             parallel = settings.get("parallel_slots") or 1
-            if await asyncio.to_thread(expert_streaming.is_serving, model_tag, params["num_ctx"], thinking, parallel):
+            if await asyncio.to_thread(expert_streaming.is_serving, model_tag, params["num_ctx"], thinking, parallel,
+                                     no_mmap=bool(params["no_mmap"])):
                 return
             await _emit({"type": "model_loading", "model": model_tag, "backend": "llama.cpp", "percent": None})
             last_pct: list[int | None] = [None]
@@ -303,6 +304,7 @@ async def preload_chat_model(on_event=None) -> None:
             ok, _msg = await asyncio.to_thread(
                 expert_streaming.ensure_running, model_tag,
                 num_ctx=params["num_ctx"], show_thinking=thinking, on_progress=_progress, parallel=parallel,
+                no_mmap=bool(params["no_mmap"]),
             )
             if ok:
                 await _emit({"type": "model_loaded", "model": model_tag, "seconds": round(time.monotonic() - started, 1)})

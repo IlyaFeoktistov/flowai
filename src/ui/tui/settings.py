@@ -407,7 +407,10 @@ def settings_menu(print_header: Callable) -> None:
                         break
                     is_cur = i == sub_sel
                     attr = curses.color_pair(1) | curses.A_BOLD if is_cur else 0
-                    value = "по умолч. бэкенда" if row["value"] is None else str(row["value"])
+                    if row["type"] == "bool":
+                        value = "ВКЛ" if row["value"] else "ВЫКЛ"
+                    else:
+                        value = "по умолч. бэкенда" if row["value"] is None else str(row["value"])
                     mark = "своё" if row["overridden"] else "по умолч."
                     try:
                         stdscr.addstr(y, 2, "▶ " if is_cur else "  ", attr)
@@ -449,6 +452,10 @@ def settings_menu(print_header: Callable) -> None:
                     note = f"{row['label']} сброшен к {row['default']}"
                 elif k in (curses.KEY_ENTER, ord('\n'), ord('\r'), ord(' ')):
                     row = rows[sub_sel]
+                    if row["type"] == "bool":
+                        model_params.set_param(model, row["key"], not row["value"])
+                        note = f"{row['label']} = {'ВЫКЛ' if row['value'] else 'ВКЛ'}"
+                        continue
                     raw = _edit_str(None, f"{row['label']} (текущее: {row['value']}, пусто — по умолчанию)")
                     if raw is None:
                         model_params.set_param(model, row["key"], None)

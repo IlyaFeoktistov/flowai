@@ -42,6 +42,7 @@ PARAMS: list[tuple[str, str, type, str]] = [
     ("repeat_last_n",  "repeat_last_n",  int,   "сколько последних токенов учитывает штраф"),
     ("num_predict",    "num_predict",    int,   "максимум токенов в одном ответе"),
     ("num_ctx",        "num_ctx",        int,   "окно контекста; больше — больше RAM/VRAM под KV-cache"),
+    ("no_mmap",        "no_mmap",        bool,  "только llama.cpp: веса целиком в RAM — промпт быстрее, но RAM не освобождается (риск OOM)"),
 ]
 PARAM_KEYS = [k for k, *_ in PARAMS]
 _TYPES = {k: t for k, _, t, _ in PARAMS}
@@ -59,6 +60,9 @@ def _base_defaults() -> dict:
         # Глобальный settings.num_ctx остаётся дефолтом для моделей без
         # своего значения (см. его докстринг в settings.py про expert-streaming).
         "num_ctx": settings.get("num_ctx"),
+        # Off by default: with --no-mmap the whole GGUF sits in RAM that the
+        # kernel can't evict, which OOM-kills a VM too small for model + IDE.
+        "no_mmap": False,
     }
 
 
@@ -120,6 +124,21 @@ def describe(model_tag: str) -> list[dict]:
     ]
 
 
+_TRUE = {"1", "true", "yes", "on", "да", "вкл"}
+_FALSE = {"0", "false", "no", "off", "нет", "выкл"}
+
+
+def _parse_bool(raw) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise ValueError(f"expected on/off, got {raw!r}")
+
+
 def parse_value(key: str, raw):
     """Строка/число из UI -> значение нужного типа. None/"" — сброс к
     дефолту. ValueError на мусор или неизвестный ключ."""
@@ -127,6 +146,8 @@ def parse_value(key: str, raw):
         raise ValueError(f"unknown parameter: {key}")
     if raw is None or (isinstance(raw, str) and raw.strip() == ""):
         return None
+    if _TYPES[key] is bool:
+        return _parse_bool(raw)
     value = _TYPES[key](raw)
     if key == "num_ctx" and value < 512:
         raise ValueError("num_ctx must be >= 512")
@@ -147,7 +168,7 @@ def set_param(model_tag: str, key: str, value) -> None:
     if value is None:
         per_model.pop(key, None)
     else:
-        per_model[key] = _TYPES[key](value)
+        per_model[key] = _parse_bool(value) if _TYPES[key] is bool else _TYPES[key](value)
     if not per_model:
         all_params.pop(model_tag, None)
     settings.set_value("model_params", all_params)

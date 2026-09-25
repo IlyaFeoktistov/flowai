@@ -8,7 +8,7 @@
 | `/help`, `/?` | эта справка |
 | `/clear` | очистить историю ТЕКУЩЕЙ сессии (в памяти, ничего на диске) |
 | `/clean [logs\|trash\|snapshots\|projects\|all]` | почистить накопившийся за всё время хлам — без аргумента только отчёт, ничего не удаляет (см. [persistence.md](persistence.md)) |
-| `/settings` | настройки моделей и GPU; «параметры модели» — temperature/top_p/top_k/min_p/repeat_penalty/repeat_last_n/num_predict/num_ctx отдельно для каждой модели (см. [models.md](models.md)) |
+| `/settings` | настройки моделей и GPU; «параметры модели» — temperature/top_p/top_k/min_p/repeat_penalty/repeat_last_n/num_predict/num_ctx/no_mmap отдельно для каждой модели (см. [models.md](models.md)) |
 | `/memory` | что помнит нейронка о пользователе/проекте, точечное/полное удаление |
 | `/usage` | статистика токенов |
 | `/instances` | список загруженных моделей по бэкендам (Ollama / llama.cpp): модель, RAM, VRAM; стрелками выбрать, Enter — выгрузить |

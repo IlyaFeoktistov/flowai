@@ -46,6 +46,13 @@ export function ModelParamsSection({ chatModel, models }: { chatModel: string; m
                 {p.overridden && <span className="model-params-badge">своё</span>}
               </span>
               <span className="model-params-controls">
+                {p.type === 'bool' ? (
+                  <input
+                    type="checkbox"
+                    checked={Boolean(p.value)}
+                    onChange={(e) => save(p.key, e.target.checked ? 'true' : 'false')}
+                  />
+                ) : (
                 <input
                   className="settings-input"
                   type="number"
@@ -58,6 +65,7 @@ export function ModelParamsSection({ chatModel, models }: { chatModel: string; m
                     if (raw !== current) save(p.key, raw === '' ? null : raw)
                   }}
                 />
+                )}
                 {p.overridden && (
                   <button className="icon-btn" onClick={() => save(p.key, null)} title="Сбросить к значению по умолчанию">
                     сбросить

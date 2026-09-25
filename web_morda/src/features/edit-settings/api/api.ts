@@ -9,10 +9,10 @@ export const getModels = () => request<{ models: string[] }>('/models')
 export interface ModelParam {
   key: string
   label: string
-  type: 'int' | 'float'
+  type: 'int' | 'float' | 'bool'
   hint: string
-  value: number | null
-  default: number | null
+  value: number | boolean | null
+  default: number | boolean | null
   overridden: boolean
 }
 

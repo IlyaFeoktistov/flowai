@@ -44,3 +44,14 @@ def test_parse_value():
         model_params.parse_value("num_ctx", "100")
     with pytest.raises(ValueError):
         model_params.parse_value("bogus", "1")
+
+
+def test_no_mmap_is_off_by_default_and_parses_on_off():
+    assert model_params.effective("glm-4.7-flash:q4_K_M")["no_mmap"] is False
+    assert model_params.parse_value("no_mmap", "вкл") is True
+    assert model_params.parse_value("no_mmap", "false") is False
+    with pytest.raises(ValueError):
+        model_params.parse_value("no_mmap", "maybe")
+    model_params.set_param("glm-4.7-flash:q4_K_M", "no_mmap", True)
+    assert model_params.effective("glm-4.7-flash:q4_K_M")["no_mmap"] is True
+    assert model_params.effective("qwen3:8b")["no_mmap"] is False

@@ -259,23 +259,22 @@ def _chat_template_file_for(model_tag: str) -> Path | None:
 # Per-model llama-server launch overrides -- same idea as
 # _chat_template_file_for above, for flags instead of the template.
 #
-# glm-4.7-flash: live measurement (2026-08-14, this machine, a ~2.5k-token
-# prompt) -- "--no-mmap --direct-io" took prompt processing from 197.7 to
-# 288.9 tok/s (+46%), generation unchanged (~18-19 tok/s either way).
-# llama.cpp's own loader already warns about exactly this case for this
-# model ("tensor overrides to CPU are used with mmap enabled - consider
-# using --no-mmap for better performance" -- autofit here always partially
-# offloads GLM's MoE layers to CPU on a 6 GB card), just never wired up
-# before. Community-recommended for this model too (HF discussion
-# zai-org/GLM-4.7-Flash#66). q4_0 KV cache (vs this project's usual q8_0
-# elsewhere) is also from that same discussion -- not applied to any other
-# model here, since it's a precision/quality tradeoff never measured for
-# them specifically. -ehs -1 (dynamic expert hot-store) was re-measured
-# for this model too, same live test: WORSE across the board (prompt
-# 288.9 -> 65.8 tok/s, generation 18.2 -> 12.8 tok/s) -- same conclusion as
-# qwen3-coder:30b (see the -ehs 0 comment below), so it stays off here too,
-# nothing to override.
-_GLM_4_7_FLASH_EXTRA_FLAGS = ["--no-mmap", "--direct-io"]
+# glm-4.7-flash: q4_0 KV cache (vs this project's usual q8_0 elsewhere) is
+# community-recommended for this model (HF discussion
+# zai-org/GLM-4.7-Flash#66) -- not applied to any other model here, since
+# it's a precision/quality tradeoff never measured for them specifically.
+# -ehs -1 (dynamic expert hot-store) measured WORSE for this model
+# (prompt 288.9 -> 65.8 tok/s, generation 18.2 -> 12.8 tok/s) -- same
+# conclusion as qwen3-coder:30b (see the -ehs 0 comment below).
+_GLM_4_7_FLASH_EXTRA_FLAGS: list[str] = []
+
+# model_params "no_mmap" (per model, off by default). On glm-4.7-flash it
+# speeds prompt processing ~+46% (198 -> 289 tok/s, generation unchanged) --
+# llama.cpp itself suggests it when MoE layers are offloaded to CPU. The
+# cost: the whole GGUF (19 GB for GLM) is copied into memory the kernel
+# can't evict, so model + an IDE's language servers can OOM-kill a 24 GB
+# WSL VM; with mmap the weights stay reclaimable page cache.
+_NO_MMAP_FLAGS = ["--no-mmap", "--direct-io"]
 _GLM_4_7_FLASH_CACHE_TYPE = "q4_0"
 
 
@@ -297,7 +296,7 @@ _proc: subprocess.Popen | None = None
 # num_ctx-only settings change (e.g. testing 32768 vs 65536) with the SAME
 # model_tag used to be silently ignored — is_running()/this tag matched, so
 # ensure_running kept serving the OLD context instead of restarting.
-_proc_config: tuple[str, int, bool, int] | None = None
+_proc_config: tuple[str, int, bool, int, bool] | None = None
 
 # agent_builder._build_chat_model calls ensure_running TWICE per agent build
 # (main model, then judge_model — same model_tag) — without this, a failure
@@ -342,11 +341,13 @@ def live_state() -> dict | None:
     return state
 
 
-def _write_state(pid: int, port: int, model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1) -> None:
+def _write_state(
+    pid: int, port: int, model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1, no_mmap: bool = False,
+) -> None:
     try:
         _STATE_PATH.write_text(json.dumps({
             "pid": pid, "port": port, "model_tag": model_tag,
-            "num_ctx": num_ctx, "show_thinking": show_thinking, "parallel": parallel,
+            "num_ctx": num_ctx, "show_thinking": show_thinking, "parallel": parallel, "no_mmap": no_mmap,
         }))
     except OSError:
         pass  # best-effort — worst case, the NEXT process to find this port occupied fails loud instead of adopting it
@@ -369,7 +370,9 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _adoptable_state(port: int, model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1) -> dict | None:
+def _adoptable_state(
+    port: int, model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1, no_mmap: bool = False,
+) -> dict | None:
     """None unless _STATE_PATH names a server that's (a) still alive by its
     own recorded pid and (b) configured EXACTLY like what THIS call is
     asking for — same guard the module already applies to its OWN _proc via
@@ -382,9 +385,11 @@ def _adoptable_state(port: int, model_tag: str, num_ctx: int, show_thinking: boo
         state = json.loads(_STATE_PATH.read_text())
     except (OSError, ValueError):
         return None
-    if (state.get("port"), state.get("model_tag"), state.get("num_ctx"), state.get("show_thinking"), state.get("parallel", 1)) != (
-        port, model_tag, num_ctx, show_thinking, parallel
-    ):
+    recorded = (
+        state.get("port"), state.get("model_tag"), state.get("num_ctx"), state.get("show_thinking"),
+        state.get("parallel", 1), state.get("no_mmap", False),
+    )
+    if recorded != (port, model_tag, num_ctx, show_thinking, parallel, no_mmap):
         return None
     pid = state.get("pid")
     if not isinstance(pid, int) or not _pid_alive(pid):
@@ -480,6 +485,7 @@ def ensure_running(
     wait_seconds: float = 120.0,
     on_progress=None,
     parallel: int = 1,
+    no_mmap: bool = False,
 ) -> tuple[bool, str]:
     """Запускает llama-server (если ещё не запущен с ТЕМИ ЖЕ model_tag/
     num_ctx/show_thinking — смена любого из них перезапускает процесс,
@@ -515,7 +521,7 @@ def ensure_running(
     # Capped: each slot is a full num_ctx KV cache — a typo like 40 must not
     # take the machine down.
     parallel = max(1, min(int(parallel), MAX_PARALLEL_SLOTS))
-    config = (model_tag, num_ctx, show_thinking, parallel)
+    config = (model_tag, num_ctx, show_thinking, parallel, no_mmap)
     if is_running() and _proc_config == config:
         return True, "already running"
 
@@ -528,7 +534,7 @@ def ensure_running(
     # Popen below), so a mismatched config is usually a server an EARLIER
     # flowai run started; it's still ours to replace, not a foreign process.
     # A matching one is left alone and adopted below.
-    if _adoptable_state(port, model_tag, num_ctx, show_thinking, parallel) is None:
+    if _adoptable_state(port, model_tag, num_ctx, show_thinking, parallel, no_mmap) is None:
         stop_server(include_adopted=True)
     else:
         stop_server()
@@ -561,7 +567,7 @@ def ensure_running(
     # just loaded from the same shared SQLite file. That's "already running"
     # in every way that matters, not a stale/foreign process to fail on.
     if _health_check(port):
-        adopted = _adoptable_state(port, model_tag, num_ctx, show_thinking, parallel)
+        adopted = _adoptable_state(port, model_tag, num_ctx, show_thinking, parallel, no_mmap)
         if adopted is not None:
             # _proc stays None on purpose — we didn't start this process, so
             # stop_server() must never try to kill it.
@@ -628,6 +634,8 @@ def ensure_running(
         "--reasoning", "on" if show_thinking else "off",
     ]
     cmd += _extra_server_flags_for(model_tag)
+    if no_mmap:
+        cmd += _NO_MMAP_FLAGS
     chat_template_file = _chat_template_file_for(model_tag)
     if chat_template_file is not None:
         cmd += ["--chat-template-file", str(chat_template_file)]
@@ -655,7 +663,7 @@ def ensure_running(
             if on_progress is not None:
                 on_progress(1.0)
             _proc_config = config
-            _write_state(_proc.pid, port, model_tag, num_ctx, show_thinking, parallel)
+            _write_state(_proc.pid, port, model_tag, num_ctx, show_thinking, parallel, no_mmap)
             return True, "started"
         time.sleep(0.5)
 
@@ -682,12 +690,15 @@ def _load_progress(pid: int, blob_size: int) -> float | None:
     return min(0.99, (rss + rchar) / (2 * blob_size))
 
 
-def is_serving(model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1, port: int = DEFAULT_PORT) -> bool:
+def is_serving(
+    model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1, port: int = DEFAULT_PORT, no_mmap: bool = False,
+) -> bool:
     """True if a server with exactly this config already answers — i.e.
     ensure_running would return immediately without loading anything."""
-    if is_running() and _proc_config == (model_tag, num_ctx, show_thinking, max(1, min(int(parallel), MAX_PARALLEL_SLOTS))):
+    parallel = max(1, min(int(parallel), MAX_PARALLEL_SLOTS))
+    if is_running() and _proc_config == (model_tag, num_ctx, show_thinking, parallel, no_mmap):
         return True
-    return _health_check(port) and _adoptable_state(port, model_tag, num_ctx, show_thinking, max(1, min(int(parallel), MAX_PARALLEL_SLOTS))) is not None
+    return _health_check(port) and _adoptable_state(port, model_tag, num_ctx, show_thinking, parallel, no_mmap) is not None
 
 
 def _tail_log(n_lines: int = 3) -> str:

@@ -43,3 +43,13 @@ def test_live_state_returns_dict_when_pid_is_alive(tmp_path, monkeypatch):
 
     assert state["pid"] == os.getpid()
     assert state["model_tag"] == "glm-4.7-flash:q4_K_M"
+
+
+def test_no_mmap_change_makes_running_server_not_adoptable(tmp_path, monkeypatch):
+    # Toggling model_params "no_mmap" must restart llama-server, not adopt
+    # the one started with the other load mode.
+    monkeypatch.setattr(expert_streaming, "_STATE_PATH", tmp_path / "state.json")
+    expert_streaming._write_state(os.getpid(), 8090, "glm-4.7-flash:q4_K_M", 65536, False, 1, no_mmap=False)
+
+    assert expert_streaming._adoptable_state(8090, "glm-4.7-flash:q4_K_M", 65536, False, 1, no_mmap=False) is not None
+    assert expert_streaming._adoptable_state(8090, "glm-4.7-flash:q4_K_M", 65536, False, 1, no_mmap=True) is None
