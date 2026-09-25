@@ -1348,6 +1348,7 @@ async def main() -> None:
                     await _pending.put(_mid_turn_queue.get_nowait())
                     drained = True
                 _mid_turn_queue = None
+                app.clear_pending_steers()
                 if drained:
                     app.set_queue_size(_pending.qsize())
 
@@ -1465,7 +1466,7 @@ async def main() -> None:
             # (mcp_agent/agent.py:_stream_round), а не ждёт конца всего
             # хода в _pending.
             await _mid_turn_queue.put(text)
-            console.print(f"[dim]  📤 передам по ходу: {escape(text)}[/]")
+            app.add_pending_steer(text)
         else:
             await _pending.put(text)
         app.set_queue_size(_pending.qsize())

@@ -791,6 +791,8 @@ class StreamDisplay:
         # что оно реально дошло, а не тихо потерялось. ────────────────────
         elif t == "mid_turn_injected":
             text = event.get("text", "")
+            if self._app is not None:
+                self._app.remove_pending_steer(text)
             safe_write("\n")
             console.print(f"[dim]  📥 учту по ходу: {_escape_markup(text)}[/]")
             console.print()

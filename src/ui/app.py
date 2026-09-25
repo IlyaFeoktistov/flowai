@@ -220,6 +220,7 @@ class _OutputControl(UIControl):
 
     def connect_app(self, app: "FlowAIApp") -> None:
         self._invalidate_cb = app.invalidate
+        self._app = app
 
     def append(self, text: str) -> None:
         """Append ANSI text (may contain newlines and partial lines)."""
@@ -517,8 +518,21 @@ class _OutputControl(UIControl):
             pieces.append(text[col_from:col_to])
         selected = "".join(pieces).strip("\n")
         if selected:
+            # clip.exe/xclip can take a noticeable moment — off the UI
+            # thread, so the drag release doesn't freeze the screen; the
+            # footer confirms the copy like Claude Code does.
+            import asyncio
             from ui.images import copy_to_clipboard
-            copy_to_clipboard(selected)
+            app = getattr(self, "_app", None)
+
+            async def _copy() -> None:
+                ok = await asyncio.to_thread(copy_to_clipboard, selected)
+                if app is not None:
+                    app.flash_hint("Скопировано в буфер обмена" if ok else "Не удалось скопировать в буфер обмена")
+            try:
+                asyncio.get_running_loop().create_task(_copy())
+            except RuntimeError:
+                copy_to_clipboard(selected)
 
     def mouse_handler(self, mouse_event) -> None:
         from prompt_toolkit.mouse_events import MouseEventType
@@ -813,6 +827,13 @@ class FlowAIApp:
         self._context_limit: int | None = None
         self._recap_text: str = ""
         self._queue_size: int = 0
+        self._flash_hint_text: str = ""
+        self._flash_hint_handle = None
+        # Mid-turn messages waiting for the next graph-step boundary (cli.py's
+        # _mid_turn_queue) — shown in their own footer row, NOT printed into
+        # the output pane: a print there lands in the middle of whatever the
+        # model is streaming at that moment.
+        self._pending_steers: list[str] = []
         self._history: list[str] = []
         self._history_pos: int = -1
         self._saved_input: str = ""
@@ -1147,6 +1168,12 @@ class FlowAIApp:
         # visible, with only stats_win/recap_win (1-2 often-blank lines)
         # between the two, reading as one bar duplicated rather than two
         # intentional separators.
+        has_steers = Condition(lambda: bool(self._pending_steers))
+        steers_win = ConditionalContainer(
+            content=Window(content=FormattedTextControl(self._steers_text), dont_extend_height=True),
+            filter=has_steers,
+        )
+
         has_plan = Condition(lambda: bool(self._plan_steps))
         plan_ctrl = FormattedTextControl(self._plan_formatted_text)
         plan_win = ConditionalContainer(
@@ -1156,6 +1183,8 @@ class FlowAIApp:
 
         # Hints toolbar (shows queue badge / perm hints when needed)
         def _hints_text():
+            if self._flash_hint_text:
+                return [("class:footer-flash", f"  ✓ {self._flash_hint_text}")]
             if self._perm_future is not None:
                 return [("class:footer-hints",
                          "  ←→·выбор   Y·да   A·все   N·нет   Enter·подтвердить")]
@@ -1165,7 +1194,7 @@ class FlowAIApp:
                 return [("class:footer-hints",
                          "  ↑↓·выбор   1-9·быстрый выбор   Enter·подтвердить   Esc·пропустить")]
             parts = [("class:footer-hints",
-                      " Tab·команды  ↑↓·история  Alt+V·вставить картинку  Alt+R·голосовой ввод  Shift+мышь·выделить  Ctrl+C·стоп  Ctrl+D·выход")]
+                      " Tab·команды  ↑↓·история  Alt+V·вставить картинку  Alt+R·голосовой ввод  мышь·выделить и скопировать  Ctrl+C·стоп  Ctrl+D·выход")]
             if self._queue_size > 0:
                 parts.append(("class:footer-queue", f"  ·  +{self._queue_size} в очереди"))
             return parts
@@ -1191,6 +1220,7 @@ class FlowAIApp:
             content=HSplit([
                 output_win,
                 plan_win,    # plan checklist (conditional, above the footer)
+                steers_win,  # mid-turn messages not yet handed to the model
                 stats_win,   # spinner/counter above the divider line
                 perm_win,    # permission dialog (conditional)
                 perm_divider,
@@ -1227,6 +1257,8 @@ class FlowAIApp:
             "footer-hints":                     "#6c7086",
             "footer-queue":                     "#f38ba8",
             "footer-context":                   "#89b4fa",
+            "footer-steer":                     "#a6adc8 italic",
+            "footer-flash":                     "ansigreen bold",
             "footer-context-high":              "#f38ba8 bold",
             "auto-suggestion":                  "#6c7086 italic",
             "completion-menu.completion":              "bg:#1e1e2e #cdd6f4",
@@ -1735,6 +1767,44 @@ class FlowAIApp:
         why it piggybacks on _active_task.cancel() instead of getting its own
         priority branch like recording/music."""
         self._stop_gen3d_cb = stop_cb if active else None
+
+    def flash_hint(self, text: str, seconds: float = 1.2) -> None:
+        """Replaces the hints row with `text` for a moment (e.g. the
+        copy-on-select confirmation)."""
+        import asyncio
+        self._flash_hint_text = text
+        if self._flash_hint_handle is not None:
+            self._flash_hint_handle.cancel()
+
+        def _clear() -> None:
+            self._flash_hint_text = ""
+            self._flash_hint_handle = None
+            self.invalidate()
+        try:
+            self._flash_hint_handle = asyncio.get_running_loop().call_later(seconds, _clear)
+        except RuntimeError:
+            self._flash_hint_text = ""
+        self.invalidate()
+
+    def add_pending_steer(self, text: str) -> None:
+        self._pending_steers.append(text)
+        self.invalidate()
+
+    def remove_pending_steer(self, text: str) -> None:
+        if text in self._pending_steers:
+            self._pending_steers.remove(text)
+            self.invalidate()
+
+    def clear_pending_steers(self) -> None:
+        self._pending_steers.clear()
+        self.invalidate()
+
+    def _steers_text(self):
+        parts = []
+        for text in self._pending_steers:
+            one_line = " ".join(text.split())
+            parts.append(("class:footer-steer", f"  📤 передам по ходу: {one_line}\n"))
+        return parts
 
     def set_queue_size(self, n: int) -> None:
         """Update pending-queue badge in the hints bar."""
