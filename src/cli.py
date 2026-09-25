@@ -92,7 +92,7 @@ from mcp_agent.pipeline import stream_chat as _pipeline_stream_chat
 from mcp_agent.snapshots import clear_session_file_snapshots
 import model_lifecycle
 import update
-from compress import compress_history
+from compress import compress_history, should_compress
 from episodic import EpisodicWriter
 from memory import get_store, DEFAULT_USER
 from rag import EMBED_MODEL, VectorStore
@@ -1383,15 +1383,15 @@ async def main() -> None:
 
         # ── Context compression ───────────────────────────────────────────
         if not stopped:
-            tok_in = display.pending_stats.get("tokens_in", 0)
-            limit  = _settings.get("context_limit")
-            threshold = int(limit * _settings.get("compress_at"))
-            if tok_in > threshold:
+            if should_compress(app._context_tokens):
                 def _notify(n_old: int, n_words: int) -> None:
                     console.print(
                         f"[dim]  ↯ контекст сжат: {n_old} сообщений → ~{n_words} слов[/]\n"
                     )
                 messages[:] = await compress_history(messages, on_notify=_notify)
+                # The next call's real fill is unknown until it happens —
+                # a stale "92%" after compressing would just mislead.
+                app.set_context_usage(None, None)
                 await _reload_recap(app)
 
     # ── Sequential input queue ────────────────────────────────────────────

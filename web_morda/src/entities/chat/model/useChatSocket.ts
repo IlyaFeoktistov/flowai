@@ -201,6 +201,9 @@ function replayTurn(
           },
         }
         break
+      case 'context_compressed':
+        turn = { ...turn, context: null }
+        break
       case 'context':
         turn = { ...turn, context: { tokens: event.tokens as number, limit: (event.limit as number) ?? null } }
         break
@@ -513,6 +516,9 @@ export function useChatSocket() {
               },
             }))
 
+          case 'context_compressed':
+            return mapTurnItem(prev, turnId, (t) => ({ ...t, context: null }))
+
           case 'context':
             return mapTurnItem(prev, turnId, (t) => ({
               ...t,
@@ -612,7 +618,7 @@ export function useChatSocket() {
   const contextUsage = useMemo(() => {
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i]
-      if (e.kind === 'turn' && e.context) return e.context
+      if (e.kind === 'turn' && e.context !== undefined) return e.context
     }
     return null
   }, [entries])

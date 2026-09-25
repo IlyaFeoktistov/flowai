@@ -267,15 +267,9 @@ _state: dict = {
     # выключено обратно через /settings. См. gen3d/pipeline.py:estimate_material.
     "gen3d_pbr_ai":         os.getenv("GEN3D_PBR_AI", "1") == "1",
     "recap_enabled":    os.getenv("RECAP_ENABLED",    "1") == "1",
-    # Держать в синхроне с mcp_agent/model_config.py:OLLAMA_NUM_CTX вручную —
-    # не импортируется напрямую (model_config.py сам импортирует settings,
-    # обратный импорт был бы циклическим — тот же паттерн, что у любой
-    # другой model_config.py-константы, которую settings.py не может
-    # импортировать напрямую). Расхождение не ломает ничего катастрофично
-    # (это порог для МЕЖходового compress_history в cli.py, отдельная система
-    # от per-turn _CompactResearchMiddleware), но означает, что "сжать при
-    # 70% контекста" тихо считает контекст меньше, чем он есть на самом деле.
-    "context_limit":    int(os.getenv("CONTEXT_LIMIT", "65536")),
+    # Доля num_ctx, при которой МЕЖходовый compress_history (cli.py, main.py)
+    # сжимает историю — сравнивается с реальным заполнением окна последним
+    # вызовом модели, см. compress.py:should_compress.
     "compress_at":      float(os.getenv("COMPRESS_AT", "0.70")),
     # Общий выключатель _CompactResearchMiddleware (mcp_agent/compaction.py) —
     # ВНУТРИ одного хода сжимает историю тул-вызовов в дайджест, когда она

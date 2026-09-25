@@ -2,8 +2,6 @@ import re
 from datetime import datetime
 from typing import Callable
 
-import ollama
-
 from memory import DEFAULT_USER, get_store
 import settings
 
@@ -42,6 +40,46 @@ def _split_summary(raw: str) -> tuple[str, str]:
     return detailed, short
 
 
+async def _summarize(text: str) -> str:
+    """Through agent_builder._build_chat_model, not a bare ollama client:
+    with expert_streaming_enabled the chat model lives in llama-server, and
+    a direct Ollama call would load a SECOND full copy of it (and the
+    default glm-4.7-flash can't run on plain Ollama at all)."""
+    from mcp_agent.agent_builder import _build_chat_model
+    model = _build_chat_model(
+        model_tag=settings.get("chat_model"), num_predict=1024, reasoning=False,
+        num_keep=4, has_tools=False,
+    )
+    resp = await model.ainvoke([
+        {"role": "system", "content": SUMMARY_PROMPT},
+        {"role": "user", "content": text},
+    ])
+    return resp.content if isinstance(resp.content, str) else str(resp.content)
+
+
+def should_compress(context_tokens: int | None) -> bool:
+    """Between turns: compress once the LAST model call's real window fill
+    (the "context" event, mcp_agent/agent.py:_stream_round) crosses
+    compress_at of num_ctx. Not the turn's summed tokens_in — that re-counts
+    the whole history on every call and says nothing about how full the
+    window actually is."""
+    if not context_tokens:
+        return False
+    return context_tokens > int(settings.get("num_ctx") * settings.get("compress_at"))
+
+
+async def summarize_messages(messages: list[dict], max_chars: int) -> str:
+    """Detailed summary of `messages` (role/content dicts) — the in-turn
+    overflow recovery (mcp_agent/stage_runner.py) uses it to fold the older
+    conversation into one message. Input is capped at max_chars, keeping the
+    most recent part: the summarization call must fit the same window that
+    just overflowed."""
+    text = _render(messages)
+    if len(text) > max_chars:
+        text = "…" + text[-max_chars:]
+    return _split_summary(await _summarize(text))[0]
+
+
 async def compress_history(
     messages: list[dict],
     on_notify: Callable[[int, int], None] | None = None,
@@ -61,15 +99,12 @@ async def compress_history(
     old = messages[:-keep_last]
     kept = messages[-keep_last:]
 
-    client = ollama.AsyncClient()
-    response = await client.chat(
-        model=settings.get("chat_model"),
-        messages=[
-            {"role": "system", "content": SUMMARY_PROMPT},
-            {"role": "user", "content": _render(old)},
-        ],
-    )
-    detailed_summary, short_recap = _split_summary(response["message"]["content"])
+    text = _render(old)
+    # Same cap as summarize_messages: the old part alone can exceed the window.
+    max_chars = settings.get("num_ctx") * 2
+    if len(text) > max_chars:
+        text = "…" + text[-max_chars:]
+    detailed_summary, short_recap = _split_summary(await _summarize(text))
 
     store = get_store()
     data = await store.load(DEFAULT_USER)

@@ -140,3 +140,27 @@ async def test_mid_turn_queue_is_forwarded_to_stream_round(monkeypatch):
         mid_turn_queue=sentinel,
     )
     assert received["mid_turn_queue"] is sentinel
+
+
+def test_shrink_for_overflow_level2_keeps_only_capped_current_request():
+    import asyncio
+    from langchain_core.messages import HumanMessage
+    from mcp_agent.stage_runner import _OVERFLOW_MESSAGE_CHAR_CAP, _shrink_for_overflow
+    msgs = [("user", "old"), ("assistant", "old answer"), HumanMessage(content="x" * (_OVERFLOW_MESSAGE_CHAR_CAP + 100))]
+    out = asyncio.run(_shrink_for_overflow(msgs, 2))
+    assert len(out) == 1
+    role, content = out[0]
+    assert role == "user"
+    assert len(content) < _OVERFLOW_MESSAGE_CHAR_CAP + 200 and content.endswith("window]")
+
+
+def test_shrink_for_overflow_level1_falls_back_when_summary_fails(monkeypatch):
+    import asyncio
+    import compress
+    from mcp_agent.stage_runner import _shrink_for_overflow
+
+    async def boom(*a, **k):
+        raise RuntimeError("no model")
+    monkeypatch.setattr(compress, "summarize_messages", boom)
+    out = asyncio.run(_shrink_for_overflow([("user", "a"), ("assistant", "b"), ("user", "now")], 1))
+    assert out == [("user", "now")]

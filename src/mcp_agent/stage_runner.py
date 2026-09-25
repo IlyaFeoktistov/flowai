@@ -135,6 +135,7 @@ async def run_stage(
     verdict: dict | None = None
     generation_error_bonus_used = False
     self_heal_asks_used = 0
+    overflow_recoveries = 0
 
     while attempt < max_attempts:
         log_event("stage_attempt", stage=stage_name, n=attempt + 1, max=max_attempts)
@@ -225,7 +226,23 @@ async def run_stage(
             # успешно завершённые шаги до отказавшего вызова модели.
             # Дайджестим и ретраим с чистого, маленького payload вместо
             # того, чтобы терять весь ход целиком.
-            if attempt == max_attempts - 1:
+            #
+            # Retrying with the SAME original_messages overflows again
+            # whenever the problem is the conversation itself (a long
+            # session, a huge pasted file) rather than this round's tool
+            # output — so each recovery also shrinks the history
+            # (_shrink_for_overflow) and doesn't spend a regular attempt:
+            # the turn must end in an answer, not "context too large, rephrase".
+            if overflow_recoveries < _MAX_OVERFLOW_RECOVERIES:
+                overflow_recoveries += 1
+                if on_event:
+                    await on_event({"type": "context_compacting", "stage": stage_name, "level": overflow_recoveries})
+                original_messages = await _shrink_for_overflow(original_messages, overflow_recoveries)
+                # Older digests are what the shrunk history no longer backs —
+                # keep only the latest so they don't re-grow the payload.
+                round_digests[:] = round_digests[-1:]
+                max_attempts += 1
+            elif attempt == max_attempts - 1:
                 return StageResult(
                     final_text=round_final_text, round_msgs=round_msgs, all_round_msgs=all_round_msgs,
                     tokens_in=tokens_in, tokens_out=tokens_out, llm_calls=llm_calls,
@@ -399,6 +416,49 @@ def _stage_digest(round_msgs: list, verdict: dict) -> str:
     вторую (agent.py:_summarize_round)."""
     from mcp_agent.agent import _summarize_round
     return _summarize_round(round_msgs, verdict)
+
+
+_MAX_OVERFLOW_RECOVERIES = 2
+# Per-message cap for the level-2 fallback — enough to keep the gist of a
+# pasted file/log in the current request without re-overflowing on it.
+_OVERFLOW_MESSAGE_CHAR_CAP = 8000
+
+
+def _msg_role_content(m) -> tuple[str, str]:
+    if isinstance(m, tuple):
+        return m[0], str(m[1])
+    role = {"human": "user", "ai": "assistant"}.get(getattr(m, "type", ""), getattr(m, "type", "user"))
+    content = m.content if isinstance(m.content, str) else str(m.content)
+    return role, content
+
+
+async def _shrink_for_overflow(messages: list, level: int) -> list:
+    """Shrinks the conversation after a context overflow so the retry fits.
+    The last message (the current request) always survives. Level 1 folds
+    everything before it into one model-written summary (compress.py —
+    the same summarizer as between-turn compression); level 2, or level 1
+    whose summary call itself failed, drops the earlier conversation and
+    caps each remaining message's size."""
+    if not messages:
+        return messages
+    *older, current = messages
+    if level == 1 and older:
+        try:
+            from compress import summarize_messages
+            import settings
+            summary = await summarize_messages(
+                [{"role": r, "content": c} for r, c in map(_msg_role_content, older)],
+                max_chars=settings.get("num_ctx") * 2,
+            )
+            log_event("overflow_history_summarized", messages=len(older), chars=len(summary))
+            return [("system", f"[Summary of the earlier conversation]\n{summary}"), current]
+        except Exception as e:
+            log_event("overflow_summary_failed", error=str(e))
+    role, content = _msg_role_content(current)
+    if len(content) > _OVERFLOW_MESSAGE_CHAR_CAP:
+        content = content[:_OVERFLOW_MESSAGE_CHAR_CAP] + "\n…[truncated: too large for the model's context window]"
+    log_event("overflow_history_dropped", messages=len(older))
+    return [(role, content)]
 
 
 def _seed_retry(

@@ -893,6 +893,11 @@ class StreamDisplay:
         elif t == "stats":
             self.pending_stats = event
 
+        # ── CONTEXT OVERFLOW RECOVERY ────────────────────
+        elif t == "context_compacting":
+            what = "сжимаю историю диалога" if event.get("level") == 1 else "отбрасываю старую историю"
+            console.print(f"[yellow]  ↯ контекст переполнен — {what} и продолжаю[/]")
+
         # ── CONTEXT ──────────────────────────────────────
         elif t == "context":
             if self._app is not None:

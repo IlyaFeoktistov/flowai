@@ -57,6 +57,7 @@ from tools.confirm import connect_app as connect_confirm_app, _reset_session  # 
 from web.bridge import WebBridge  # noqa: E402
 from web.sessions_store import get_session, list_sessions, next_seq, save_title, save_turn_trace  # noqa: E402
 from mcp_agent.router import generate_session_title  # noqa: E402
+from compress import compress_history, should_compress  # noqa: E402
 
 # Переключает mcp_agent/prompts.py's math_notation_rule на LaTeX-инструкцию —
 # см. её докстринг: терминал не умеет рендерить формулы, web_morda умеет
@@ -491,9 +492,12 @@ async def ws_chat(ws: WebSocket):
             # полноценный Turn с элементами при переоткрытии сессии, а не
             # только плоский финальный текст, как раньше.
             turn_events: list[dict] = []
+            last_context_tokens = 0
 
             async def on_event_wrapper(payload: dict) -> None:
-                nonlocal answer_seen
+                nonlocal answer_seen, last_context_tokens
+                if payload.get("type") == "context":
+                    last_context_tokens = payload.get("tokens") or 0
                 if payload.get("type") == "answer_chunk":
                     answer_seen = True
                 if payload.get("type") not in ("permission_request", "ask_user_request"):
@@ -590,6 +594,16 @@ async def ws_chat(ws: WebSocket):
             await asyncio.to_thread(save_turn_trace, session_id, assistant_entry["seq"], turn_events)
             if is_first_turn:
                 asyncio.create_task(_generate_and_save_title(session_id, resolved_text))
+            # Same between-turn compression as cli.py — without it the web
+            # session's history only ever grows, and each turn starts closer
+            # to overflowing the window. Only the in-memory working copy is
+            # compressed; episodic keeps the full history for the sidebar.
+            if should_compress(last_context_tokens):
+                try:
+                    messages[:] = await compress_history(messages)
+                    await send_safe({"type": "context_compressed"})
+                except Exception as e:
+                    await send_safe({"type": "error", "message": f"не удалось сжать историю: {e}"})
             await send_safe({"type": "turn_complete", "session_id": session_id})
 
     receiver_task = asyncio.create_task(receive_loop())

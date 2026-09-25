@@ -86,7 +86,8 @@ export interface Turn {
   startedAt: number
   completedAt?: number
   stats?: TurnStats
-  context?: ContextUsage
+  // null — история только что сжата, реальное заполнение неизвестно до следующего вызова
+  context?: ContextUsage | null
 }
 
 export interface HistoryMessage {
