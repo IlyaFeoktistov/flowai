@@ -567,9 +567,9 @@ _TYPE_ALIASES = {"general-purpose": "general", "general_purpose": "general"}
 
 _PLAN_MODE_SUBAGENT_NOTE = (
     "\n\nREAD-ONLY: the parent turn is in PLAN mode. You cannot write, edit or "
-    "delete files; bash accepts read-only commands only (git diff/log/show, "
-    "cat, grep, ls...). Investigate and report; describe any change instead "
-    "of making it."
+    "delete files; bash rejects commands that change something (writing files, "
+    "installs, mutating git, killing processes). Investigate and report; "
+    "describe any change instead of making it."
 )
 
 
@@ -578,7 +578,7 @@ def plan_mode_spec(spec, available: set[str]):
     refused: skills written for Claude Code spawn "general-purpose"
     reviewers/researchers. Write tools leave the schema; bash stays, and
     _PlanModeMiddleware (part of writer_middleware, since bash still counts
-    as mutating) keeps it to read-only commands."""
+    as mutating) rejects its mutating commands."""
     return dataclasses.replace(
         spec,
         tools=frozenset((available if spec.tools is None else spec.tools) & work_mode.PLAN_ALLOWED_TOOLS),

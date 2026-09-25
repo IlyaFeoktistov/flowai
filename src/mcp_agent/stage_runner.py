@@ -135,6 +135,7 @@ async def run_stage(
     verdict: dict | None = None
     generation_error_bonus_used = False
     self_heal_asks_used = 0
+    announce_nudges_used = 0
     overflow_recoveries = 0
 
     while attempt < max_attempts:
@@ -326,6 +327,18 @@ async def run_stage(
             attempt += 1
             continue
 
+        # The round ended on an announcement of the next step ("launching the
+        # 4 agents in parallel:") with no tool call — the model stopped
+        # mid-action. Continue the same thread instead of taking that as the
+        # answer (plan mode's verdict accepts any text, so it would end the
+        # turn right there). Doesn't spend an attempt; capped so a model that
+        # keeps ending on ':' can't loop.
+        if _announced_without_acting(round_final_text) and announce_nudges_used < _MAX_ANNOUNCE_NUDGES:
+            announce_nudges_used += 1
+            log_event("announce_without_action_nudge", stage=stage_name, text=round_final_text[-200:])
+            payload = {"messages": [HumanMessage(content=_ANNOUNCE_NUDGE)]}
+            continue
+
         verdict = await _call_verdict_fn(verdict_fn, round_msgs, new_tool_msgs, round_final_text)
         log_event("stage_verdict", stage=stage_name, **verdict)
         if on_event and not verdict["relevant"]:
@@ -387,6 +400,21 @@ async def run_stage(
         gen_duration_ms=gen_duration_ms, attempts_used=attempt + 1,
         verdict=verdict,
     )
+
+
+_MAX_ANNOUNCE_NUDGES = 2
+_ANNOUNCE_NUDGE = (
+    "Your last message announced a next step but made no tool call, so nothing "
+    "was executed. Make that tool call now. If you decided not to, give your "
+    "final answer instead of announcing an action."
+)
+
+
+def _announced_without_acting(round_final_text: str) -> bool:
+    """A final message ending with ':' introduces something that never
+    came — in practice the tool call the model meant to make next. A real
+    answer basically never ends that way."""
+    return round_final_text.rstrip().rstrip("*_`").rstrip().endswith((":", "："))
 
 
 def _called_ask_user(new_tool_msgs: list) -> bool:
