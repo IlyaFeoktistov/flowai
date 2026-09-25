@@ -852,9 +852,9 @@ class _PlanModeMiddleware(AgentMiddleware):
             return await handler(request)
         return ToolMessage(
             content=(
-                f"Denied: '{name}' is not available in PLAN mode — this turn only "
-                "investigates and plans, it never writes files or runs mutating "
-                "commands. Put this change into your plan as a step instead."
+                f"Denied: '{name}' is not available in PLAN mode — this turn is "
+                "read-only research, it never writes files or runs mutating "
+                "commands. Describe the change in your answer instead."
             ),
             name=name,
             tool_call_id=request.tool_call["id"],
