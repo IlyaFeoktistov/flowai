@@ -316,13 +316,28 @@ def _show_help() -> None:
     for cmd, args, desc in _HELP_ROWS:
         table.add_row(cmd, args, f"— {desc}")
 
+    # Skills and plugin commands are per-project/per-user, so they're listed
+    # from disk each time rather than living in the static _HELP_ROWS.
+    try:
+        dynamic = plugins.load_commands(os.getcwd())
+    except Exception:
+        dynamic = {}
+
+    parts = [table]
+    if dynamic:
+        parts += ["", "[bright_black]скиллы и команды плагинов:[/]"]
+        parts += [
+            f"[bold cyan]/{escape(name)}[/] — {escape(info.get('help') or info.get('plugin', ''))}"
+            for name, info in sorted(dynamic.items())
+        ]
+    parts += [
+        "",
+        "[dim]Shift+Tab — переключить план/build · выделение мышью — копирует в буфер обмена[/]",
+        "[dim]Alt+V — вставить картинку из буфера · Alt+R — голосовой ввод (Ctrl+C — стоп записи)[/]",
+        "[dim]Ctrl+C во время ответа/музыки — остановить[/]",
+    ]
     console.print(Panel(
-        Group(
-            table,
-            "",
-            "[dim]Alt+V — вставить картинку из буфера · Alt+R — голосовой ввод (Ctrl+C — стоп записи)[/]",
-            "[dim]Ctrl+C во время ответа/музыки — остановить[/]",
-        ),
+        Group(*parts),
         title="[bright_black]команды[/]",
         border_style="bright_black",
         padding=(0, 2),

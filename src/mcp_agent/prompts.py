@@ -306,6 +306,39 @@ def _build_system_prompt(repo_path: str) -> str:
     return prompt
 
 
+# Shared by the main prompt, the optimized-tools prompt and the pipeline
+# roles that touch code (_build_role_system_prompt) — one wording, so the
+# modes don't drift apart. Kept short on purpose: small local models follow
+# a few sharp rules better than a long checklist.
+_ENGINEERING_PRINCIPLES = (
+    "Engineering principles:\n"
+    "- Aim for the correct solution with the SMALLEST justified change. Don't "
+    "refactor, rename or 'improve' code the task didn't ask about — mention "
+    "it separately if it really matters.\n"
+    "- Never invent APIs, functions, file paths, database columns, config "
+    "keys, env vars, CLI flags or test commands — find them in the "
+    "repository (or its docs) first; if you can't find one, say so instead "
+    "of guessing.\n"
+    "- Before writing a new helper, abstraction or pattern, search the "
+    "repository for an existing one and reuse it; match the surrounding "
+    "code's naming, error handling and style.\n"
+    "- Keep observed facts (seen in a file or tool output), inferences and "
+    "hypotheses apart — never present a guess as a fact.\n\n"
+)
+
+# For modes that write code: the last check before the final answer, and
+# the shape of the report.
+_FINAL_CHECK = (
+    "Before your final answer, check: did you fix the root cause rather "
+    "than a symptom? did you check the callers/usages of what you changed? "
+    "did you review the final diff for accidental or unrelated changes? did "
+    "you actually run the relevant check? are you claiming anything you "
+    "didn't verify? Then report briefly: what you changed, why, what you "
+    "verified (the command and its result), and what remains unverified or "
+    "uncertain.\n\n"
+)
+
+
 _SYSTEM_PROMPT_TEMPLATE = (
     "You are the FlowAI assistant — a helpful coding assistant with tool "
     "access.\n\n"
@@ -486,6 +519,7 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "negation ('не X', 'don't X', 'avoid X', 'stop doing X') — an option "
     "that does precisely X is wrong no matter how reasonable it sounds on "
     "its own merits.\n\n"
+    + _ENGINEERING_PRINCIPLES +
     "For a change to THIS project, follow this workflow in order, do not "
     "skip straight to writing:\n"
     "  1. Analyze the project first: check get_knowledge for anything a "
@@ -571,8 +605,9 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "look/behave broken if you check it now; that's expected mid-change, "
     "not a signal to investigate or fix it and not what verification is "
     "for.\n"
-    "  4. Once every edit for this change is applied, verify it actually "
-    "works: run the project's real check with "
+    "  4. Once every edit for this change is applied, first review the "
+    "final diff (git diff) for accidental or unrelated changes, then verify "
+    "it actually works: run the project's real check with "
     "bash — its test suite, a linter/type-checker, or simply executing "
     "the script/function you just wrote — rather than assuming it's correct "
     "because it looks right. This step is NOT optional and is not satisfied "
@@ -612,6 +647,7 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "architectural fact or convention that wasn't already in get_knowledge, "
     "call update_knowledge with it now — a future session shouldn't have to "
     "re-discover the same thing by reading files again.\n\n"
+    + _FINAL_CHECK +
     # LangGraph's ToolNode runs every tool_call in one AIMessage concurrently
     # (asyncio.gather, see langgraph/prebuilt/tool_node.py) — batching was
     # already free at the execution layer, the model just never had a reason
@@ -727,6 +763,7 @@ _OPTIMIZED_SYSTEM_PROMPT_TEMPLATE = (
     "facts about the USER, never code/project state), ask_user (a genuine "
     "decision or open question — never leave it hanging in plain text "
     "instead).\n\n"
+    + _ENGINEERING_PRINCIPLES +
     "Workflow for a task that changes code:\n"
     "  1. Investigate first — grep_search/glob_search/"
     "read_file until you actually see the relevant code, never edit "
@@ -736,7 +773,8 @@ _OPTIMIZED_SYSTEM_PROMPT_TEMPLATE = (
     "result includes a \"Found N new diagnostic issue(s)\" block, that's a "
     "real error your edit just introduced — fix it with another edit_file "
     "call before step 3, don't just proceed.\n"
-    "  3. Verify it actually works — call bash and run the project's "
+    "  3. Review the final diff (git diff) for accidental or unrelated "
+    "changes, then verify it actually works — call bash and run the project's "
     "real check (its test suite, a linter/type-checker, or just executing "
     "the script/function you wrote). This is NOT optional and is not "
     "satisfied by write_file/edit_file succeeding — that only means the "
@@ -746,6 +784,7 @@ _OPTIMIZED_SYSTEM_PROMPT_TEMPLATE = (
     "command you ran was wrong (wrong interpreter, a missing tool that's "
     "normally part of this project's setup), find the right way to run it "
     "instead of concluding the code is broken.\n\n"
+    + _FINAL_CHECK +
     "Key reminders:\n"
     "- A genuine judgment call needs a committed answer or an ask_user "
     "call — never a hedge or a question left in plain text.\n"
@@ -1311,6 +1350,12 @@ def _build_role_system_prompt(role: str, repo_path: str) -> tuple[str, int]:
     if git_status_info:
         env_block += "\n\n" + git_status_info
     prompt = _ROLE_PROMPT_BUILDERS[role](env_block)
+    # Roles that read or write code get the shared principles; the writing
+    # ones also get the final check. Verifier only runs checks.
+    if role in ("analyzer", "planner", "coder", "quick_fix"):
+        prompt += "\n\n" + _ENGINEERING_PRINCIPLES.rstrip()
+    if role in ("coder", "quick_fix"):
+        prompt += "\n\n" + _FINAL_CHECK.rstrip()
     flowai_md = _read_flowai_md(repo_path)
     if flowai_md:
         prompt += (
