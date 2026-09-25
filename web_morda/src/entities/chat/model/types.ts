@@ -67,6 +67,14 @@ export interface TurnStats {
   genDurationMs: number
   delegateTokensIn: number
   delegateTokensOut: number
+  delegatePeakContext: number
+}
+
+// Реальное заполнение окна контекста последним вызовом модели (событие
+// "context", mcp_agent/agent.py:_stream_round) — не сумма tokensIn по ходу.
+export interface ContextUsage {
+  tokens: number
+  limit: number | null
 }
 
 export interface Turn {
@@ -78,6 +86,7 @@ export interface Turn {
   startedAt: number
   completedAt?: number
   stats?: TurnStats
+  context?: ContextUsage
 }
 
 export interface HistoryMessage {

@@ -180,6 +180,7 @@ function App() {
           lastAnswerText={lastAnswerText}
           onSend={chat.sendMessage}
           onStop={chat.stopCurrentTurn}
+          context={chat.contextUsage}
         />
       </main>
 

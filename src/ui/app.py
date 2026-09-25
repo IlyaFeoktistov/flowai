@@ -17,7 +17,7 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import to_formatted_text, HTML
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.layout.containers import (
-    HSplit, Window, ConditionalContainer, FloatContainer, Float,
+    HSplit, VSplit, Window, ConditionalContainer, FloatContainer, Float,
 )
 from prompt_toolkit.layout.controls import (
     BufferControl, FormattedTextControl, UIControl, UIContent,
@@ -806,6 +806,11 @@ class FlowAIApp:
         self._output = _OutputControl()
         self._header_line_count: int = 0
         self._stats_text: str = ""
+        # Real context-window fill of the latest model call ("context" event,
+        # mcp_agent/agent.py:_stream_round) — kept between turns, since the
+        # next turn starts from the same history.
+        self._context_tokens: int | None = None
+        self._context_limit: int | None = None
         self._recap_text: str = ""
         self._queue_size: int = 0
         self._history: list[str] = []
@@ -1165,11 +1170,13 @@ class FlowAIApp:
                 parts.append(("class:footer-queue", f"  ·  +{self._queue_size} в очереди"))
             return parts
         hints_ctrl = FormattedTextControl(_hints_text)
-        hints_win = Window(
-            content=hints_ctrl,
-            height=1,
-            style="class:footer",
-        )
+        hints_win = VSplit([
+            Window(content=hints_ctrl, height=1, style="class:footer"),
+            Window(
+                content=FormattedTextControl(self._context_text),
+                height=1, dont_extend_width=True, style="class:footer",
+            ),
+        ])
 
         # Float completion menu
         divider2 = Window(height=1, char="─", style="class:footer-divider")
@@ -1219,6 +1226,8 @@ class FlowAIApp:
             "footer-prompt":                    "ansigreen bold",
             "footer-hints":                     "#6c7086",
             "footer-queue":                     "#f38ba8",
+            "footer-context":                   "#89b4fa",
+            "footer-context-high":              "#f38ba8 bold",
             "auto-suggestion":                  "#6c7086 italic",
             "completion-menu.completion":              "bg:#1e1e2e #cdd6f4",
             "completion-menu.completion.current":      "bg:#89b4fa #1e1e2e bold",
@@ -1614,6 +1623,24 @@ class FlowAIApp:
         self._output._lines = new_lines + self._output._lines[self._header_line_count:]
         self._header_line_count = len(new_lines)
         self.invalidate()
+
+    def set_context_usage(self, tokens: int | None, limit: int | None) -> None:
+        self._context_tokens = tokens
+        self._context_limit = limit
+        self.invalidate()
+
+    def _context_text(self):
+        if not self._context_tokens:
+            return [("", "")]
+        used = self._context_tokens
+        text = f"контекст {used / 1000:.1f}k"
+        style = "class:footer-context"
+        if self._context_limit:
+            pct = used * 100 // self._context_limit
+            text += f"/{self._context_limit / 1000:.0f}k ({pct}%)"
+            if pct >= 80:
+                style = "class:footer-context-high"
+        return [(style, text + " ")]
 
     def set_stats(self, text: str) -> None:
         """Update the stats footer line (shown after/during AI response)."""

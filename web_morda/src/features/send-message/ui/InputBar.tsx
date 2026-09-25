@@ -24,7 +24,9 @@ export function InputBar({
   lastAnswerText,
   onSend,
   onStop,
+  context,
 }: {
+  context: { tokens: number; limit: number | null } | null
   streaming: boolean
   pendingCount: number
   lastAnswerText: string | null
@@ -189,6 +191,12 @@ export function InputBar({
           </button>
         )}
       </div>
+      {context && (
+        <div className={'context-usage' + (context.limit && context.tokens / context.limit >= 0.8 ? ' high' : '')}>
+          контекст {(context.tokens / 1000).toFixed(1)}k
+          {context.limit ? ` / ${Math.round(context.limit / 1000)}k (${Math.floor((context.tokens * 100) / context.limit)}%)` : ''}
+        </div>
+      )}
     </div>
   )
 }

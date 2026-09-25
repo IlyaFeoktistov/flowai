@@ -120,6 +120,10 @@ _FILE_EDIT_TOOL_NAMES = ("write_file", "edit_file")
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+def _fmt_k(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
 def _shorten(val, limit: int = 80) -> str:
     """Every caller uses this for a ONE-LINE status header (the "● ..." line
     a running tool call gets) — a multi-line value (a python -c script with
@@ -889,6 +893,11 @@ class StreamDisplay:
         elif t == "stats":
             self.pending_stats = event
 
+        # ── CONTEXT ──────────────────────────────────────
+        elif t == "context":
+            if self._app is not None:
+                self._app.set_context_usage(event.get("tokens", 0), event.get("limit"))
+
         # ── DONE ─────────────────────────────────────────
         # Nothing to do here — finish() (called from cli.py's finally block
         # right after the stream ends) cancels the footer task.
@@ -1031,7 +1040,16 @@ class StreamDisplay:
             elapsed = dur / 1000.0
             stats_ansi = _ai_header(tok_out, elapsed)
             if delegate_in or delegate_out:
-                stats_ansi += f" \033[2m(из них делегат: {delegate_in + delegate_out} tok)\033[0m"
+                # delegate_in is summed over every sub-agent call (each one
+                # re-sends its whole history), so it says nothing about how
+                # big the sub-agent's context got — show its peak window
+                # and what it actually generated instead.
+                delegate_peak = self.pending_stats.get("delegate_peak_context", 0)
+                stats_ansi += (
+                    f" \033[2m(делегат: сгенерировал {delegate_out} tok"
+                    + (f", контекст до {_fmt_k(delegate_peak)}" if delegate_peak else "")
+                    + ")\033[0m"
+                )
 
             if self._app is not None:
                 # Update stats footer

@@ -97,15 +97,21 @@ function TurnFooter({ turn }: { turn: Turn }) {
   if (tok === 0 && elapsedSec < 1) return null
 
   const label = !turn.complete && phrase ? `${phrase} · ` : ''
-  const delegateTok = turn.stats && (turn.stats.delegateTokensIn || turn.stats.delegateTokensOut)
-    ? turn.stats.delegateTokensIn + turn.stats.delegateTokensOut
-    : 0
+  // delegateTokensIn — сумма по всем вызовам сабагента (каждый заново шлёт
+  // всю историю), поэтому показываем сгенерированное и пик окна контекста.
+  const delegateOut = turn.stats?.delegateTokensOut ?? 0
+  const delegatePeak = turn.stats?.delegatePeakContext ?? 0
 
   return (
     <div className="turn-footer">
       {label}
       {tok} tok · {formatDuration(elapsedSec)}
-      {delegateTok > 0 && <span className="turn-footer-dim"> (из них делегат: {delegateTok} tok)</span>}
+      {delegateOut > 0 && (
+        <span className="turn-footer-dim">
+          {' '}
+          (делегат: сгенерировал {delegateOut} tok{delegatePeak > 0 && `, контекст до ${(delegatePeak / 1000).toFixed(1)}k`})
+        </span>
+      )}
     </div>
   )
 }

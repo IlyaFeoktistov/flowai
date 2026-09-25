@@ -243,7 +243,10 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
     для ЗНАЧЕНИЙ графа, не для токенов, не трогает эту утечку сильнее, чем
     раньше делал ainvoke.
 
-    Возвращает (final_state, tokens_in, tokens_out, hit_recursion_limit).
+    Возвращает (final_state, tokens_in, tokens_out, hit_recursion_limit,
+    peak_context) — peak_context: максимальный prompt+reply ОДНОГО вызова,
+    то есть насколько реально заполнялось окно сабагента (tokens_in — сумма
+    по всем вызовам, каждый из которых заново шлёт всю историю).
     GraphRecursionError ловится ЗДЕСЬ, а не в delegate() (как раньше) —
     LangGraph поднимает его НА СТАРТЕ шага, который превысил бы лимит (тот
     же факт, что agent.py:_stream_round уже использует для внешнего
@@ -268,6 +271,7 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
     prev_len = 0
     final_state: dict = {}
     tokens_in = tokens_out = 0
+    peak_context = 0
     hit_recursion_limit = False
     try:
         async for state in sub_agent.astream({"messages": conversation}, config, stream_mode="values"):
@@ -275,8 +279,11 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
             msgs = state.get("messages") or []
             for m in msgs[prev_len:]:
                 if isinstance(m, AIMessage) and m.usage_metadata:
-                    tokens_in += m.usage_metadata.get("input_tokens", 0) or 0
-                    tokens_out += m.usage_metadata.get("output_tokens", 0) or 0
+                    call_in = m.usage_metadata.get("input_tokens", 0) or 0
+                    call_out = m.usage_metadata.get("output_tokens", 0) or 0
+                    tokens_in += call_in
+                    tokens_out += call_out
+                    peak_context = max(peak_context, call_in + call_out)
                 if on_event is None:
                     continue
                 if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
@@ -298,7 +305,7 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
             prev_len = len(msgs)
     except GraphRecursionError:
         hit_recursion_limit = True
-    return final_state, tokens_in, tokens_out, hit_recursion_limit
+    return final_state, tokens_in, tokens_out, hit_recursion_limit, peak_context
 
 
 def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model=None):
@@ -372,6 +379,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
         conversation = [HumanMessage(content=task)]
         final_text = ""
         tokens_in_total = tokens_out_total = 0
+        peak_context = 0
 
         async def _emit_token_usage() -> None:
             # Reported ONCE, right before delegate() actually returns —
@@ -383,6 +391,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
                 await on_event({
                     "type": "tokens_add",
                     "tokens_in": tokens_in_total, "tokens_out": tokens_out_total,
+                    "peak_context": peak_context,
                 })
 
         # До _MAX_LEAK_RECOVERIES+1 попыток: каждая — свежий invoke графа со
@@ -396,11 +405,12 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
                 "recursion_limit": DELEGATE_RECURSION_LIMIT,
             }
             try:
-                result, round_tokens_in, round_tokens_out, hit_recursion_limit = await _run_subagent_streaming(
+                result, round_tokens_in, round_tokens_out, hit_recursion_limit, round_peak = await _run_subagent_streaming(
                     sub_agent, conversation, config
                 )
                 tokens_in_total += round_tokens_in
                 tokens_out_total += round_tokens_out
+                peak_context = max(peak_context, round_peak)
             except Exception as e:
                 # Same detector agent.py:_stream_round already uses for the
                 # outer agent — compact_research above shrinks the odds of

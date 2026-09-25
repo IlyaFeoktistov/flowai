@@ -320,9 +320,21 @@ async def _stream_round(
                             if on_event:
                                 await on_event({"type": "tool_start", "name": tc["name"], "args": tc["args"], "id": tc.get("id")})
                         if m.usage_metadata:
-                            tokens_in += m.usage_metadata.get("input_tokens", 0) or 0
-                            tokens_out += m.usage_metadata.get("output_tokens", 0) or 0
+                            call_in = m.usage_metadata.get("input_tokens", 0) or 0
+                            call_out = m.usage_metadata.get("output_tokens", 0) or 0
+                            tokens_in += call_in
+                            tokens_out += call_out
                             llm_calls += 1
+                            # tokens_in above is a SUM over every call this
+                            # turn (each re-sends the whole history), so it's
+                            # not how full the window is — the last call's
+                            # own prompt+reply is.
+                            if on_event and call_in:
+                                await on_event({
+                                    "type": "context",
+                                    "tokens": call_in + call_out,
+                                    "limit": settings.get("num_ctx"),
+                                })
                     elif isinstance(m, ToolMessage):
                         # _tool_text (not str()) — MCP tool results are a list of
                         # content blocks ([{'type': 'text', 'text': '...'}]), and
@@ -547,13 +559,14 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     # _stream_round never scans — without this, a delegate call that spent
     # real tokens investigating showed up in the visible running counter as
     # zero (see delegate_tool.py:_run_subagent_streaming's docstring).
-    delegate_tokens = {"in": 0, "out": 0}
+    delegate_tokens = {"in": 0, "out": 0, "peak": 0}
 
     def _track_delegate_tokens(inner_on_event):
         async def wrapped(event: dict) -> None:
             if event.get("type") == "tokens_add":
                 delegate_tokens["in"] += event.get("tokens_in", 0) or 0
                 delegate_tokens["out"] += event.get("tokens_out", 0) or 0
+                delegate_tokens["peak"] = max(delegate_tokens["peak"], event.get("peak_context", 0) or 0)
                 return
             if inner_on_event:
                 await inner_on_event(event)
@@ -682,6 +695,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
             # delegate's share invisible inside one merged number.
             "delegate_tokens_in": delegate_tokens["in"],
             "delegate_tokens_out": delegate_tokens["out"],
+            "delegate_peak_context": delegate_tokens["peak"],
         })
         await on_event({"type": "done"})
 

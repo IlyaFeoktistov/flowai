@@ -77,3 +77,14 @@
   max-width: 760px;
   margin: 0 auto 10px;
 }
+
+.context-usage {
+  max-width: 760px;
+  margin: 6px auto 0;
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: right;
+}
+.context-usage.high {
+  color: var(--danger);
+}

@@ -145,7 +145,7 @@ Rich-разметка (`[bold]`/`[green]`/`[/]`) из `doctor.py`/`update.py`/
 Сервер → клиент — ретранслирует as-is весь `on_event`-поток пайплайна/
 основного агента (`answer_start/chunk/end`, `thinking_start/chunk/end`,
 `tool_start/tool_arg_chunk/tool_end`, `stage_changed`, `plan_steps`/
-`plan_step_done`, `stats`, `done`, `mid_turn_injected` — см.
+`plan_step_done`, `stats`, `context`, `done`, `mid_turn_injected` — см.
 [architecture.md](architecture.md) за их смыслом), плюс свои:
 - `{"type": "session_started", "session_id": "..."}` — сразу после connect
 - `{"type": "turn_started", "text": "..."}` — сообщение СТАЛО новым ходом
@@ -635,6 +635,12 @@ React 18 StrictMode в dev ВЫЗЫВАЕТ такую функцию ДВАЖД
 - После `turn_complete` — точные цифры из уже существовавшего, просто
   раньше не потреблявшегося на фронте `{"type": "stats"}`-события
   (`tokens_out`, `duration_ms` от `agent.py`/`pipeline.py`), без фразы —
-  ход уже не "в процессе". Делегатский расход токенов (`delegate_tokens_in/
-  out`) показывается отдельной пометкой, если он не нулевой — так же, как
-  `ui/stream.py` не даёт ему потеряться внутри общего числа.
+  ход уже не "в процессе". Делегат показывается отдельной пометкой —
+  сгенерированные им токены (`delegate_tokens_out`) и пик его окна
+  контекста (`delegate_peak_context`); `delegate_tokens_in` НЕ показывается:
+  это сумма по всем вызовам сабагента, каждый из которых заново шлёт всю
+  историю, и она легко набегает до сотен тысяч при окне в 30k.
+- `{"type": "context", "tokens": N, "limit": num_ctx}` — после каждого
+  вызова модели: prompt+reply ЭТОГО вызова, то есть насколько реально
+  заполнено окно. Под полем ввода — «контекст 12.3k / 30k (41%)» (красным
+  от 80%); то же в CLI справа в нижней строке подсказок.

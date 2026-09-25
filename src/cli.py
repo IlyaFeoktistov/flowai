@@ -634,6 +634,7 @@ async def main() -> None:
         if cmd == "/clear":
             messages.clear()
             clear_store()
+            app.set_context_usage(None, None)
             app.clear_output()
             print_header(app)
             return

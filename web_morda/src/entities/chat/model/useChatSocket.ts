@@ -197,8 +197,12 @@ function replayTurn(
             genDurationMs: event.gen_duration_ms as number,
             delegateTokensIn: (event.delegate_tokens_in as number) ?? 0,
             delegateTokensOut: (event.delegate_tokens_out as number) ?? 0,
+            delegatePeakContext: (event.delegate_peak_context as number) ?? 0,
           },
         }
+        break
+      case 'context':
+        turn = { ...turn, context: { tokens: event.tokens as number, limit: (event.limit as number) ?? null } }
         break
       default:
         break
@@ -505,7 +509,14 @@ export function useChatSocket() {
                 genDurationMs: event.gen_duration_ms as number,
                 delegateTokensIn: (event.delegate_tokens_in as number) ?? 0,
                 delegateTokensOut: (event.delegate_tokens_out as number) ?? 0,
+                delegatePeakContext: (event.delegate_peak_context as number) ?? 0,
               },
+            }))
+
+          case 'context':
+            return mapTurnItem(prev, turnId, (t) => ({
+              ...t,
+              context: { tokens: event.tokens as number, limit: (event.limit as number) ?? null },
             }))
 
           case 'turn_complete':
@@ -598,6 +609,14 @@ export function useChatSocket() {
 
   useEffect(() => closeSocket, [closeSocket])
 
+  const contextUsage = useMemo(() => {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i]
+      if (e.kind === 'turn' && e.context) return e.context
+    }
+    return null
+  }, [entries])
+
   return useMemo(
     () => ({
       entries,
@@ -613,6 +632,7 @@ export function useChatSocket() {
       respondAskUser,
       startNewChat,
       openSession,
+      contextUsage,
     }),
     [
       entries,
@@ -628,6 +648,7 @@ export function useChatSocket() {
       respondAskUser,
       startNewChat,
       openSession,
+      contextUsage,
     ],
   )
 }
