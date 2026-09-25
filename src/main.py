@@ -49,6 +49,7 @@ from doctor import run_doctor  # noqa: E402
 from update import run_update  # noqa: E402
 from episodic import EpisodicWriter  # noqa: E402
 from mcp_agent import plugins  # noqa: E402
+from mcp_agent import skills as skill_mod  # noqa: E402
 from mcp_agent.agent import stream_chat as main_stream_chat  # noqa: E402
 from mcp_agent.pipeline import stream_chat as pipeline_stream_chat  # noqa: E402
 from mcp_agent import prompts  # noqa: E402
@@ -490,7 +491,13 @@ async def ws_chat(ws: WebSocket):
             is_first_turn = len(messages) == 0
 
             resolved_text = ui_images.resolve_image_paths(text)
-            messages.append({"role": "user", "content": resolved_text})
+            # `/<name> args` for a SKILL.md skill — same expansion cli.py
+            # does through plugins.load_commands; the sidebar/episodic keep
+            # what the user typed, the model gets the skill's instructions.
+            expanded = skill_mod.expand_slash_command(resolved_text, os.getcwd())
+            plugins.current_skill_restriction.set(expanded[1] if expanded else None)
+            model_text = expanded[0] if expanded else resolved_text
+            messages.append({"role": "user", "content": model_text})
             episodic.append("user", resolved_text)
             await send_safe({"type": "turn_started", "text": text})
 

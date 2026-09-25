@@ -12,6 +12,9 @@ build_mcp_connections()`. Исключения — тулы, которым ну
   снимков (`mcp_agent/snapshots.py`)
 - D&D-тулы (`dnd_*`) — `mcp_agent/dnd_tools.py`, свои для каждой игровой
   сессии (замкнуты на `game_id`)
+- `skill` (`mcp_agent/skills.py`) — отдаёт модели тело `SKILL.md` по имени
+  (см. [plugins.md](plugins.md#скиллы-skillmd)); есть в тулсете, только если
+  найден хоть один скилл
 - `delegate` (`mcp_agent/delegate_tool.py`), `web_read`
   (`mcp_agent/web_read_tool.py`) — нужен уже поднятый `model` этого хода
   (переиспользуют резидентную модель, без второй загрузки весов), а не

@@ -675,6 +675,7 @@ flowAI/
 │   │   ├── plugins.py          — загрузчик плагинов (slash-команды, MCP-сервера, хуки) +
 │   │   │                         манифест-free project skills/hooks (см. `docs/plugins.md`)
 │   │   ├── plugin_hooks.py     — миддлварь post_file_edit/pre_commit
+│   │   ├── skills.py           — скиллы SKILL.md (как в Claude Code): поиск, тул `skill`, /имя
 │   │   ├── run_cli.py          — раннер для сравнения mcp_agent/agent.py со старым пайплайном
 │   │   ├── dnd_agent.py / dnd_store.py / dnd_tools.py — режим /dnd: изолированный агент,
 │   │   │                         SQLite-стейт, прямые (не MCP) тулы

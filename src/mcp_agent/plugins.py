@@ -426,9 +426,27 @@ def load_commands(repo_path: str | None = None) -> dict[str, dict]:
     same-named command, neither can ever shadow a cli.py built-in (that
     check happens entirely in cli.py, before this is even consulted)."""
     commands = dict(_load_global_commands())
+    commands.update(_markdown_skill_commands(repo_path))
     if repo_path is not None:
         commands.update(discover_project_skills(repo_path))
     return commands
+
+
+def _markdown_skill_commands(repo_path: str | None) -> dict[str, dict]:
+    """SKILL.md skills (mcp_agent/skills.py) as `/<name>` commands: the body
+    goes straight into a real agent turn, with the skill's allowed-tools
+    (if any) enforced the same way SkillTask.allowed_tools is."""
+    from mcp_agent import skills as md_skills
+
+    def _make(skill):
+        def run(args: str, _console):
+            return SkillTask(task=md_skills.render_skill(skill, args), allowed_tools=skill.allowed_tools)
+        return run
+
+    return {
+        name: {"func": _make(skill), "help": skill.description, "plugin": str(skill.path)}
+        for name, skill in md_skills.discover_skills(repo_path).items()
+    }
 
 
 def load_hooks(hook_name: str, repo_path: str | None = None) -> list[Callable]:
@@ -457,6 +475,20 @@ def describe_installed(repo_path: str | None = None) -> str:
         if m.get("hooks"):
             provides.append("хуки: " + ", ".join(m["hooks"]))
         lines.append(f"[bold]{m['name']}[/] v{m.get('version', '?')} — {m.get('description', '')}\n  " + ("; ".join(provides) or "ничего не объявлено"))
+
+    from mcp_agent import skills as md_skills
+    md = md_skills.discover_skills(repo_path)
+    if md:
+        lines.append("")
+        lines.append("[bold]Скиллы (SKILL.md)[/] — модель подтягивает сама по описанию, или /имя:")
+        for skill in md.values():
+            lines.append(f"  /{skill.name} — {skill.description or 'без описания'} [dim]({skill.source}: {skill.path})[/]")
+    else:
+        lines.append("")
+        lines.append(
+            f"Скиллов (SKILL.md) нет — положи <имя>/SKILL.md в {md_skills.user_skills_dir()} "
+            "или в .flowai/skills/ проекта."
+        )
 
     if repo_path is not None:
         skills = discover_project_skills(repo_path)

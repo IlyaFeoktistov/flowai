@@ -23,6 +23,7 @@ import distro
 import psutil
 
 import settings
+from mcp_agent.skills import skills_prompt_block
 
 # Терминал (cli.py) не умеет рендерить LaTeX — модель должна писать формулы
 # plain-text/Unicode. web_morda (src/main.py) рендерит \(...\)/\[...\] через
@@ -296,6 +297,7 @@ def _build_system_prompt(repo_path: str) -> str:
             "instructions — follow them whenever relevant to the task:\n\n"
             + flowai_md
         )
+    prompt += skills_prompt_block(repo_path)
     # Пересчитываем оценку токенов system-промпта (используется в usage-стате,
     # см. _SYSTEM_PROMPT_TOKENS_ESTIMATE ниже) с учётом реального размера —
     # FLOWAI.md может ощутимо увеличить промпт по сравнению со статическим
@@ -795,6 +797,7 @@ def _build_optimized_system_prompt(repo_path: str) -> str:
             "instructions — follow them whenever relevant to the task:\n\n"
             + flowai_md
         )
+    prompt += skills_prompt_block(repo_path)
     _SYSTEM_PROMPT_TOKENS_ESTIMATE = len(prompt) // 4
     return prompt
 
@@ -1315,6 +1318,7 @@ def _build_role_system_prompt(role: str, repo_path: str) -> tuple[str, int]:
             "instructions — follow them whenever relevant to your part of "
             "the task:\n\n" + flowai_md
         )
+    prompt += skills_prompt_block(repo_path)
     return prompt, len(prompt) // 4
 
 

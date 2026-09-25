@@ -43,6 +43,7 @@ from mcp_agent.config import build_mcp_connections, TOOLS_REQUIRING_APPROVAL
 from mcp_agent.debug_log import log_event
 from mcp_agent.delegate_tool import _DelegateNudgeMiddleware, build_delegate_tool
 from mcp_agent.web_read_tool import build_web_read_tool
+from mcp_agent import skills as md_skills
 from mcp_agent.message_utils import _DedupeToolResultsMiddleware
 from mcp_agent.optimized_tools import build_optimized_tools
 from mcp_agent import plugins
@@ -1134,6 +1135,10 @@ async def _build_agent(repo_path: str | None = None):
     # docstring on why (compact_research, same judge_model as this agent's
     # own self-heal, not a second one).
     agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools, raw_read_file_tool, judge_model), build_web_read_tool(model)] + tools
+    # SKILL.md skills (mcp_agent/skills.py) — the tool only exists when
+    # there's at least one skill, so its schema doesn't cost tokens for nothing.
+    if not voice_mode and md_skills.discover_skills(resolved_repo_path):
+        agent_tools.append(md_skills.build_skill_tool(resolved_repo_path))
 
     # Отдельный от "tools_loaded" в _build_tools лог — тот пишется ДО
     # optimized_tools/voice_mode/delegate, то есть показывает "что подняли из
@@ -1278,6 +1283,9 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     # decided whether "web_read" is even in tool_names.
     if "web_read" in tool_names:
         agent_tools.append(build_web_read_tool(model))
+    # Read-only and available to every role, same as plugin tools above.
+    if md_skills.discover_skills(resolved_repo_path):
+        agent_tools.append(md_skills.build_skill_tool(resolved_repo_path))
 
     if DEBUG:
         debug_print(f"[dim][MCP-AGENT] Role '{role}' has {len(agent_tools)} tools available this turn: {[t.name for t in agent_tools]}[/]")
@@ -1360,6 +1368,7 @@ async def _get_role_agent(role: str, tool_names: frozenset[str], repo_path: str 
     current_value = (
         current_model, repo_path or os.getcwd(),
         settings.get("expert_streaming_enabled"), tuple(sorted(model_params.effective(current_model).items())),
+        md_skills.fingerprint(repo_path or os.getcwd()),
     )
 
     async def _on_stale(old_freshness, _new_freshness):
@@ -1397,6 +1406,7 @@ async def _get_agent(repo_path: str | None = None):
         current_model, settings.get("voice_mode"), repo_path or os.getcwd(),
         settings.get("optimized_tools"), settings.get("always_delegate_search"),
         settings.get("expert_streaming_enabled"), tuple(sorted(model_params.effective(current_model).items())),
+        md_skills.fingerprint(repo_path or os.getcwd()),
     )
 
     async def _on_stale(old_freshness, _new_freshness):
