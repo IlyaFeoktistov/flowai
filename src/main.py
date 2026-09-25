@@ -248,6 +248,27 @@ async def models_endpoint():
         return JSONResponse({"error": str(e)}, status_code=502)
 
 
+@router.get("/instances")
+async def instances_endpoint():
+    """Loaded models across both backends (Ollama + our llama.cpp fork) —
+    see instances.py. Sync underneath (ollama.Client, nvidia-smi), hence
+    to_thread."""
+    import instances
+    items, errors = await asyncio.to_thread(instances.list_instances)
+    return {"instances": items, "errors": errors}
+
+
+class InstanceBody(BaseModel):
+    id: str
+
+
+@router.post("/instances/unload")
+async def instances_unload_endpoint(body: InstanceBody):
+    import instances
+    message = await asyncio.to_thread(instances.unload_instance, body.id)
+    return {"message": message}
+
+
 @router.post("/upload_image")
 async def upload_image_endpoint(image: UploadFile = File(...)):
     """Attach-file chip for an image — reuses ui/images.py's store_image()

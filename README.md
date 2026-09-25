@@ -285,7 +285,7 @@ Ollama, см. `expert_streaming.py` — обычный Ollama-путь для Э
 python3 src/cli.py
 ```
 
-Команды в чате: `/img путь.jpg`, `/paste`, `/gen промпт`, `/gen_model промпт [--rig]`, `/anim описание движения`, `/gen_texture @модель @картинка`, `/usage`, `/settings`, `/reindex [путь ...]`, `/clear`, `/help` (полный список — [`docs/commands.md`](docs/commands.md)).
+Команды в чате: `/img путь.jpg`, `/paste`, `/gen промпт`, `/gen_model промпт [--rig]`, `/anim описание движения`, `/gen_texture @модель @картинка`, `/usage`, `/instances`, `/settings`, `/reindex [путь ...]`, `/clear`, `/help` (полный список — [`docs/commands.md`](docs/commands.md)).
 
 ### Запуск из любой директории (Linux)
 
@@ -643,6 +643,7 @@ flowAI/
 │   ├── memory_admin.py     — CLI-обслуживание памяти (просмотр/чистка фактов)
 │   ├── version.py          — версия приложения
 │   ├── clean.py            — /clean: чистка накопленного мусора (debug-логи, delete_path-трэш, ...)
+│   ├── instances.py        — /instances: загруженные модели по бэкендам, память, выгрузка
 │   ├── doctor.py           — /doctor: единый health-check (жив ли Ollama, что реально загружено)
 │   ├── update.py           — /update: автообновление поверх git, а не пакетного менеджера
 │   ├── mcp_agent/

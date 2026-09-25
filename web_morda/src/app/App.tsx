@@ -18,14 +18,16 @@ import { UsageModal } from '@/features/view-usage'
 import { MemoryModal } from '@/features/manage-memory'
 import { PluginsModal } from '@/features/view-plugins'
 import { SettingsModal } from '@/features/edit-settings'
+import { InstancesModal } from '@/features/view-instances'
 
-type CommandKind = 'doctor' | 'update' | 'clean' | 'usage' | 'memory' | 'plugins' | 'settings'
+type CommandKind = 'doctor' | 'update' | 'clean' | 'usage' | 'memory' | 'plugins' | 'settings' | 'instances'
 
 const COMMANDS: { key: CommandKind; label: string }[] = [
   { key: 'doctor', label: 'Доктор' },
   { key: 'update', label: 'Обновления' },
   { key: 'clean', label: 'Очистка' },
   { key: 'usage', label: 'Использование' },
+  { key: 'instances', label: 'Инстансы' },
   { key: 'memory', label: 'Память' },
   { key: 'plugins', label: 'Плагины' },
   { key: 'settings', label: 'Настройки' },
@@ -199,6 +201,7 @@ function App() {
       {openCommand === 'memory' && <MemoryModal onClose={() => setOpenCommand(null)} />}
       {openCommand === 'plugins' && <PluginsModal onClose={() => setOpenCommand(null)} />}
       {openCommand === 'settings' && <SettingsModal onClose={() => setOpenCommand(null)} />}
+      {openCommand === 'instances' && <InstancesModal onClose={() => setOpenCommand(null)} />}
     </div>
   )
 }

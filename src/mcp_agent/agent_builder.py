@@ -1139,6 +1139,15 @@ def invalidate_tool_caches() -> None:
     every call issued after this one sees the fresh set, spawning/dropping
     the image_gen/music/gen_model MCP subprocesses as needed on next use."""
     _tools_cache.clear()
+    invalidate_agent_caches()
+
+
+def invalidate_agent_caches() -> None:
+    """Drops built agents but keeps the (expensive) MCP tool connections —
+    for changes that only affect the chat model client itself: a model
+    unloaded via /instances (the cached client points at a dead llama-server
+    port) or edited per-model sampling params (baked into the client at
+    build time, see _build_chat_model)."""
     _agent_cache.clear()
     _role_agent_cache.clear()
 

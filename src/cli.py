@@ -282,6 +282,7 @@ _HELP_ROWS: list[tuple[str, str, str]] = [
     ("/talk", "текст", "озвучить текст напрямую, без модели"),
     ("/usage", "", "статистика токенов"),
     ("/doctor", "", "проверка Ollama / модели / MCP-серверов / хранилища"),
+    ("/instances", "", "загруженные модели (Ollama / llama.cpp), память, выгрузка"),
     (
         "/reindex", "src file.py ...",
         "собрать индекс для семантического поиска по коду; без аргументов — весь проект, "
@@ -651,6 +652,14 @@ async def main() -> None:
             def _run_memory():
                 memory_menu(lambda: print_header(app))
             await run_in_terminal(_run_memory, render_cli_done=False)
+            return
+
+        if cmd == "/instances":
+            from prompt_toolkit.application.run_in_terminal import run_in_terminal
+            from ui.tui.instances_view import instances_menu
+            def _run_instances():
+                instances_menu(lambda: print_header(app))
+            await run_in_terminal(_run_instances, render_cli_done=False)
             return
 
         if cmd == "/usage":

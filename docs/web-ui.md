@@ -65,7 +65,7 @@ Python-кода, пока блокирующий вызов не отпусти�
 app/        — точка сборки: App.tsx (композиция), styles/global.css (токены/reset), App.css
 widgets/    — sidebar (сайдбар целиком), chat-panel (лента + TurnView)
 features/   — send-message, pick-folder, attach-file, record-voice,
-              view-doctor, check-updates, clean-storage, view-usage,
+              view-doctor, check-updates, clean-storage, view-usage, view-instances,
               manage-memory, view-plugins, edit-settings — один слайс =
               одно самостоятельное действие пользователя, каждый со
               своим ui/ (+ api/, если ходит в сеть; record-voice ещё и
@@ -112,6 +112,7 @@ event loop) или просто медленная генерация на сл�
 | `GET /api/v1/doctor` | = `/doctor` в CLI |
 | `POST /api/v1/update` | = `/update` |
 | `GET/POST /api/v1/clean` | GET — отчёт без удаления, POST `{scope}` — реально чистит |
+| `GET /api/v1/instances`, `POST /api/v1/instances/unload` `{id}` | = `/instances` — загруженные модели (Ollama + llama.cpp) и выгрузка одной из них |
 | `GET /api/v1/usage` | = `/usage` (персистентные totals, не live-счётчик текущего хода) |
 | `GET/DELETE /api/v1/memory`, `DELETE /api/v1/memory/facts/{i}`, `DELETE /api/v1/memory/knowledge` | = `/memory` |
 | `GET /api/v1/plugins` | = `/plugin` |
