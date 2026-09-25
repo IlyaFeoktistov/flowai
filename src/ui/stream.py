@@ -168,6 +168,8 @@ def _format_tool_call(name: str, args: dict) -> str:
         what = args.get("description") or _shorten(args.get("prompt", ""), 60)
         return f"агент {kind}: {what}" + (" (в фоне)" if args.get("run_in_background") else "")
     if name == "agent_result":
+        if args.get("agent_ids"):  # stage_runner collecting uncollected background agents
+            return f"жду фоновых агентов: {', '.join(args['agent_ids'])}"
         return f"жду отчёт агента {args.get('agent_id', '?')}"
     if name == "read_file":
         path = args.get("path", "?")

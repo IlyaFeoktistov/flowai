@@ -30,3 +30,21 @@ def test_inspecting_commands_pass(command):
 ])
 def test_mutating_commands_denied(command):
     assert is_mutating_bash(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    'D="/tmp/review-staged-x-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$D" && echo "$D"',
+    "python3 /home/u/.flowai/skills/scripts/match_rules.py . <(git diff --name-only) > /tmp/review-rules.txt",
+    "echo x > /tmp/a.txt", "cp src/app.py /tmp/app.py.bak", "rm -rf /tmp/scratch", "mkdir -p /tmp/a /tmp/b",
+    "git diff | tee /tmp/diff.txt", 'echo x >> "$TMPDIR/log"', "touch ${TMPDIR}/f",
+])
+def test_scratch_writes_to_temp_dir_pass(command):
+    assert is_mutating_bash(command) is False
+
+
+@pytest.mark.parametrize("command", [
+    "rm -rf /tmp/../home/u/project", "cp /tmp/a src/app.py", "mv /tmp/a src/", "mkdir -p /tmp/a build",
+    'D=build; mkdir -p "$D"', "echo x > /tmpfoo", "cp -t src /tmp/a", "chmod 777 src/x",
+])
+def test_writes_outside_temp_dir_still_denied(command):
+    assert is_mutating_bash(command) is True

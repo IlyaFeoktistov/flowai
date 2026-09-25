@@ -31,6 +31,7 @@ from langgraph.errors import GraphRecursionError
 
 from tools.confirm import ask_user_question
 from mcp_agent.debug_log import log_event
+from mcp_agent import delegate_tool
 from mcp_agent.delegate_tool import _SUBAGENT_TOOLS, _suppress_during_subagent_tools  # noqa: F401 (re-exported, see below)
 from mcp_agent.model_config import MAX_SELF_HEAL_ASKS, TOOL_OUTPUT_CHAR_CAP
 from mcp_agent.self_heal import (
@@ -79,10 +80,24 @@ class StageResult:
     hit_context_overflow: bool = False
 
 
-async def run_stage(
+async def run_stage(*args, **kwargs) -> "StageResult":
+    """See _run_stage. Owns the background sub-agents started during this
+    stage (delegate_tool.current_stage_owner): whatever is still running when
+    the stage exits — stopped turn, error path — is cancelled, never left
+    generating on the shared model behind the user's back."""
+    owner = object()
+    token = delegate_tool.current_stage_owner.set(owner)
+    try:
+        return await _run_stage(*args, owner=owner, **kwargs)
+    finally:
+        delegate_tool.cancel_background(owner)
+        delegate_tool.current_stage_owner.reset(token)
+
+
+async def _run_stage(
     agent, payload: dict, on_event, *,
     judge_model, tools_by_name: dict, read_history: dict,
-    verdict_fn, guidance_fn, max_attempts: int, recursion_limit: int,
+    verdict_fn, guidance_fn, max_attempts: int, recursion_limit: int, owner=None,
     stage_name: str, mid_turn_queue=None,
 ) -> StageResult:
     """Крутит agent.astream(...) с self-heal ретраями до max_attempts, как
@@ -327,6 +342,21 @@ async def run_stage(
             attempt += 1
             continue
 
+        # Background sub-agents the model started and never collected: the
+        # turn can't end on them — wait for their reports and hand them to
+        # the model in the same thread, like a finished tool call would.
+        pending = delegate_tool.pending_background(owner)
+        if pending:
+            call_id = uuid.uuid4().hex
+            if on_event:
+                await on_event({"type": "tool_start", "name": "agent_result", "args": {"agent_ids": pending}, "stage": stage_name, "id": call_id})
+            reports = await delegate_tool.collect_background(owner)
+            if on_event:
+                await on_event({"type": "tool_end", "name": "agent_result", "result": reports[:TOOL_OUTPUT_CHAR_CAP], "stage": stage_name, "id": call_id})
+            log_event("background_agents_collected", stage=stage_name, ids=pending)
+            payload = {"messages": [HumanMessage(content=_BACKGROUND_DONE + reports)]}
+            continue
+
         # The round ended on an announcement of the next step ("launching the
         # 4 agents in parallel:") with no tool call — the model stopped
         # mid-action. Continue the same thread instead of taking that as the
@@ -401,6 +431,12 @@ async def run_stage(
         verdict=verdict,
     )
 
+
+_BACKGROUND_DONE = (
+    "Your background agents have finished (you hadn't collected them with "
+    "agent_result). Their reports are below — use them to finish the task, "
+    "then give your final answer.\n\n"
+)
 
 _MAX_ANNOUNCE_NUDGES = 2
 _ANNOUNCE_NUDGE = (

@@ -924,8 +924,9 @@ class _PlanModeMiddleware(AgentMiddleware):
                 "files, installs, mutating git, kills or starts processes). Any command "
                 "that only reads or inspects still works — ps, ls, cat, grep, find, "
                 "git log/diff/status, docker ps, systemctl status..., chained with "
-                "| && || ; and with 2>/dev/null. Use a read-only command for what you "
-                "need, or describe the change in your answer instead."
+                "| && || ; and with 2>/dev/null; writing scratch files under /tmp is "
+                "allowed too. Use a read-only command for what you need, or "
+                "describe the change in your answer instead."
             )
         else:
             content = (

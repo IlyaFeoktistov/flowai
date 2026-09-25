@@ -15,9 +15,17 @@ The command is split into simple commands on | || && ; & and ( ) (which
 also opens up $(...) and subshells), and each one is judged by the program
 in command position — `grep rm file` is fine, `xargs rm`, `sudo rm` and
 `bash -c 'rm ...'` are not.
+
+Scratch space is exempt: writes that only touch the temp dir (/tmp,
+$TMPDIR) — redirects there, mkdir/touch/rm/mv inside it, cp/ln into it —
+don't change the project or the system, and skills routinely keep their
+working files there. `D=/tmp/x; mkdir -p "$D"` counts too: variables
+assigned a temp path in the same command are tracked.
 """
+import os
 import re
 import shlex
+import tempfile
 
 _SEPARATORS = {"|", "||", "&&", ";", "&", "|&", "(", ")", "$(", ";;"}
 
@@ -65,6 +73,34 @@ _SHELLS = {"sh", "bash", "zsh", "dash", "fish"}
 
 _IN_PLACE = re.compile(r"^(-i|--in-place)")
 
+_TMP_ROOTS = tuple({"/tmp", os.path.realpath(tempfile.gettempdir())})
+# Write only their destination (last positional argument) vs. touch every
+# positional argument.
+_TMP_DEST_ONLY = {"cp", "ln", "install", "rsync"}
+_TMP_ALL_ARGS = {"rm", "rmdir", "mv", "mkdir", "touch", "tee", "truncate", "chmod", "shred", "unlink"}
+_VAR_REF = re.compile(r"^\$(\{)?(\w+)(?(1)\})")
+
+
+def _is_tmp_path(path: str, tmp_vars: frozenset[str]) -> bool:
+    m = _VAR_REF.match(path)
+    if m:
+        return m.group(2) in tmp_vars or m.group(2) == "TMPDIR"
+    norm = os.path.normpath(path)
+    return any(norm == root or norm.startswith(root + "/") for root in _TMP_ROOTS)
+
+
+def _tmp_vars(segments: list[list[str]]) -> frozenset[str]:
+    """Names assigned a temp-dir path by a bare `NAME=value` segment."""
+    names = set()
+    for seg in segments:
+        for tok in seg:
+            name, eq, value = tok.partition("=")
+            if not eq or not name.isidentifier():
+                break
+            if _is_tmp_path(value, frozenset(names)):
+                names.add(name)
+    return frozenset(names)
+
 
 def _tokens(command: str) -> list[str] | None:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
@@ -94,11 +130,11 @@ def _segments(tokens: list[str]) -> list[list[str]]:
     return segments
 
 
-def _writes_via_redirect(tokens: list[str]) -> bool:
+def _writes_via_redirect(tokens: list[str], tmp_vars: frozenset[str]) -> bool:
     for i, tok in enumerate(tokens):
         if tok in (">", ">>", "&>", "&>>", ">|"):
             target = tokens[i + 1] if i + 1 < len(tokens) else ""
-            if target != "/dev/null":
+            if target != "/dev/null" and not _is_tmp_path(target, tmp_vars):
                 return True
     return False
 
@@ -119,7 +155,7 @@ def _strip_wrappers(seg: list[str]) -> list[str]:
     return seg
 
 
-def _segment_mutates(seg: list[str]) -> bool:
+def _segment_mutates(seg: list[str], tmp_vars: frozenset[str] = frozenset()) -> bool:
     seg = _strip_wrappers(seg)
     if not seg:
         return False
@@ -135,6 +171,14 @@ def _segment_mutates(seg: list[str]) -> bool:
             return i + 1 < len(args) and is_mutating_bash(args[i + 1])
         return any(not a.startswith("-") for a in args)  # bash script.sh — unknown script
     if prog in _MUTATING_PROGRAMS:
+        positional = [a for a in args if not a.startswith("-")]
+        if positional and "-t" not in args and "--target-directory" not in args:
+            if prog in _TMP_DEST_ONLY:
+                return not _is_tmp_path(positional[-1], tmp_vars)
+            if prog in _TMP_ALL_ARGS:
+                # chmod's first positional is the mode, not a path
+                paths = positional[1:] if prog == "chmod" else positional
+                return not (paths and all(_is_tmp_path(a, tmp_vars) for a in paths))
         return True
     if prog in ("sed", "perl", "ruby") and any(_IN_PLACE.match(a) for a in args):
         return True
@@ -146,7 +190,7 @@ def _segment_mutates(seg: list[str]) -> bool:
         for flag in ("-exec", "-execdir", "-ok", "-okdir"):
             if flag in args:
                 i = args.index(flag)
-                if _segment_mutates(args[i + 1:]):
+                if _segment_mutates(args[i + 1:], tmp_vars):
                     return True
         return False
     if prog == "curl":
@@ -193,6 +237,8 @@ def is_mutating_bash(command: str) -> bool:
     tokens = _tokens(head)
     if tokens is None:
         return False
-    if _writes_via_redirect(tokens):
+    segments = _segments(tokens)
+    tmp_vars = _tmp_vars(segments)
+    if _writes_via_redirect(tokens, tmp_vars):
         return True
-    return any(_segment_mutates(seg) for seg in _segments(tokens))
+    return any(_segment_mutates(seg, tmp_vars) for seg in segments)

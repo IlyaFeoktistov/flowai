@@ -13,7 +13,10 @@ at once and the model's throughput is shared between them.
 
 A foreground call blocks the calling agent until the report is back, like a
 normal tool. run_in_background=True returns an agent_id immediately — the
-main agent keeps working and collects the report with agent_result().
+main agent keeps working and collects the report with agent_result(). A run
+it never collects is collected for it when its round ends (stage_runner:
+the reports go back to the model and the turn continues), and cancelled if
+the turn is stopped.
 
 Writing sub-agents (general, or a custom agent whose tools include writes)
 use the main agent's already-wrapped tools (snapshot before write, fresh-read
@@ -146,6 +149,40 @@ class _DelegateNudgeMiddleware(AgentMiddleware):
 # run_cli.py без стрима) просто не получает живых событий, тул всё равно
 # работает и возвращает финальный текст как раньше.
 current_on_event: ContextVar = ContextVar("delegate_on_event", default=None)
+
+# Background runs, process-wide rather than per build_delegate_tool (the tool
+# is rebuilt per role/agent cache): stage_runner.run_stage must see every
+# run its own agent started and not yet collected, so it can collect them
+# before the turn ends instead of leaving them running unseen. Each run is
+# tagged with the run_stage that started it (current_stage_owner) — several
+# run_stage calls can be alive at once (router, title generation) and one
+# must never collect or cancel another's agents.
+_background: dict[str, dict] = {}
+current_stage_owner: ContextVar = ContextVar("delegate_stage_owner", default=None)
+
+
+def pending_background(owner) -> list[str]:
+    return [agent_id for agent_id, e in _background.items() if e["owner"] is owner]
+
+
+async def collect_background(owner) -> str:
+    """Waits for every uncollected background run of `owner`, returns their
+    reports as one text and forgets them."""
+    parts = []
+    for agent_id in pending_background(owner):
+        entry = _background[agent_id]
+        try:
+            result = await asyncio.shield(entry["task"])
+        except Exception as e:
+            result = f"Agent failed: {e}"
+        _background.pop(agent_id, None)
+        parts.append(f"[agent {agent_id} {entry['type']}: {entry['label']}]\n{result}")
+    return "\n\n".join(parts)
+
+
+def cancel_background(owner) -> None:
+    for agent_id in pending_background(owner):
+        _background.pop(agent_id)["task"].cancel()
 
 # Тулы, чья работа идёт ВНУТРИ отдельного sub_agent.astream()/ainvoke() на
 # том же объекте `model`, что и внешняя роль/основной агент — delegate
@@ -304,7 +341,6 @@ def build_delegate_tool(
     judge_model — the same one the main agent judges its rounds with, used
     only for _CompactResearchMiddleware."""
     available = {t.name for t in tools} | {"web_read"}
-    background: dict[str, dict] = {}
 
     def _tools_for(spec) -> list:
         names = (available if spec.tools is None else spec.tools & available) - NEVER_FOR_SUBAGENTS
@@ -535,7 +571,7 @@ def build_delegate_tool(
         ctx.run(current_on_event.set, current_on_event.get())
         ctx.run(work_mode.current_work_mode.set, work_mode.current_work_mode.get())
         task = asyncio.get_running_loop().create_task(_run_limited(spec, prompt, label), context=ctx)
-        background[agent_id] = {"task": task, "type": spec.name, "label": label}
+        _background[agent_id] = {"task": task, "type": spec.name, "label": label, "owner": current_stage_owner.get()}
         return (
             f"Started background agent {agent_id} ({spec.name}: {label}). Keep working; "
             f"call agent_result(agent_id=\"{agent_id}\") to get its report before your final answer."
@@ -546,9 +582,9 @@ def build_delegate_tool(
         """Get the report of a background agent started with
         agent(..., run_in_background=true). wait=true blocks until it
         finishes; wait=false returns right away saying whether it's done."""
-        entry = background.get(agent_id.strip())
+        entry = _background.get(agent_id.strip())
         if entry is None:
-            known = ", ".join(background) or "none"
+            known = ", ".join(pending_background(current_stage_owner.get())) or "none"
             return f"Error: no background agent {agent_id!r}. Known: {known}."
         task = entry["task"]
         if not task.done() and not wait:
@@ -557,7 +593,7 @@ def build_delegate_tool(
             result = await asyncio.shield(task)
         except Exception as e:
             result = f"Agent failed: {e}"
-        background.pop(agent_id, None)
+        _background.pop(agent_id.strip(), None)
         return f"[agent {entry['type']}: {entry['label']}]\n{result}"
 
     return [agent, agent_result]
