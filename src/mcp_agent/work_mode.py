@@ -4,12 +4,13 @@ plan / build — two ways to run a turn of the main agent (mcp_agent/agent.py,
 own staging and ignores this), same idea as opencode's plan/build agents:
 
 - build — the normal mode: the agent reads, edits, runs commands.
-- plan  — investigate and produce a plan, change nothing. Enforced
+- plan  — read-only research: investigate and answer, change nothing; an
+  implementation plan only when the user asks for one. Enforced
   mechanically by PlanModeMiddleware (agent_builder._base_agent_middleware):
   only read-only tools pass, bash only for read-only commands
   (agent_builder._is_read_only_bash_command) — not just a prompt request.
 
-The plan a plan-mode turn produces is saved to
+A plan-mode reply that IS a plan (has a Steps section, see is_plan) is saved to
 <project>/.flowai/plans/<timestamp>-<slug>.md, so it never has to be copied
 out of the chat window: `/build` (CLI and web) switches to build mode and
 hands the latest saved plan to the agent as the task; the file itself can
@@ -44,30 +45,44 @@ PLAN_ALLOWED_TOOLS = frozenset({
 # prompt in plan mode (agent_builder._build_agent) — last position, since it
 # must override the base prompt's "write the change, then verify" workflow.
 PLAN_SYSTEM_PROMPT_SECTION = (
-    "\n\n## PLAN MODE (overrides the code-change workflow above)\n"
-    "You are in PLAN mode for this whole turn. Your job is to investigate and "
-    "produce an implementation plan — NOT to implement it. Only read-only "
-    "tools are available; you cannot write, edit or delete files, and bash "
-    "accepts read-only commands only (git log/diff/status, ls, cat, grep...). "
-    "Skip the 'write the change' and 'verify' steps above entirely.\n"
-    "1. Read the code the request touches until you know exactly which "
-    "files/functions change and how — a plan built on guesses is useless.\n"
-    "2. If a real decision belongs to the user (two valid designs, unclear "
-    "scope), ask it with ask_user; don't ask what the code can answer.\n"
-    "3. Reply with the final plan in Markdown, in the user's language:\n"
+    "\n\n## PLAN MODE — read-only research (overrides the code-change workflow above)\n"
+    "You are in PLAN mode for this whole turn: investigate and answer, change "
+    "nothing. Only read-only tools are available; you cannot write, edit or "
+    "delete files, and bash accepts read-only commands only (git log/diff/"
+    "status, ls, cat, grep...). Skip the 'write the change' and 'verify' "
+    "steps above entirely. If a skill or the request calls for edits, don't "
+    "attempt them — say what would change instead.\n"
+    "Answer what the user actually asked: an explanation, findings, a review, "
+    "a comparison — in the user's language, backed by what you read (file:line). "
+    "Don't turn every answer into a plan.\n"
+    "ONLY when the user asks for a plan (or asks how to implement/change "
+    "something), reply with an implementation plan in Markdown:\n"
     "## Goal — one or two sentences\n"
     "## Context — what you found that matters (files, functions, constraints)\n"
     "## Steps — numbered, concrete: which file, which function, what change\n"
     "## Verification — the exact commands/checks that prove it works\n"
     "## Risks / open questions — if any\n"
-    "The plan is saved to a file and later executed by an agent in build "
-    "mode that has NOT seen this conversation, so every step must be "
-    "self-contained: full file paths, names, and the reasoning it needs."
+    "(headings may be in the user's language, e.g. ## Шаги for Steps). Such a "
+    "plan is saved to a file and later executed by an agent in build mode "
+    "that has NOT seen this conversation, so every step must be "
+    "self-contained: full file paths, names, and the reasoning it needs. "
+    "Read the code until you know exactly what changes — a plan built on "
+    "guesses is useless; a real decision that belongs to the user goes to "
+    "ask_user."
 )
 
 # Short per-turn reminder on the user's message — the full rules live in
 # the system prompt; this keeps them from being lost behind a long history.
-PLAN_MODE_INSTRUCTION = "\n\n(PLAN MODE: investigate and reply with a plan; do not modify anything.)"
+PLAN_MODE_INSTRUCTION = "\n\n(PLAN MODE: read-only — investigate and answer; write a plan only if asked; do not modify anything.)"
+
+# A reply counts as a plan (saved for /build) only if it has the Steps
+# section the plan format above requires — plain research answers in plan
+# mode are not plans.
+_PLAN_STEPS_HEADING = re.compile(r"^#{1,4}\s*(steps|шаги|план действий)\b", re.IGNORECASE | re.MULTILINE)
+
+
+def is_plan(text: str) -> bool:
+    return bool(_PLAN_STEPS_HEADING.search(text or ""))
 
 
 def plans_dir(repo_path: str) -> Path:

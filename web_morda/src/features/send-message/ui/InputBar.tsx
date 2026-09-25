@@ -200,7 +200,7 @@ export function InputBar({
           <button
             className={workMode === 'plan' ? 'active plan' : ''}
             onClick={() => onWorkModeChange('plan')}
-            title="Только чтение и план, правки заблокированы. План сохранится в .flowai/plans/"
+            title="Исследование только на чтение, правки заблокированы. План — по просьбе, сохранится в .flowai/plans/"
           >
             План
           </button>

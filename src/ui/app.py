@@ -1812,7 +1812,7 @@ class FlowAIApp:
             self.flash_hint("plan/build работает только в основном режиме — выключи «агентный режим» в /settings", 3)
             return
         self.set_work_mode("build" if self.work_mode == "plan" else "plan")
-        self.flash_hint("режим: план — только чтение и план, без правок" if self.work_mode == "plan"
+        self.flash_hint("режим: план — исследование только на чтение, без правок" if self.work_mode == "plan"
                         else "режим: build — агент правит код")
 
     def _main_agent_mode_active(self) -> bool:

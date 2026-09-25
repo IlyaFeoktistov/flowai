@@ -657,7 +657,7 @@ async def ws_chat(ws: WebSocket):
 
             messages.append({"role": "assistant", "content": final_text})
             assistant_entry = episodic.append("assistant", final_text)
-            if turn_mode == work_mode.PLAN and final_text.strip() and not final_text.startswith("⚠️"):
+            if turn_mode == work_mode.PLAN and work_mode.is_plan(final_text) and not final_text.startswith("⚠️"):
                 try:
                     pending_plan = work_mode.save_plan(os.getcwd(), resolved_text, final_text)
                     await on_event_wrapper({"type": "plan_saved", "path": str(pending_plan)})

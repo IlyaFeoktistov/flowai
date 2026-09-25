@@ -299,7 +299,7 @@ _HELP_ROWS: list[tuple[str, str, str]] = [
     ("/memory", "", "что помнит нейронка, точечное/полное удаление"),
     ("/dnd", "", "D&D-режим: список сохранений / новая игра"),
     ("/plugin", "", "список установленных плагинов и что каждый даёт"),
-    ("/plan", "[задача]", "режим план (Shift+Tab): только чтение и план в .flowai/plans/, правки заблокированы"),
+    ("/plan", "[задача]", "режим план (Shift+Tab): исследование только на чтение, план — по просьбе (в .flowai/plans/), правки заблокированы"),
     ("/build", "[уточнения]", "режим build; если есть свежий план — выполнить его"),
     ("/clear", "", "очистить историю"),
     ("/help", "", "эта справка"),
@@ -656,7 +656,7 @@ async def main() -> None:
             if cmd == "/plan":
                 app.set_work_mode(work_mode.PLAN)
                 if not cmd_args:
-                    console.print("[dim]  режим plan: агент только читает и составляет план, правки заблокированы. "
+                    console.print("[dim]  режим plan: агент только читает и исследует (план — если попросишь), правки заблокированы. "
                                   "План сохранится в .flowai/plans/, выполнить — /build[/]\n")
                     return
                 user_input = cmd_args
@@ -1422,7 +1422,7 @@ async def main() -> None:
         elif stopped:
             messages.pop()
 
-        if turn_mode == work_mode.PLAN and not stopped and display.full_response.strip():
+        if turn_mode == work_mode.PLAN and not stopped and work_mode.is_plan(display.full_response):
             try:
                 _pending_plan_path = work_mode.save_plan(os.getcwd(), model_input, display.full_response)
                 console.print(

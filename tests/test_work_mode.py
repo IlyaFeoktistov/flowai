@@ -49,3 +49,9 @@ def test_save_and_latest_plan(tmp_path):
     assert work_mode.latest_plan(str(tmp_path)) == first
     task = work_mode.build_task_from_plan(first, "без тестов")
     assert "## Goal" in task and "без тестов" in task
+
+
+def test_only_replies_with_steps_count_as_plan():
+    assert work_mode.is_plan("## Цель\nx\n## Шаги\n1. правка")
+    assert work_mode.is_plan("## Goal\nx\n## Steps\n1. edit")
+    assert not work_mode.is_plan("Функция X в a.py:10 делает Y, вызывается из b.py:20.")
