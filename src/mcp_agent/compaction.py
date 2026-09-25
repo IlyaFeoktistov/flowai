@@ -77,7 +77,7 @@ model_config.py) и пропускает ОБА пути (write-triggered и per
 
 _needs_compaction сравнивал объём истории с
 OLLAMA_NUM_CTX*COMPACT_HISTORY_CTX_RATIO — захардкоженной-на-импорте
-константой (65536 по умолчанию), а не с settings.get("num_ctx"), реально
+константой (65536 по умолчанию), а не с model_params.num_ctx(), реально
 переданным в ChatOllama для этой чат/judge-модели (agent_builder.py:
 _build_chat_model). Если num_ctx занижен в рантайме (например, до 16384
 при тестировании expert_streaming_enabled, см. settings.py), порог
@@ -87,7 +87,7 @@ _build_chat_model). Если num_ctx занижен в рантайме (нап�
 что модель реально видит: она теряет ориентацию в файле и может начать
 домысливать содержимое, которого нет ни в одном её собственном read.
 _needs_compaction и num_ctx в options _summarize_research теперь читают
-settings.get("num_ctx") — тот же параметр, что реально уходит в Ollama для
+model_params.num_ctx() — тот же параметр, что реально уходит в Ollama для
 этого вызова, а не отдельную, независимо выставленную константу.
 
 _needs_compaction's собственная оценка может сильно недооценивать реальный
@@ -135,6 +135,7 @@ import hashlib
 import json
 from typing import Any
 
+import model_params
 import settings
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -346,7 +347,7 @@ def _needs_compaction(messages: list, system_message=None, tools=None) -> bool:
     benefit, purely because a write had happened, not because context was
     anywhere near full).
 
-    Threshold is settings.get("num_ctx") — the value actually handed to
+    Threshold is model_params.num_ctx() — the value actually handed to
     ChatOllama for this session's chat/judge model (agent_builder.py:
     _build_chat_model) — NOT model_config.OLLAMA_NUM_CTX. That constant is
     read once at import and frozen; num_ctx is a runtime-editable setting
@@ -405,7 +406,7 @@ def _needs_compaction(messages: list, system_message=None, tools=None) -> bool:
     # precisely because no fixed multiplier on chars//4 can be trusted to
     # never be wrong again.
     reserve = OLLAMA_NUM_PREDICT + 9000
-    return total > settings.get("num_ctx") - reserve
+    return total > model_params.num_ctx() - reserve
 
 
 def is_context_overflow_error(exc: Exception) -> bool:
@@ -599,7 +600,7 @@ async def _summarize_research(judge_model, prefix: list) -> str:
         # streaming's context is fixed at process start (-c, see
         # expert_streaming.py), so max_tokens alone is enough there.
         extra_kwargs = (
-            {"options": {"num_ctx": settings.get("num_ctx"), "num_predict": 1400}}
+            {"options": {"num_ctx": model_params.num_ctx(), "num_predict": 1400}}
             if isinstance(judge_model, ChatOllama)
             else {"max_tokens": 1400}
         )

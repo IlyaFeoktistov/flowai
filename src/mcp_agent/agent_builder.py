@@ -51,15 +51,10 @@ from mcp_agent.roles import approval_tools, filter_tools
 from mcp_agent.model_config import (
     DEBUG,
     JUDGE_NUM_PREDICT,
-    MODEL_TEMPERATURE,
     OLLAMA_KEEP_ALIVE,
-    OLLAMA_NUM_PREDICT,
-    REPEAT_LAST_N,
-    REPEAT_PENALTY,
     TOOL_OUTPUT_CHAR_CAP,
-    TOP_K,
-    TOP_P,
 )
+import model_params
 from mcp_agent import prompts
 from mcp_agent.prompts import _build_optimized_system_prompt, _build_system_prompt, _build_voice_system_prompt
 
@@ -88,11 +83,17 @@ from mcp_agent.prompts import _build_optimized_system_prompt, _build_system_prom
 # дописывает num_keep в уже готовый options-словарь.
 class _ChatOllamaWithNumKeep(ChatOllama):
     num_keep: int | None = None
+    # min_p — same gap as num_keep: a real Ollama option that ChatOllama has
+    # no field for (per-model setting, see model_params.py).
+    min_p: float | None = None
 
     def _chat_params(self, messages, stop=None, **kwargs):
         params = super()._chat_params(messages, stop, **kwargs)
-        if self.num_keep is not None and isinstance(params.get("options"), dict):
-            params["options"]["num_keep"] = self.num_keep
+        if isinstance(params.get("options"), dict):
+            if self.num_keep is not None:
+                params["options"]["num_keep"] = self.num_keep
+            if self.min_p is not None:
+                params["options"]["min_p"] = self.min_p
         return params
 
 
@@ -108,35 +109,8 @@ class _ChatOllamaWithNumKeep(ChatOllama):
 # expert-streaming только чтобы обойти эту переменную окружения.
 
 
-# Per-model sampling overrides for models whose recommended settings differ
-# from this app's Qwen-tuned defaults (MODEL_TEMPERATURE/TOP_P/TOP_K/
-# REPEAT_PENALTY above) -- keyed by model_tag prefix before the ':'. Applied
-# on top of those defaults in _build_chat_model, never touching them for any
-# other model.
-#
-# glm-4.7-flash: this app's default REPEAT_PENALTY=1.2/REPEAT_LAST_N=512
-# causes the model's tool-call arguments to degenerate into incoherent
-# word-soup on any non-trivial prompt (a long real system prompt + several
-# tools is enough -- a trivial one-line prompt doesn't trigger it). Root
-# cause: GLM's own tool-call syntax
-# (<tool_call>name<arg_key>...<arg_value>...</tool_call>) repeats the same
-# structural tokens on every argument, and a repeat penalty this strong
-# fights that, pushing the model into increasingly desperate
-# synonym-hunting instead of clean structural output. These are the
-# community-recommended values instead (HF discussion
-# unsloth/GLM-4.7-Flash-GGUF#23), which stay clean on the same prompt/tools
-# with only sampling changed.
-_MODEL_SAMPLING_OVERRIDES: dict[str, dict] = {
-    "glm-4.7-flash": {"temperature": 0.7, "top_p": 0.95, "min_p": 0.01, "repeat_penalty": 1.0},
-}
-
-
-def _sampling_overrides_for(model_tag: str) -> dict:
-    return _MODEL_SAMPLING_OVERRIDES.get(model_tag.partition(":")[0], {})
-
-
 def _build_chat_model(
-    *, model_tag: str, num_predict: int, reasoning: bool, num_keep: int, format: str | None = None,
+    *, model_tag: str, num_predict: int | None, reasoning: bool, num_keep: int, format: str | None = None,
     has_tools: bool = True,
 ):
     """Единая точка сборки и для основной, и для judge-модели (обоих
@@ -161,42 +135,46 @@ def _build_chat_model(
     огрубление экспериментального пути, не забытый баг — см.
     expert_streaming.py docstring, раздел "известные огрубления".
 
+    num_predict=None — the model's own configured num_predict (per-model,
+    model_params.py); callers with a deliberately short budget (judge,
+    casual, finalize) pass their own number instead.
+
     has_tools — one of the two signals (with `format`) deciding whether
-    _MODEL_SAMPLING_OVERRIDES applies at all for this call — see
+    model_params' family defaults apply at all for this call — see
     apply_repeat_override's own comment below for the mechanism and the
     two bugs that shaped it (naming kept as "has_tools" even though
     the gate is really has_tools OR format=="json", to avoid renaming
     every call site's kwarg over what's just an internal detail)."""
-    # apply_repeat_override gates the WHOLE _MODEL_SAMPLING_OVERRIDES bundle
-    # (temperature/top_p/min_p/repeat_penalty together), not just
-    # repeat_penalty alone: these are not independent knobs for this
-    # override. The community-recommended values (_MODEL_SAMPLING_OVERRIDES's
-    # comment) are only validated as ONE bundle together with
-    # repeat_penalty=1.0 — restoring plain REPEAT_PENALTY=1.2 while still
-    # applying temperature=0.7/top_p=0.95/min_p=0.01 is a combination
-    # nobody has validated, and gating repeat_penalty alone produces
-    # exactly that combination on the casual/no-tools path. That untested
-    # combination causes full incoherent breakdown — garbled mixed-language
-    # text, random code snippets, the model visibly noticing its own
-    # malfunction mid-answer ("Wait I'm generating junk again... bad model
-    # behavior loop?") — not just dull repetition. Treating the override as
-    # one all-or-nothing bundle means every code path uses either the full,
-    # validated GLM bundle or this app's plain Qwen-tuned defaults — never
-    # an invented third combination.
+    # apply_repeat_override gates the WHOLE family-defaults bundle
+    # (model_params._FAMILY_DEFAULTS: temperature/top_p/min_p/repeat_penalty
+    # together), not just repeat_penalty alone: these are not independent
+    # knobs. The community-recommended values are only validated as ONE
+    # bundle together with repeat_penalty=1.0 — restoring plain
+    # REPEAT_PENALTY=1.2 while still applying temperature=0.7/top_p=0.95/
+    # min_p=0.01 is a combination nobody has validated, and gating
+    # repeat_penalty alone produces exactly that combination on the
+    # casual/no-tools path. That untested combination causes full
+    # incoherent breakdown — garbled mixed-language text, random code
+    # snippets — not just dull repetition. So every code path uses either
+    # the full family bundle or the plain base defaults, never an invented
+    # third combination. Values the user set for this model in /settings
+    # apply on both paths.
     apply_repeat_override = has_tools or format == "json"
+    params = model_params.effective(model_tag, include_family=apply_repeat_override)
+    if num_predict is None:
+        num_predict = params["num_predict"]
     if settings.get("expert_streaming_enabled"):
         ok, msg = expert_streaming.ensure_running(
-            model_tag, num_ctx=settings.get("num_ctx"), show_thinking=reasoning,
+            model_tag, num_ctx=params["num_ctx"], show_thinking=reasoning,
         )
         if ok:
-            sampling = _sampling_overrides_for(model_tag) if apply_repeat_override else {}
             extra_body = {
-                "top_k": TOP_K,
-                "repeat_penalty": sampling.get("repeat_penalty", REPEAT_PENALTY),
-                "repeat_last_n": REPEAT_LAST_N,
+                "top_k": params["top_k"],
+                "repeat_penalty": params["repeat_penalty"],
+                "repeat_last_n": params["repeat_last_n"],
             }
-            if "min_p" in sampling:
-                extra_body["min_p"] = sampling["min_p"]
+            if params["min_p"] is not None:
+                extra_body["min_p"] = params["min_p"]
             if format == "json":
                 extra_body["response_format"] = {"type": "json_object"}
             return ChatOpenAI(
@@ -204,8 +182,8 @@ def _build_chat_model(
                 base_url=f"http://{expert_streaming.DEFAULT_HOST}:{expert_streaming.DEFAULT_PORT}/v1",
                 api_key="not-needed",
                 max_tokens=num_predict,
-                temperature=sampling.get("temperature", MODEL_TEMPERATURE),
-                top_p=sampling.get("top_p", TOP_P),
+                temperature=params["temperature"],
+                top_p=params["top_p"],
                 extra_body=extra_body,
                 # langchain_openai только автовключает stream_usage=True для
                 # ДЕФОЛТНОГО openai.com base_url — на кастомном (наш
@@ -253,21 +231,22 @@ def _build_chat_model(
     if not kv_ok and format != "json":
         console.print(f"[yellow]⚠ не удалось выставить OLLAMA_KV_CACHE_TYPE ({kv_msg})[/]")
 
-    sampling = _sampling_overrides_for(model_tag) if apply_repeat_override else {}
     kwargs = dict(
         model=model_tag,
         base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         keep_alive=OLLAMA_KEEP_ALIVE,
-        num_ctx=settings.get("num_ctx"),
+        num_ctx=params["num_ctx"],
         num_predict=num_predict,
         reasoning=reasoning,
-        temperature=sampling.get("temperature", MODEL_TEMPERATURE),
-        top_p=sampling.get("top_p", TOP_P),
-        top_k=TOP_K,
-        repeat_penalty=sampling.get("repeat_penalty", REPEAT_PENALTY),
-        repeat_last_n=REPEAT_LAST_N,
+        temperature=params["temperature"],
+        top_p=params["top_p"],
+        top_k=params["top_k"],
+        repeat_penalty=params["repeat_penalty"],
+        repeat_last_n=params["repeat_last_n"],
         num_keep=num_keep,
     )
+    if params["min_p"] is not None:
+        kwargs["min_p"] = params["min_p"]
     if format is not None:
         kwargs["format"] = format
     return _ChatOllamaWithNumKeep(**kwargs)
@@ -874,7 +853,7 @@ def _compute_num_keep(system_prompt_tokens_estimate: int) -> int:
     keeping more than half would defeat that. Same formula for both the
     main monolith (_build_agent) and every pipeline role (_build_role_agent)
     — they differ only in WHICH prompt's token estimate they pass in."""
-    return min(settings.get("num_ctx") // 2, system_prompt_tokens_estimate + 1500)
+    return min(model_params.num_ctx() // 2, system_prompt_tokens_estimate + 1500)
 
 
 def _base_agent_middleware(
@@ -994,13 +973,13 @@ async def _build_agent(repo_path: str | None = None):
     # фраза-пересказ иногда просачивается в сам ответ.
     model = _build_chat_model(
         model_tag=MAIN_MODEL,
-        num_predict=OLLAMA_NUM_PREDICT,
+        num_predict=None,
         reasoning=False if voice_mode else settings.get("show_thinking"),
         num_keep=num_keep,
         # voice_mode gets agent_tools=[] below (see its comment) — no
         # tool-call syntax will ever be generated on this model, so the
         # repeat_penalty override some models carry FOR tool-call syntax
-        # (_MODEL_SAMPLING_OVERRIDES, see _build_chat_model's docstring)
+        # (model_params._FAMILY_DEFAULTS, see _build_chat_model's docstring)
         # doesn't apply and would only remove a real defense against plain
         # prose repeating itself.
         has_tools=not voice_mode,
@@ -1183,7 +1162,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
 
     model = _build_chat_model(
         model_tag=MAIN_MODEL,
-        num_predict=OLLAMA_NUM_PREDICT,
+        num_predict=None,
         reasoning=settings.get("show_thinking"),
         num_keep=num_keep,
     )
@@ -1308,7 +1287,7 @@ async def _get_role_agent(role: str, tool_names: frozenset[str], repo_path: str 
     cache_key = (role, tool_names)
     current_value = (
         current_model, repo_path or os.getcwd(),
-        settings.get("expert_streaming_enabled"), settings.get("num_ctx"),
+        settings.get("expert_streaming_enabled"), tuple(sorted(model_params.effective(current_model).items())),
     )
 
     async def _on_stale(old_freshness, _new_freshness):
@@ -1345,7 +1324,7 @@ async def _get_agent(repo_path: str | None = None):
     current_key = (
         current_model, settings.get("voice_mode"), repo_path or os.getcwd(),
         settings.get("optimized_tools"), settings.get("always_delegate_search"),
-        settings.get("expert_streaming_enabled"), settings.get("num_ctx"),
+        settings.get("expert_streaming_enabled"), tuple(sorted(model_params.effective(current_model).items())),
     )
 
     async def _on_stale(old_freshness, _new_freshness):

@@ -64,3 +64,32 @@
 .switch input:checked + .switch-track::before {
   transform: translateX(16px);
 }
+
+.model-params {
+  margin-bottom: 18px;
+}
+.model-params h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+  margin: 0 0 8px;
+}
+.model-params-select {
+  width: 100%;
+  margin-bottom: 6px;
+}
+.model-params-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.model-params-badge {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--accent-2);
+}
+.model-params-error {
+  color: var(--danger);
+  font-size: 13px;
+}

@@ -21,6 +21,7 @@ from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 
+import model_params
 import settings
 from mcp_agent.debug_log import log_event
 from mcp_agent.message_utils import _find_call_by_id
@@ -300,7 +301,7 @@ class _AskUserFinalizeNumPredictMiddleware(AgentMiddleware):
             for m in request.messages
         ):
             model_settings = (
-                {"options": {"num_ctx": settings.get("num_ctx"), "num_predict": ASK_USER_FINALIZE_NUM_PREDICT}}
+                {"options": {"num_ctx": model_params.num_ctx(), "num_predict": ASK_USER_FINALIZE_NUM_PREDICT}}
                 if isinstance(request.model, ChatOllama)
                 else {"max_tokens": ASK_USER_FINALIZE_NUM_PREDICT}
             )

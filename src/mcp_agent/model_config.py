@@ -12,6 +12,10 @@ DEBUG/константы можно было импортировать из л�
 безопасен (единственное исключение во всём агенте —
 _SYSTEM_PROMPT_TOKENS_ESTIMATE в prompts.py, у него другой паттерн доступа,
 см. комментарий там же).
+
+MODEL_TEMPERATURE/TOP_P/TOP_K/REPEAT_PENALTY/REPEAT_LAST_N/OLLAMA_NUM_PREDICT
+здесь — только БАЗОВЫЕ дефолты для основной чат-модели: реальные значения
+per-model, настраиваются в /settings и собираются в model_params.py.
 """
 import os
 

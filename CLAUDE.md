@@ -55,10 +55,15 @@ agent always loads models with `OLLAMA_NUM_CTX=65536`, and the KV-cache at
 that context size is often several GB on top of the weights, easily pushing
 a model that looks like it should fit onto partial CPU offload instead. The
 only reliable answer is a live measurement (`ollama ps` right after a real
-request) — see `_MEASURED_GPU_SHARE` in `ui/tui/settings.py` for the current
-measured values, and its comment for how to re-measure after changing
-`OLLAMA_NUM_CTX` or the model set. Don't state a model "fits"/"doesn't fit"
-from weight size alone.
+request), or `/instances` (per-model RAM/VRAM across Ollama and the
+llama.cpp fork). Don't state a model "fits"/"doesn't fit" from weight size
+alone.
+
+Sampling/generation params (temperature, top_p, top_k, min_p,
+repeat_penalty, repeat_last_n, num_predict, num_ctx) are per-model and live
+in `model_params.py` (base defaults <- family defaults <- user values from
+`/settings`) — read them via `model_params.effective()`/`num_ctx()`, don't
+hardcode new sampling constants.
 
 ## Comment style
 

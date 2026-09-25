@@ -445,10 +445,10 @@ async def _shrink_for_overflow(messages: list, level: int) -> list:
     if level == 1 and older:
         try:
             from compress import summarize_messages
-            import settings
+            import model_params
             summary = await summarize_messages(
                 [{"role": r, "content": c} for r, c in map(_msg_role_content, older)],
-                max_chars=settings.get("num_ctx") * 2,
+                max_chars=model_params.num_ctx() * 2,
             )
             log_event("overflow_history_summarized", messages=len(older), chars=len(summary))
             return [("system", f"[Summary of the earlier conversation]\n{summary}"), current]

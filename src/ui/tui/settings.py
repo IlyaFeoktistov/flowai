@@ -1,5 +1,6 @@
 import curses
 from typing import Callable
+import model_params
 import settings
 from ui.tui.curses_util import flush_pending_input
 
@@ -70,24 +71,6 @@ _GEN3D_PROFILE_PRESETS = [
     (3, "чуть быстрее (~3%), но пик VRAM почти вдвое выше"),
 ]
 
-# Контекст ГЛАВНОЙ чат/judge-модели (settings.num_ctx — см. его докстринг в
-# settings.py про то, почему это ОТДЕЛЬНЫЙ тумблер от model_config.OLLAMA_NUM_CTX,
-# и на что он НЕ распространяется). 65536 — посчитанный потолок под 24 GB
-# RAM этой машины (см. model_config.py) — меньшие значения безопасны
-# (меньше RAM/VRAM под KV-cache), больше — риск свопа на длинных ходах.
-# Дефолт понижен до 30000 (2026-08-13, RTX 4050 6 GB — см. settings.py про
-# живой замер с expert_streaming.py: на 65536 autofit не находил вообще ни
-# одного hot-slot экспертов, на 30000 — 10) — 65536 остаётся в списке как
-# отдельный выбор, просто больше не дефолт.
-_NUM_CTX_PRESETS = [
-    (8192,   "минимум — рискует обрезать длинную историю тул-вызовов"),
-    (16384,  ""),
-    (30000,  "текущий дефолт — оставляет реальный запас VRAM под compute-буферы"),
-    (32768,  ""),
-    (65536,  "прежний дефолт — посчитанный потолок под 24 GB RAM, без запаса под доп. VRAM-нужды"),
-    (131072, "выше проверенного потолка — риск свопа на длинных ходах"),
-]
-
 # key -> (заголовок экрана выбора, список пресетов, тип для "своего значения")
 _PRESET_CONFIGS = {
     "imggen_guidance": ("guidance scale",           _GUIDANCE_PRESETS,  float),
@@ -97,145 +80,7 @@ _PRESET_CONFIGS = {
     "gen3d_target_faces":   ("gen_model целевой полигонаж", _GEN3D_FACES_PRESETS, int),
     "gen3d_skin_source":    ("gen_model источник скиннинга (--rig)", _GEN3D_SKIN_SOURCE_PRESETS, str),
     "gen3d_hunyuan_profile": ("gen_model профиль offload", _GEN3D_PROFILE_PRESETS, int),
-    "num_ctx":         ("контекст чат-модели (num_ctx)", _NUM_CTX_PRESETS, int),
 }
-
-
-# (model_id | None, описание)  — None = разделитель-заголовок
-# показываются даже если не установлены. Размер VRAM в списке НЕ отсюда —
-# он дописывается динамически при отрисовке (см. _size_suffix): реальный
-# для установленных (из `ollama list`), проверенный по ollama.com/library
-# для остальных — вместо того чтобы гадать словами вроде "впритык"/
-# "вероятно" пользователь сам видит цифры и решает сам.
-#
-# ВАЖНО про "влезает": просто вес_модели/TOTAL_VRAM_GB (см. _size_suffix)
-# НЕ означает "влезает целиком на GPU" — это доля ТОЛЬКО весов, без
-# KV-cache. Агент всегда грузит модель с OLLAMA_NUM_CTX=65536
-# (mcp_agent/model_config.py), и KV-cache на таком контексте у большинства
-# моделей сам по себе больше пары ГБ — реальную долю на GPU/CPU показывает
-# только `ollama ps` ПОСЛЕ фактической загрузки модели. Живой замер на этой
-# машине (RTX 4050 Laptop, 5.9 GB VRAM, num_ctx=65536, 2026-08-11) — см.
-# _MEASURED_GPU_SHARE ниже: из установленных моделей ПОЛНОСТЬЮ на GPU
-# влезает только qwen2.5:3b (100%), qwen3:8b — только 48%, а не "влезает,
-# потому что 5.2 < 5.9". Если поменяется OLLAMA_NUM_CTX или сама модель —
-# эти цифры устареют, переизмерить тем же способом (curl .../api/generate
-# с нужным num_ctx, затем `ollama ps`).
-_MEASURED_GPU_SHARE = {
-    "qwen2.5:3b":      100,  # CONTEXT capped 32768, итого 2.8GB
-    "qwen3:4b":         50,  # CONTEXT 65536, итого 8.3GB
-    "qwen3:8b":         48,  # CONTEXT capped 40960, итого 8.8GB
-    "qwen2.5vl:7b":     45,  # CONTEXT 65536, итого 8.1GB
-    "dolphin3:latest":  40,  # CONTEXT 65536, итого 10GB
-    "llava:13b":        44,  # CONTEXT capped 4096, итого 9.4GB
-    "qwen2.5:14b":      32,  # CONTEXT capped 32768, итого 12GB
-    "qwen3:14b":        30,  # CONTEXT capped 40960, итого 13GB
-    "qwen3-coder:30b":  19,  # CONTEXT 65536, итого 22GB
-}
-_SUGGESTED: dict[str, list[tuple]] = {
-    "chat_model": [
-        (None,                   "── тяжёлые ─────────────────"),
-        ("qwen3:14b",            "reasoning"),
-        ("qwen2.5:14b",          "стабильный"),
-        ("qwen2.5-coder:14b",    "кодинг"),
-        ("qwq:32b",              "глубокое мышление"),
-        (None,                   "── MoE (тяжёлая VRAM, лёгкое вычисление) ──"),
-        ("gpt-oss:20b",          "★ рекомендуется (с expert_streaming_enabled=ВКЛ) · "
-                                  "agentic/тул-коллы, MoE ~3.6B активных из 20B — на "
-                                  "expert-streaming тот же класс скорости, что и "
-                                  "qwen3-coder:30b там же, но заметно меньший суммарный "
-                                  "вес (13 GB против 18-19 GB), значит меньше данных "
-                                  "стримить на каждое переключение эксперта. На ОБЫЧНОМ "
-                                  "Ollama-пути (expert_streaming_enabled=ВЫКЛ) падает при "
-                                  "OLLAMA_KV_CACHE_TYPE=q8_0 (GGML_ASSERT, известный баг "
-                                  "Ollama #16946) — без expert-streaming лучше не выбирать "
-                                  "эту модель, agent_builder.py явно откажет с понятной "
-                                  "ошибкой вместо тихого краха (проверено 2026-08-11)"),
-        ("qwen3-coder:30b",      "agentic-кодинг · MoE, ~3.3B активных из 30B — "
-                                  "тул-коллы заточены под агентный кодинг, работает и без "
-                                  "expert-streaming (обычный Ollama-путь), берёт больше VRAM"),
-        ("glm-4.7-flash:q4_K_M", "требует expert_streaming_enabled=ВКЛ · MoE, ~3B активных "
-                                  "из ~47B, ~17.7 GB весов — обычный Ollama-путь не поддерживает "
-                                  "архитектуру 'glm4moelite' нативно в этом форке без патча, "
-                                  "И несёт известные, незакрытые баги tool-calling в самой "
-                                  "Ollama (issues ollama/ollama#13820 и др., см. "
-                                  "expert_streaming.py про 'GLM-4.7-Flash') — на expert-streaming "
-                                  "оба фикса (загрузка + остановка генерации) подтверждены живым "
-                                  "тестом, включая tool-calling"),
-        (None,                   "── средние ─────────────────"),
-        ("qwen3.5:9b",           "новее"),
-        ("qwen3:8b",             "быстрый"),
-        ("qwen2.5:7b",           "стабильный"),
-        ("qwen2.5-coder:7b",     "кодинг"),
-        ("dolphin3:latest",      ""),
-        (None,                   "── лёгкие ──────────────────"),
-        ("qwen3:4b",             "быстрый"),
-        ("qwen2.5:3b",           "минимальный"),
-        ("qwen2.5-coder:3b",     "кодинг лёгкий"),
-    ],
-    "vision_model": [
-        ("qwen2.5vl:7b",    "лучший OCR/анализ · ~5 GB"),
-        ("qwen2.5vl:32b",   "мощный · ~18 GB"),
-        ("llava:13b",       "проверенный · ~8 GB"),
-    ],
-    # В голосовом ходе модель — не единственное узкое место (ещё STT + TTS
-    # последовательно, см. agent_builder.py про eviction между переключениями),
-    # так что здесь важнее скорость ответа, чем глубина рассуждения или
-    # качество кода — reasoning-модели и тяжёлые coder-теги из chat_model
-    # сюда специально не включены.
-    "voice_chat_model": [
-        (None,               "── здесь важна СКОРОСТЬ, не глубина ──"),
-        ("qwen3:8b",         "быстрый, общего назначения (дефолт)"),
-        ("qwen2.5:7b",       "стабильный, общего назначения"),
-        ("qwen3:4b",         "самый быстрый из этого списка"),
-        ("qwen2.5:3b",       "минимальный, для слабого железа"),
-    ],
-}
-
-# Размер весов (ГБ) для моделей из _SUGGESTED, которые ЕЩЁ НЕ установлены —
-# используется только как fallback в _size_suffix(). Для уже установленных
-# моделей всегда берётся точный размер из `ollama list` (_fetch_ollama_models),
-# он и так под рукой и надёжнее любого захардкоженного числа. Значения сверены
-# напрямую по ollama.com/library на момент написания — если модель обновится
-# в реестре, здесь могут устареть, но это лучше, чем вообще не показывать
-# ничего до скачивания.
-_MODEL_SIZE_GB = {
-    "qwen3:14b": 9.3,
-    "qwen2.5:14b": 9.0,
-    "qwen2.5-coder:14b": 9.0,
-    "qwq:32b": 20.0,
-    "qwen3-coder:30b": 19.0,
-    "gpt-oss:20b": 13.0,
-    "glm-4.7-flash:q4_K_M": 17.7,
-    "qwen3.5:9b": 6.6,
-    "qwen3:8b": 5.2,
-    "qwen2.5:7b": 4.7,
-    "qwen2.5-coder:7b": 4.7,
-    "dolphin3:latest": 4.9,
-    "qwen3:4b": 2.5,
-    "qwen2.5:3b": 1.9,
-    "qwen2.5-coder:3b": 1.9,
-}
-
-
-def _size_suffix(model_id: str, installed_sizes: dict[str, float]) -> str:
-    """Если для этой модели есть живой замер _MEASURED_GPU_SHARE (см. его
-    комментарий выше про num_ctx/KV-cache) — показываем ЕГО, это единственная
-    цифра, которая реально отвечает на "влезает или нет". Без замера
-    (модель не установлена, никто её ещё не грузил и не смотрел `ollama ps`)
-    откатываемся на вес_модели/TOTAL_VRAM_GB, как раньше — это НЕ означает
-    "влезает", только оценка веса относительно объёма карты, без KV-cache.
-    Если GPU не определился (settings.TOTAL_VRAM_GB is None — нет карты,
-    nvidia-smi недоступен и т.п.) — делить не на что, показываем просто
-    размер модели с "~", а не лезем строить дробь и не падаем на None."""
-    size_gb = installed_sizes.get(model_id) or _MODEL_SIZE_GB.get(model_id)
-    if size_gb is None:
-        return ""
-    gpu_share = _MEASURED_GPU_SHARE.get(model_id)
-    if gpu_share is not None:
-        return f"{size_gb:.1f}GB · {gpu_share}% GPU"
-    if settings.TOTAL_VRAM_GB:
-        return f"{size_gb:.1f}/{settings.TOTAL_VRAM_GB:.1f}GB"
-    return f"~{size_gb:.1f}GB"
 
 
 _ITEMS = [
@@ -248,7 +93,7 @@ _ITEMS = [
     ("делегировать поиск кода", "always_delegate_search", "toggle"),
     ("подсказка delegate", "delegate_nudge_enabled", "toggle"),
     ("expert-streaming backend", "expert_streaming_enabled", "toggle"),
-    ("контекст чат-модели",  "num_ctx",            "preset"),
+    ("параметры модели",  "_model_params",    "model_params"),
     ("размышления",       "show_thinking",    "toggle"),
     ("recap",             "recap_enabled",    "toggle"),
     ("сжатие истории тулов в ходе", "compact_history_enabled", "toggle"),
@@ -439,6 +284,10 @@ def settings_menu(print_header: Callable) -> None:
                             stdscr.addstr(y, xv, "стандартный", curses.A_DIM)
                     elif kind == "action":
                         stdscr.addstr(y, xv, "[Enter] выполнить", curses.color_pair(3))
+                    elif kind == "model_params":
+                        n = sum(1 for p in model_params.describe(settings.get("chat_model")) if p["overridden"])
+                        summary = f"{settings.get('chat_model')} · " + (f"изменено: {n}" if n else "по умолчанию")
+                        stdscr.addstr(y, xv, _fit(summary, room), curses.color_pair(3))
                     else:
                         stdscr.addstr(y, xv, _fit(str(val), room), curses.color_pair(3))
                 except curses.error:
@@ -460,53 +309,22 @@ def settings_menu(print_header: Callable) -> None:
 
         # ── Выбор Ollama-модели из списка ─────────────────────────────────────
 
-        def _pick_model(skey: str) -> str | None:
-            current        = settings.get(skey)
-            installed_sizes = _fetch_ollama_models()
-            installed      = set(installed_sizes)
-
-            # Build unified list: suggested first (with section headers), then extras
-            suggested_map = {m: d for m, d in _SUGGESTED.get(skey, []) if m is not None}
-            extra = [m for m in sorted(installed) if m not in suggested_map]
-            # entries: (model_id | None, description, is_installed)
-            # None model_id = non-selectable section header
-            entries: list[tuple] = []
-            for mid, desc in _SUGGESTED.get(skey, []):
-                if mid is None:
-                    entries.append((None, desc, False))  # section header
-                else:
-                    size = _size_suffix(mid, installed_sizes)
-                    if desc and size:
-                        full_desc = f"{desc} · {size}"
-                    else:
-                        full_desc = desc or size
-                    entries.append((mid, full_desc, mid in installed))
-            if extra:
-                entries.append((None, "── установленные ───────────────", False))
-                for mid in extra:
-                    size = _size_suffix(mid, installed_sizes)
-                    entries.append((mid, size, True))
-            # fallback: no selectable entries
-            if not any(m for m, _, _ in entries):
-                return _edit_str(skey)
-
-            # Start selection on current model or first selectable entry
-            def _first_selectable(start=0):
-                for i in range(start, len(entries)):
-                    if entries[i][0] is not None:
-                        return i
-                return start
-
-            sub_sel = next(
-                (i for i, (m, _, _) in enumerate(entries) if m == current),
-                _first_selectable()
-            )
-            pull_hint = ""
+        def _pick_model(skey: str | None, title_text: str = "выбор модели", current: str | None = None) -> str | None:
+            """Только установленные модели (`ollama list`) с размером весов —
+            что реально загружено и сколько занимает, показывает /instances."""
+            current = settings.get(skey) if skey else current
+            installed = _fetch_ollama_models()
+            entries = sorted(installed.items())
+            if current and current not in installed:
+                entries.insert(0, (current, None))
+            if not entries:
+                return _edit_str(skey) if skey else None
+            sub_sel = next((i for i, (m, _) in enumerate(entries) if m == current), 0)
 
             while True:
                 stdscr.erase()
                 h, w = stdscr.getmaxyx()
-                title = "  выбор модели  "
+                title = f"  {title_text}  "
                 try:
                     stdscr.addstr(0, 0, "─" * (w - 1))
                     stdscr.addstr(0, max(0, (w - len(title)) // 2), title,
@@ -515,70 +333,122 @@ def settings_menu(print_header: Callable) -> None:
                     pass
 
                 visible = h - 4
-                start = max(0, sub_sel - visible // 2)
-                end   = min(len(entries), start + visible)
-
-                for i, (mid, desc, inst) in enumerate(entries[start:end]):
-                    y = 2 + i
-                    is_cur    = (i + start == sub_sel)
-                    is_active = (mid == current)
-                    base_attr = curses.color_pair(1) | curses.A_BOLD if is_cur else 0
+                start = max(0, min(sub_sel - visible // 2, max(0, len(entries) - visible)))
+                end = min(len(entries), start + visible)
+                name_w = max(len(m) for m, _ in entries) + 2
+                for i, (mid, size) in enumerate(entries[start:end], start=start):
+                    y = 2 + (i - start)
+                    is_cur = i == sub_sel
+                    attr = curses.color_pair(1) | curses.A_BOLD if is_cur else 0
+                    size_txt = f"{size:.1f} GB" if size is not None else "не установлена"
                     try:
-                        if mid is None:
-                            # Section header — dim, non-selectable
-                            stdscr.addstr(y, 2, f"  {desc}", curses.A_DIM)
-                            continue
-                        stdscr.addstr(y, 2, "▶ " if is_cur else "  ", base_attr)
-                        if inst:
-                            stdscr.addstr(y, 4, mid, base_attr)
-                        else:
-                            stdscr.addstr(y, 4, mid, curses.A_DIM if not is_cur else curses.color_pair(3))
-                        x = 5 + len(mid)
-                        if desc:
-                            stdscr.addstr(y, x, f"  {desc}", curses.A_DIM)
-                            x += 2 + len(desc)
-                        if not inst:
-                            stdscr.addstr(y, x + 1, "⬇", curses.color_pair(3))
-                        elif is_active:
-                            stdscr.addstr(y, x + 1, "←", curses.color_pair(2))
+                        stdscr.addstr(y, 2, "▶ " if is_cur else "  ", attr)
+                        stdscr.addstr(y, 4, _fit(mid, w - 6), attr)
+                        stdscr.addstr(y, 4 + name_w, _fit(size_txt, max(0, w - name_w - 8)), curses.A_DIM)
+                        if mid == current:
+                            stdscr.addstr(y, 4 + name_w + len(size_txt) + 1, "←", curses.color_pair(2))
                     except curses.error:
                         pass
 
                 try:
                     stdscr.addstr(h - 2, 0, "─" * (w - 1))
-                    if pull_hint:
-                        hint_str = pull_hint[:w - 2]
-                        stdscr.addstr(h - 1, 0, " " * (w - 1))
-                        stdscr.addstr(h - 1, 2, hint_str, curses.color_pair(3))
-                    else:
-                        foot = " ↑↓  выбор    Enter  применить    Esc  отмена "
-                        stdscr.addstr(h - 1, max(0, (w - len(foot)) // 2), foot, curses.A_DIM)
+                    foot = " ↑↓  выбор    Enter  применить    Esc  отмена "
+                    stdscr.addstr(h - 1, max(0, (w - len(foot)) // 2), foot, curses.A_DIM)
                 except curses.error:
                     pass
                 stdscr.refresh()
 
                 k = _getch(stdscr)
-                pull_hint = ""
                 if k in (curses.KEY_UP, ord('k')):
-                    i = (sub_sel - 1) % len(entries)
-                    while entries[i][0] is None:
-                        i = (i - 1) % len(entries)
-                    sub_sel = i
+                    sub_sel = (sub_sel - 1) % len(entries)
                 elif k in (curses.KEY_DOWN, ord('j')):
-                    i = (sub_sel + 1) % len(entries)
-                    while entries[i][0] is None:
-                        i = (i + 1) % len(entries)
-                    sub_sel = i
+                    sub_sel = (sub_sel + 1) % len(entries)
                 elif k in (curses.KEY_ENTER, ord('\n'), ord('\r')):
-                    mid, _, inst = entries[sub_sel]
-                    if mid is None:
-                        pass
-                    elif not inst:
-                        pull_hint = f"не установлена — скачай: ollama pull {mid}"
-                    else:
-                        return mid
+                    return entries[sub_sel][0]
                 elif k in (27, ord('q')):
                     return None
+
+        # ── Параметры генерации выбранной модели (model_params.py) ───────────
+
+        def _edit_model_params() -> None:
+            model = settings.get("chat_model")
+            sub_sel = 0
+            note = ""
+            while True:
+                rows = model_params.describe(model)
+                stdscr.erase()
+                h, w = stdscr.getmaxyx()
+                title = "  параметры модели  "
+                try:
+                    stdscr.addstr(0, 0, "─" * (w - 1))
+                    stdscr.addstr(0, max(0, (w - len(title)) // 2), title,
+                                  curses.A_BOLD | curses.color_pair(1))
+                    stdscr.addstr(2, 4, "модель: ", curses.A_DIM)
+                    stdscr.addstr(2, 12, _fit(model, w - 40), curses.color_pair(3) | curses.A_BOLD)
+                    stdscr.addstr(2, 13 + min(len(model), w - 40), "  [m] другая модель", curses.A_DIM)
+                except curses.error:
+                    pass
+
+                for i, row in enumerate(rows):
+                    y = 4 + i
+                    if y >= h - 4:
+                        break
+                    is_cur = i == sub_sel
+                    attr = curses.color_pair(1) | curses.A_BOLD if is_cur else 0
+                    value = "по умолч. бэкенда" if row["value"] is None else str(row["value"])
+                    mark = "своё" if row["overridden"] else "по умолч."
+                    try:
+                        stdscr.addstr(y, 2, "▶ " if is_cur else "  ", attr)
+                        stdscr.addstr(y, 4, f"{row['label']:<16}", attr)
+                        stdscr.addstr(y, 21, f"{value:<18}",
+                                      (curses.color_pair(2) | curses.A_BOLD) if row["overridden"] else curses.color_pair(3))
+                        stdscr.addstr(y, 40, f"{mark:<10}", curses.A_DIM)
+                        stdscr.addstr(y, 51, _fit(row["hint"], max(0, w - 53)), curses.A_DIM)
+                    except curses.error:
+                        pass
+
+                if note:
+                    try:
+                        stdscr.addstr(h - 3, 4, _fit(note, w - 6), curses.color_pair(2))
+                    except curses.error:
+                        pass
+                try:
+                    stdscr.addstr(h - 2, 0, "─" * (w - 1))
+                    foot = " ↑↓  выбор    Enter  изменить    r  сбросить    m  модель    Esc  назад "
+                    stdscr.addstr(h - 1, max(0, (w - len(foot)) // 2), _fit(foot, w - 1), curses.A_DIM)
+                except curses.error:
+                    pass
+                stdscr.refresh()
+
+                k = _getch(stdscr)
+                note = ""
+                if k in (curses.KEY_UP, ord('k')):
+                    sub_sel = (sub_sel - 1) % len(rows)
+                elif k in (curses.KEY_DOWN, ord('j')):
+                    sub_sel = (sub_sel + 1) % len(rows)
+                elif k in (ord('m'), ord('M')):
+                    picked = _pick_model(None, "параметры какой модели", current=model)
+                    if picked:
+                        model = picked
+                        sub_sel = 0
+                elif k in (ord('r'), ord('R')):
+                    row = rows[sub_sel]
+                    model_params.set_param(model, row["key"], None)
+                    note = f"{row['label']} сброшен к {row['default']}"
+                elif k in (curses.KEY_ENTER, ord('\n'), ord('\r'), ord(' ')):
+                    row = rows[sub_sel]
+                    raw = _edit_str(None, f"{row['label']} (текущее: {row['value']}, пусто — по умолчанию)")
+                    if raw is None:
+                        model_params.set_param(model, row["key"], None)
+                        note = f"{row['label']}: по умолчанию ({row['default']})"
+                        continue
+                    try:
+                        model_params.set_param(model, row["key"], model_params.parse_value(row["key"], raw))
+                        note = f"{row['label']} = {raw}"
+                    except ValueError as e:
+                        note = f"не сохранено: {e}"
+                elif k in (27, ord('q')):
+                    return
 
         # ── Выбор imggen модели из предустановленного списка ─────────────────
 
@@ -816,10 +686,9 @@ def settings_menu(print_header: Callable) -> None:
 
         # ── Ввод произвольной строки ──────────────────────────────────────────
 
-        def _edit_str(skey: str) -> str | None:
+        def _edit_str(skey: str | None, hint_text: str | None = None) -> str | None:
             h, w = stdscr.getmaxyx()
-            current = settings.get(skey)
-            hint   = f"  (текущее: {current})  "
+            hint = f"  ({hint_text or f'текущее: {settings.get(skey)}'})  "
             prompt = " › "
             try:
                 stdscr.addstr(h - 2, 0, " " * (w - 1))
@@ -869,6 +738,8 @@ def settings_menu(print_header: Callable) -> None:
                         settings.set_value(skey, new_val)
                 elif kind == "preset":
                     _pick_preset(skey)
+                elif kind == "model_params":
+                    _edit_model_params()
                 elif kind == "voice_clone":
                     _pick_voice_clone()
                 elif kind == "str":

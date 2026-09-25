@@ -337,7 +337,33 @@ async def speak_endpoint(body: SpeakBody):
 
 @router.get("/settings")
 async def settings_get_endpoint():
-    return {k: v for k, v in app_settings._state.items() if not k.startswith("_")}
+    # model_params is edited through its own endpoints below (a nested dict,
+    # not a flat key/value the generic settings form can render).
+    return {k: v for k, v in app_settings._state.items() if not k.startswith("_") and k != "model_params"}
+
+
+@router.get("/model_params")
+async def model_params_get_endpoint(model: str | None = None):
+    import model_params
+    model = model or app_settings.get("chat_model")
+    return {"model": model, "params": model_params.describe(model)}
+
+
+class ModelParamBody(BaseModel):
+    model: str
+    key: str
+    value: object = None  # None/"" — reset to default
+
+
+@router.post("/model_params")
+async def model_params_set_endpoint(body: ModelParamBody):
+    import model_params
+    try:
+        value = model_params.parse_value(body.key, body.value)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    model_params.set_param(body.model, body.key, value)
+    return {"model": body.model, "params": model_params.describe(body.model)}
 
 
 class SettingBody(BaseModel):

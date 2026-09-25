@@ -19,7 +19,8 @@ flowAI: `storage.py:data_dir()` — по умолчанию
 каждый модуль владеет своими таблицами:
 
 - **`settings`** (`settings.py`) — key/value, JSON-значения; все
-  runtime-настройки из `/settings` (см. [models.md](models.md)).
+  runtime-настройки из `/settings` (см. [models.md](models.md)), включая
+  `model_params` — параметры генерации по моделям `{model_tag: {key: value}}`.
 - **`usage`** (`usage.py`) — key/value счётчики (токены, ходы) для
   `/usage`, персистентные между сессиями.
 - **`episodic_messages`** (`episodic/writer.py`) — полная неизменная

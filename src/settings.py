@@ -290,6 +290,9 @@ _state: dict = {
     # fetch+сравнение, без pull) читают/пишут эти же два ключа.
     "last_update_check": None,
     "update_commits_behind": 0,
+    # Пользовательские параметры генерации по моделям: {model_tag: {key: value}}
+    # — см. model_params.py (слои дефолтов и что каждый ключ значит).
+    "model_params":     {},
     "debug":            False,
 }
 
@@ -300,7 +303,7 @@ _PERSIST_KEYS = {
     "imggen_steps", "imggen_guidance", "imggen_strength", "imggen_width", "imggen_height",
     "imggen_prompt_prefix", "imggen_negative_prompt", "imggen_enhance_prompt", "recap_enabled",
     "gen3d_enabled", "gen3d_target_faces", "gen3d_hunyuan_profile", "gen3d_skin_source",
-    "gen_agent_tools", "compact_history_enabled",
+    "gen_agent_tools", "compact_history_enabled", "model_params",
     "last_update_check", "update_commits_behind",
     "debug",
 }

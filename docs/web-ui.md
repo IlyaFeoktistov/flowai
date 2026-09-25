@@ -117,7 +117,8 @@ event loop) или просто медленная генерация на сл�
 | `GET/DELETE /api/v1/memory`, `DELETE /api/v1/memory/facts/{i}`, `DELETE /api/v1/memory/knowledge` | = `/memory` |
 | `GET /api/v1/plugins` | = `/plugin` |
 | `POST /api/v1/reindex` `{targets?}` | = `/reindex` |
-| `GET/POST /api/v1/settings` | сырой dict `settings._state` — без /settings-меню, просто key/value |
+| `GET/POST /api/v1/settings` | сырой dict `settings._state` — без /settings-меню, просто key/value (кроме `model_params`) |
+| `GET /api/v1/model_params?model=`, `POST /api/v1/model_params` `{model, key, value}` | параметры генерации модели (`model_params.describe`); `value: null` — сброс к дефолту |
 | `GET /api/v1/models` | установленные Ollama-модели (`ollama list`) — для `<select>` в настройках (`chat_model`/`vision_model`/`voice_chat_model`) |
 | `POST /api/v1/transcribe` | multipart audio → `{text}`, STT через `ui/audio.py:transcribe` (faster-whisper) — см. "Голосовой ввод" ниже |
 | `POST /api/v1/speak` `{text}` | → WAV-байты, TTS через `ui/audio.py:synthesize_speech` (Chatterbox/venv-tts) — см. "Голосовой ввод" ниже |

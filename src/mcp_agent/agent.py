@@ -73,6 +73,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.errors import GraphRecursionError  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
+import model_params
 import settings  # noqa: E402
 from ui.console import debug_print  # noqa: E402
 from mcp_agent import prompts  # noqa: E402
@@ -333,7 +334,7 @@ async def _stream_round(
                                 await on_event({
                                     "type": "context",
                                     "tokens": call_in + call_out,
-                                    "limit": settings.get("num_ctx"),
+                                    "limit": model_params.num_ctx(),
                                 })
                     elif isinstance(m, ToolMessage):
                         # _tool_text (not str()) — MCP tool results are a list of

@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Callable
 
 from memory import DEFAULT_USER, get_store
+import model_params
 import settings
 
 SUMMARY_PROMPT = (
@@ -65,7 +66,7 @@ def should_compress(context_tokens: int | None) -> bool:
     window actually is."""
     if not context_tokens:
         return False
-    return context_tokens > int(settings.get("num_ctx") * settings.get("compress_at"))
+    return context_tokens > int(model_params.num_ctx() * settings.get("compress_at"))
 
 
 async def summarize_messages(messages: list[dict], max_chars: int) -> str:
@@ -101,7 +102,7 @@ async def compress_history(
 
     text = _render(old)
     # Same cap as summarize_messages: the old part alone can exceed the window.
-    max_chars = settings.get("num_ctx") * 2
+    max_chars = model_params.num_ctx() * 2
     if len(text) > max_chars:
         text = "…" + text[-max_chars:]
     detailed_summary, short_recap = _split_summary(await _summarize(text))

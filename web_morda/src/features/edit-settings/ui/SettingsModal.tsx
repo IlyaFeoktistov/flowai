@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Modal } from '@/shared/ui'
 import { getModels, getSettings, setSetting } from '../api/api'
+import { ModelParamsSection } from './ModelParamsSection'
 import './SettingsModal.css'
 
 // Те же три ключа, что в терминале помечены типом "ollama_model"
@@ -29,6 +30,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       {!settings ? (
         <p className="dim">Загружаю…</p>
       ) : (
+        <>
+        <ModelParamsSection chatModel={String(settings.chat_model ?? '')} models={models} />
         <ul className="settings-list">
           {Object.entries(settings).map(([key, value]) => (
             <li key={key}>
@@ -67,6 +70,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </li>
           ))}
         </ul>
+        </>
       )}
     </Modal>
   )
