@@ -74,7 +74,9 @@ prompts.set_web_mode(True)
 # repo's src/, чисто случайность обвязки запуска, а не осмысленный выбор
 # проекта. Домашняя папка — нейтральный старт, дальше пользователь выбирает
 # реальный проект через folder-picker (POST /project, тоже os.chdir).
-os.chdir(os.path.expanduser("~"))
+# `flowai web` (web/serve.py) передаёт папку, из которой его вызвали, —
+# тогда она и есть стартовый проект, как у терминального `flowai`.
+os.chdir(os.environ.get("FLOWAI_WEB_PROJECT") or os.path.expanduser("~"))
 
 # Диагностика на случай зависания event loop'а целиком (наблюдалось живьём:
 # порт слушается, процесс жив, но НИ ОДИН новый коннект, включая /health, не
@@ -721,3 +723,12 @@ async def ws_chat(ws: WebSocket):
 
 
 app.include_router(router)
+
+# Собранный web_morda/dist — `flowai web` отдаёт фронт с того же порта, без
+# vite dev-сервера. Монтируется последним: StaticFiles на "/" перехватил бы
+# всё, что зарегистрировано после него. В make run_web фронт отдаёт vite, так
+# что отсутствие dist здесь не ошибка.
+_DIST = Path(__file__).resolve().parent.parent / "web_morda" / "dist"
+if _DIST.is_dir():
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/", StaticFiles(directory=_DIST, html=True), name="frontend")

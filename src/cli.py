@@ -12,6 +12,12 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 
+# `flowai web` — отдельный режим (веб-сервер, не TUI): уходим до тяжёлых
+# импортов и настройки логирования TUI ниже, они веб-серверу не нужны.
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "web":
+    from web.serve import main as _web_main
+    sys.exit(_web_main(sys.argv[2:]))
+
 # Принудительный UTF-8 — чинит ошибки при переключении терминалов
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
@@ -1595,6 +1601,9 @@ def run() -> None:
     callable with no args, it doesn't know to asyncio.run() a coroutine
     itself. Same body as the __main__ block below, which stays so
     `python3 src/cli.py` keeps working unchanged."""
+    if len(sys.argv) > 1 and sys.argv[1] == "web":
+        from web.serve import main as web_main
+        sys.exit(web_main(sys.argv[2:]))
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, asyncio.CancelledError):

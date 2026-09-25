@@ -321,6 +321,19 @@ export PATH="$HOME/.local/bin:$PATH"
 ### Веб-интерфейс
 
 ```bash
+cd ~/мой-проект && flowai web     # или: flowai web ~/мой-проект [--port 8000]
+```
+
+Бэкенд и собранный фронтенд на одном порту (`http://127.0.0.1:8000`),
+папка вызова сразу открыта в вебе как текущий проект. Фронтенд
+(`web_morda/dist`) пересобирается сам, если исходники новее сборки
+(`--rebuild` — принудительно, `--no-build` — никогда). SearXNG эта
+команда не поднимает — без него `web_search` откатывается на DuckDuckGo
+(`docker compose up -d searxng`, если нужен).
+
+Для разработки фронтенда — dev-стек с hot reload:
+
+```bash
 make run_web
 ```
 
@@ -633,7 +646,7 @@ flowAI/
 │   │                         про sources=["src"] — импорты снаружи выглядят как top-level)
 │   ├── cli.py              — консольный TUI-чат, entry point лончера
 │   ├── main.py             — FastAPI-бэкенд веб-интерфейса, REST /api/v1/* + WS /api/v1/ws/chat
-│   ├── web/                — web_morda's бэкенд-обвязка: WebBridge (permission-мост), sessions_store
+│   ├── web/                — web_morda's бэкенд-обвязка: WebBridge (permission-мост), sessions_store, serve.py (`flowai web`)
 │   ├── settings.py         — все настройки (SQLite), читается /settings
 │   ├── expert_streaming.py — свой llama-server-форк (см. «Модели») вместо Ollama
 │   ├── compress.py         — сжатие истории при приближении к лимиту контекста

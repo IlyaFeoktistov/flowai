@@ -9,7 +9,26 @@
 ## Запуск
 
 ```bash
-make run_web   # из корня репозитория
+cd ~/мой-проект && flowai web   # или flowai web <папка> [--host H] [--port 8000]
+```
+
+`src/web/serve.py`: один процесс uvicorn без `--reload`, FastAPI отдаёт и
+`/api/v1/*`, и собранный `web_morda/dist` (`StaticFiles` на `/`,
+монтируется в `main.py` последним и только если `dist` существует).
+Папка вызова уходит в `main.py` через `FLOWAI_WEB_PROJECT` и сразу
+становится текущим проектом (`GET /api/v1/project`) — вместо домашней
+папки, см. «Домашняя папка по умолчанию» ниже. Перед стартом `dist`
+пересобирается (`npm install` при отсутствии `node_modules`, затем
+`npm run build`), если любой из входов сборки (`src/`, `public/`,
+`index.html`, `package.json`, конфиги vite/tsconfig) новее
+`dist/index.html`; `--rebuild` — всегда, `--no-build` — никогда. Если
+сборка упала, а старый `dist` есть — отдаётся он. SearXNG не
+поднимается.
+
+Dev-стек с hot reload (из корня репозитория):
+
+```bash
+make run_web
 ```
 
 Одна команда, весь стек (см. `Makefile`):
@@ -514,7 +533,9 @@ sessions_store.py:save_title`) — ОТДЕЛЬНО от `episodic_messages`,
 `os.chdir(os.path.expanduser("~"))` один раз при импорте модуля, ДО
 `app = FastAPI(...)` — домашняя папка как нейтральный старт, а
 дальше пользователь выбирает реальный проект через folder-picker
-(`POST /api/v1/project`, тоже `os.chdir`). `GET /api/v1/project` заодно
+(`POST /api/v1/project`, тоже `os.chdir`). Исключение — `flowai web`:
+он ставит `FLOWAI_WEB_PROJECT` в папку вызова, и `main.py` chdir'ит туда.
+`GET /api/v1/project` заодно
 отдаёт `home` — фронтенд не резолвит `~` сам, а просто сравнивает
 `path` с этим значением и подменяет префикс на `~/`, чтобы длинный путь
 не распирал узкую кнопку в сайдбаре (`widgets/sidebar`'s `shortenPath`).
