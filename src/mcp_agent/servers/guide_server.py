@@ -57,7 +57,8 @@ generative tools (images, music, 3D; off by default); voice in/out.
 Sub-agents (main agent only) — the `agent` tool, same as Claude Code's: \
 agent(description, prompt, subagent_type, run_in_background). Built-in \
 types: explore (read-only investigation), plan (read-only implementation \
-plan), general (all tools incl. edits and bash). All sub-agents run on the \
+plan), general (all tools incl. edits and bash; in plan mode every type \
+runs read-only). All sub-agents run on the \
 SAME loaded model (never a second instance); how many generate at once is \
 the "параллельные потоки" setting (default 1 — they then run one after \
 another; extra calls wait their turn, background ones included). \

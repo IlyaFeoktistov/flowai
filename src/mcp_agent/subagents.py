@@ -38,7 +38,7 @@ import yaml
 NEVER_FOR_SUBAGENTS = frozenset({"agent", "agent_result", "delegate", "ask_user", "submit_plan", "mark_plan_step_current"})
 
 # Tools that change something — a spec that can call any of these is a
-# "writing" agent: needs permission prompts and is refused in plan mode.
+# "writing" agent: needs permission prompts; in plan mode it runs downgraded to read-only tools.
 MUTATING_TOOLS = frozenset({
     "write_file", "edit_file", "delete_path", "restore_deleted_path", "restore_file_snapshot",
     "bash", "bash_bg", "update_memory", "update_knowledge", "remember_url",

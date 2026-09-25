@@ -27,6 +27,7 @@ never compacted).
 """
 import asyncio
 import contextvars
+import dataclasses
 import uuid
 from contextvars import ContextVar
 
@@ -492,10 +493,7 @@ def build_delegate_tool(
         if spec is None:
             return None, f"Error: unknown subagent_type {subagent_type!r}. Available: {', '.join(agents)}."
         if spec.can_mutate(available) and work_mode.current_work_mode.get() == work_mode.PLAN:
-            return None, (
-                f"Error: '{spec.name}' can modify files, and this turn is in PLAN mode (read-only). "
-                "Use explore or plan instead, and put the change into your plan."
-            )
+            spec = plan_mode_spec(spec, available)
         return spec, None
 
     @tool
@@ -566,6 +564,26 @@ def build_delegate_tool(
 
 
 _TYPE_ALIASES = {"general-purpose": "general", "general_purpose": "general"}
+
+_PLAN_MODE_SUBAGENT_NOTE = (
+    "\n\nREAD-ONLY: the parent turn is in PLAN mode. You cannot write, edit or "
+    "delete files; bash accepts read-only commands only (git diff/log/show, "
+    "cat, grep, ls...). Investigate and report; describe any change instead "
+    "of making it."
+)
+
+
+def plan_mode_spec(spec, available: set[str]):
+    """A writing agent type downgraded for a PLAN-mode turn instead of
+    refused: skills written for Claude Code spawn "general-purpose"
+    reviewers/researchers. Write tools leave the schema; bash stays, and
+    _PlanModeMiddleware (part of writer_middleware, since bash still counts
+    as mutating) keeps it to read-only commands."""
+    return dataclasses.replace(
+        spec,
+        tools=frozenset((available if spec.tools is None else spec.tools) & work_mode.PLAN_ALLOWED_TOOLS),
+        system_prompt=spec.system_prompt + _PLAN_MODE_SUBAGENT_NOTE,
+    )
 
 
 # One semaphore per process, sized by settings.parallel_slots — how many

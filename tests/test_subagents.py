@@ -1,5 +1,5 @@
 """mcp_agent/subagents.py + delegate_tool.py's agent/agent_result — agent
-types, custom agent files, plan-mode refusal and the slot limit, without a
+types, custom agent files, plan-mode downgrade and the slot limit, without a
 real model."""
 import asyncio
 
@@ -41,7 +41,7 @@ def _agent_tools():
     return delegate_tool.build_delegate_tool(None, [_T("read_file"), _T("write_file")], repo_path=None)
 
 
-def test_unknown_type_and_plan_mode_refusal():
+def test_unknown_type():
     agent, _result = _agent_tools()
 
     async def call(kind, mode):
@@ -52,7 +52,14 @@ def test_unknown_type_and_plan_mode_refusal():
             work_mode.current_work_mode.reset(token)
 
     assert "unknown subagent_type" in asyncio.run(call("nope", work_mode.BUILD))
-    assert "PLAN mode" in asyncio.run(call("general", work_mode.PLAN))
+
+
+def test_writing_agent_is_downgraded_in_plan_mode():
+    general = subagents.discover_agents(None, RO)["general"]
+    available = {"read_file", "grep_search", "write_file", "edit_file", "bash"}
+    spec = delegate_tool.plan_mode_spec(general, available)
+    assert spec.tools == frozenset({"read_file", "grep_search", "bash"})
+    assert "PLAN mode" in spec.system_prompt
 
 
 def test_agent_result_unknown_id():
