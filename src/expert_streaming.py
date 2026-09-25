@@ -412,17 +412,63 @@ def _find_port_holder_pids(port: int) -> list[str]:
     return [p for p in result.stdout.split() if p.strip()]
 
 
-def stop_server() -> None:
+def _is_llama_server_pid(pid: int) -> bool:
+    """Guards against pid reuse: a state file can outlive its server, and
+    the recorded pid may since belong to an unrelated process — only a pid
+    whose cmdline really is our SERVER_BINARY is safe to signal."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[0].decode(errors="replace")
+    except OSError:
+        return False
+    return Path(cmdline).name == SERVER_BINARY.name
+
+
+def recorded_server_pid() -> int | None:
+    """pid of the server _STATE_PATH describes, if it's alive and really is
+    a llama-server — i.e. one some flowai process started (possibly an
+    earlier, already-exited one: the server deliberately outlives flowai,
+    see ensure_running's Popen)."""
+    state = live_state()
+    if state is None:
+        return None
+    pid = state["pid"]
+    return pid if _is_llama_server_pid(pid) else None
+
+
+def stop_server(include_adopted: bool = False) -> bool:
+    """Stops the server this process started. include_adopted=True also
+    stops one started by ANOTHER (possibly already-exited) flowai process,
+    identified via _STATE_PATH — used when the config must change (a server
+    kept alive across flowai restarts is still ours to replace) and for an
+    explicit unload from /instances. Returns True if something was stopped."""
     global _proc, _proc_config
+    stopped = False
     if _proc is not None and _proc.poll() is None:
         _proc.terminate()
         try:
             _proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             _proc.kill()
-        _clear_state()  # only OUR OWN tracked process's death invalidates the state file — an adopted server we never owned is left running, its own state untouched
+        _clear_state()
+        stopped = True
+    elif include_adopted:
+        pid = recorded_server_pid()
+        if pid is not None:
+            import signal
+            try:
+                os.kill(pid, signal.SIGTERM)
+                deadline = time.monotonic() + 10
+                while _pid_alive(pid) and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                if _pid_alive(pid):
+                    os.kill(pid, signal.SIGKILL)
+                stopped = True
+            except OSError:
+                pass
+            _clear_state()
     _proc = None
     _proc_config = None
+    return stopped
 
 
 def ensure_running(
@@ -471,7 +517,14 @@ def ensure_running(
         if failed_tag == model_tag and time.monotonic() - failed_at < _FAILURE_COOLDOWN_S:
             return False, failed_msg
 
-    stop_server()
+    # include_adopted — the server intentionally outlives flowai (see the
+    # Popen below), so a mismatched config is usually a server an EARLIER
+    # flowai run started; it's still ours to replace, not a foreign process.
+    # A matching one is left alone and adopted below.
+    if _adoptable_state(port, model_tag, num_ctx, show_thinking) is None:
+        stop_server(include_adopted=True)
+    else:
+        stop_server()
 
     def _fail(msg: str) -> tuple[bool, str]:
         global _last_failure
@@ -573,7 +626,11 @@ def ensure_running(
         cmd += ["--chat-template-file", str(chat_template_file)]
     log_file = open(_LOG_PATH, "wb")
     try:
-        _proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
+        # start_new_session — the server must survive flowai exiting (and a
+        # Ctrl+C in flowai's terminal, which signals the whole foreground
+        # process group): reloading an ~18 GB model on every launch costs
+        # minutes, and the next flowai run adopts it via _STATE_PATH.
+        _proc = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
     except OSError as e:
         log_file.close()
         return _fail(f"не удалось запустить процесс: {e}")
