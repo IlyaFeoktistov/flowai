@@ -7,8 +7,8 @@ own staging and ignores this), same idea as opencode's plan/build agents:
 - plan  — read-only research: investigate and answer, change nothing; an
   implementation plan only when the user asks for one. Enforced
   mechanically by PlanModeMiddleware (agent_builder._base_agent_middleware):
-  only read-only tools pass, bash only for read-only commands
-  (agent_builder._is_read_only_bash_command) — not just a prompt request.
+  only read-only tools pass, bash unless it's recognizably mutating
+  (plan_bash.is_mutating_bash) — not just a prompt request.
 
 A plan-mode reply that IS a plan (has a Steps section, see is_plan) is saved to
 <project>/.flowai/plans/<timestamp>-<slug>.md, so it never has to be copied
@@ -38,7 +38,7 @@ PLAN_ALLOWED_TOOLS = frozenset({
     "get_knowledge", "list_memory", "flowai_guide", "skill", "ask_user",
     # agent: writing sub-agent types run downgraded to these tools in plan mode (delegate_tool._resolve)
     "agent", "agent_result", "analyze_image", "list_file_snapshots", "list_deleted_paths",
-    "bash", "bash_bg", "bash_bg_check", "bash_bg_list",  # bash: read-only commands only, see PlanModeMiddleware
+    "bash", "bash_bg", "bash_bg_check", "bash_bg_list",  # bash: anything but mutating commands, see PlanModeMiddleware
 })
 
 # Model-facing (English, see CLAUDE.md). Appended to the END of the system
@@ -48,8 +48,9 @@ PLAN_SYSTEM_PROMPT_SECTION = (
     "\n\n## PLAN MODE — read-only research (overrides the code-change workflow above)\n"
     "You are in PLAN mode for this whole turn: investigate and answer, change "
     "nothing. Only read-only tools are available; you cannot write, edit or "
-    "delete files, and bash accepts read-only commands only (git log/diff/"
-    "status, ls, cat, grep...). Skip the 'write the change' and 'verify' "
+    "delete files, and bash rejects commands that change something (writing "
+    "files, installs, mutating git, killing processes) — inspecting anything "
+    "(ps, ls, cat, grep, git log/diff, docker ps...) works. Skip the 'write the change' and 'verify' "
     "steps above entirely. If a skill or the request calls for edits, don't "
     "attempt them — say what would change instead.\n"
     "Answer what the user actually asked: an explanation, findings, a review, "

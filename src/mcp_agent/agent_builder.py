@@ -41,6 +41,7 @@ from mcp_agent.build_cache import BuildCache
 from mcp_agent.compaction import _CompactResearchMiddleware, _DropStaleReadsMiddleware
 from mcp_agent.config import build_mcp_connections, TOOLS_REQUIRING_APPROVAL
 from mcp_agent.debug_log import log_event
+from mcp_agent import plan_bash
 from mcp_agent.delegate_tool import _DelegateNudgeMiddleware, build_delegate_tool
 from mcp_agent.web_read_tool import build_web_read_tool
 from mcp_agent import skills as md_skills
@@ -902,9 +903,11 @@ class _InvestigationReadOnlyBashMiddleware(AgentMiddleware):
 
 
 class _PlanModeMiddleware(AgentMiddleware):
-    """plan mode (mcp_agent/work_mode.py): only read-only tools, bash only
-    for read-only commands. No-op in build mode (the default, and always for
-    pipeline roles, which never set work_mode)."""
+    """plan mode (mcp_agent/work_mode.py): only read-only tools; bash runs
+    unless it's recognizably mutating (plan_bash.py's denylist — an
+    allowlist kept rejecting harmless diagnostics like `ps`). No-op in build
+    mode (the default, and always for pipeline roles, which never set
+    work_mode)."""
 
     async def awrap_tool_call(self, request, handler):
         if work_mode.current_work_mode.get() != work_mode.PLAN:
@@ -912,17 +915,17 @@ class _PlanModeMiddleware(AgentMiddleware):
         name = request.tool_call["name"]
         allowed = name in work_mode.PLAN_ALLOWED_TOOLS
         if allowed and name in ("bash", "bash_bg"):
-            allowed = _is_read_only_bash_command(str((request.tool_call.get("args") or {}).get("command", "")))
+            allowed = not plan_bash.is_mutating_bash(str((request.tool_call.get("args") or {}).get("command", "")))
         if allowed:
             return await handler(request)
         if name in ("bash", "bash_bg"):
             content = (
-                "Denied in PLAN mode: this particular command is not recognized as "
-                "read-only. Read-only commands still work — git diff/log/show/"
-                "status/rev-parse, cat, grep, ls, find, head, wc..., also chained "
-                "with | && || and with 2>/dev/null. Not allowed: writing to files "
-                "(>, >>, tee), $(...)/backticks, installs, mutating git. Rephrase "
-                "the command, or describe the change in your answer instead."
+                "Denied in PLAN mode: this command changes something (writes/deletes "
+                "files, installs, mutating git, kills or starts processes). Any command "
+                "that only reads or inspects still works — ps, ls, cat, grep, find, "
+                "git log/diff/status, docker ps, systemctl status..., chained with "
+                "| && || ; and with 2>/dev/null. Use a read-only command for what you "
+                "need, or describe the change in your answer instead."
             )
         else:
             content = (

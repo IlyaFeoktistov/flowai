@@ -36,6 +36,9 @@ def test_plan_mode_blocks_writes_and_mutating_bash():
 def test_plan_mode_allows_reads_and_read_only_bash():
     assert _run("read_file", {"path": "a"}) == "ran"
     assert _run("bash", {"command": "git log --oneline"}) == "ran"
+    # not on any allowlist, but doesn't change anything — plan mode is a denylist
+    assert _run("bash", {"command": "ps -e -o pid,user,%mem,cmd --sort=-%mem | head -20"}) == "ran"
+    assert _run("bash", {"command": "lsof -i :8000"}) == "ran"
 
 
 def test_build_mode_is_a_no_op():
