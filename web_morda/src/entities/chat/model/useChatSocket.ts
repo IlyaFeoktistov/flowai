@@ -204,6 +204,9 @@ function replayTurn(
       case 'context_compressed':
         turn = { ...turn, context: null }
         break
+      case 'model_loaded':
+        turn = { ...turn, modelLoading: { model: event.model as string, percent: 100, seconds: event.seconds as number, done: true } }
+        break
       case 'context':
         turn = { ...turn, context: { tokens: event.tokens as number, limit: (event.limit as number) ?? null } }
         break
@@ -518,6 +521,18 @@ export function useChatSocket() {
 
           case 'context_compressed':
             return mapTurnItem(prev, turnId, (t) => ({ ...t, context: null }))
+
+          case 'model_loading':
+            return mapTurnItem(prev, turnId, (t) => ({
+              ...t,
+              modelLoading: { model: event.model as string, percent: (event.percent as number | null) ?? null, done: false },
+            }))
+
+          case 'model_loaded':
+            return mapTurnItem(prev, turnId, (t) => ({
+              ...t,
+              modelLoading: { model: event.model as string, percent: 100, seconds: event.seconds as number, done: true },
+            }))
 
           case 'context':
             return mapTurnItem(prev, turnId, (t) => ({

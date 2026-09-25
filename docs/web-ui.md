@@ -146,7 +146,8 @@ Rich-разметка (`[bold]`/`[green]`/`[/]`) из `doctor.py`/`update.py`/
 Сервер → клиент — ретранслирует as-is весь `on_event`-поток пайплайна/
 основного агента (`answer_start/chunk/end`, `thinking_start/chunk/end`,
 `tool_start/tool_arg_chunk/tool_end`, `stage_changed`, `plan_steps`/
-`plan_step_done`, `stats`, `context`, `done`, `mid_turn_injected` — см.
+`plan_step_done`, `stats`, `context`, `model_loading`/`model_loaded`,
+`context_compacting`, `done`, `mid_turn_injected` — см.
 [architecture.md](architecture.md) за их смыслом), плюс свои:
 - `{"type": "session_started", "session_id": "..."}` — сразу после connect
 - `{"type": "turn_started", "text": "..."}` — сообщение СТАЛО новым ходом

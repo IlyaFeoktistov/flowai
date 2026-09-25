@@ -164,14 +164,22 @@ def _build_chat_model(
     if num_predict is None:
         num_predict = params["num_predict"]
     if settings.get("expert_streaming_enabled"):
+        # The server's own --reasoning default follows only the user's
+        # show_thinking; THIS call's thinking goes per request via
+        # chat_template_kwargs.enable_thinking (server-common.cpp honors it,
+        # GLM's template reads it). Passing `reasoning` as the server config
+        # instead made the main model (show_thinking) and the judge
+        # (reasoning=False) disagree on it, so every agent build restarted
+        # llama-server and reloaded the weights twice.
         ok, msg = expert_streaming.ensure_running(
-            model_tag, num_ctx=params["num_ctx"], show_thinking=reasoning,
+            model_tag, num_ctx=params["num_ctx"], show_thinking=bool(settings.get("show_thinking")),
         )
         if ok:
             extra_body = {
                 "top_k": params["top_k"],
                 "repeat_penalty": params["repeat_penalty"],
                 "repeat_last_n": params["repeat_last_n"],
+                "chat_template_kwargs": {"enable_thinking": bool(reasoning)},
             }
             if params["min_p"] is not None:
                 extra_body["min_p"] = params["min_p"]
@@ -250,6 +258,70 @@ def _build_chat_model(
     if format is not None:
         kwargs["format"] = format
     return _ChatOllamaWithNumKeep(**kwargs)
+async def preload_chat_model(on_event=None) -> None:
+    """Loads the current chat model BEFORE the agent is built, reporting
+    progress as "model_loading"/"model_loaded" events. Without it the load
+    happens inside _build_chat_model (llama-server: a synchronous
+    ensure_running that holds the event loop for the whole ~30s+, so the UI
+    spinner freezes) or silently inside the first Ollama request — either
+    way the user only sees a stalled turn.
+
+    llama.cpp gets a real percentage (expert_streaming._load_progress);
+    Ollama exposes no load progress, so only "loading" + elapsed time.
+    Best-effort: any failure here is left for the normal build path to
+    report (it already falls back/warns on its own)."""
+    import time
+    model_tag = settings.get("chat_model")
+    params = model_params.effective(model_tag)
+    loop = asyncio.get_running_loop()
+    started = time.monotonic()
+
+    async def _emit(event: dict) -> None:
+        if on_event is not None:
+            await on_event(event)
+
+    try:
+        if settings.get("expert_streaming_enabled") and expert_streaming.is_built():
+            thinking = bool(settings.get("show_thinking"))
+            if await asyncio.to_thread(expert_streaming.is_serving, model_tag, params["num_ctx"], thinking):
+                return
+            await _emit({"type": "model_loading", "model": model_tag, "backend": "llama.cpp", "percent": None})
+            last_pct: list[int | None] = [None]
+
+            def _progress(fraction: float | None) -> None:
+                pct = None if fraction is None else int(fraction * 100)
+                if pct != last_pct[0]:
+                    last_pct[0] = pct
+                    asyncio.run_coroutine_threadsafe(_emit({
+                        "type": "model_loading", "model": model_tag, "backend": "llama.cpp", "percent": pct,
+                    }), loop)
+
+            ok, _msg = await asyncio.to_thread(
+                expert_streaming.ensure_running, model_tag,
+                num_ctx=params["num_ctx"], show_thinking=thinking, on_progress=_progress,
+            )
+            if ok:
+                await _emit({"type": "model_loaded", "model": model_tag, "seconds": round(time.monotonic() - started, 1)})
+            return
+
+        import ollama
+        client = ollama.AsyncClient(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+        loaded = {m.model for m in (await client.ps()).models}
+        if model_tag in loaded:
+            return
+        await asyncio.to_thread(ollama_kv_cache.ensure_kv_cache_type, model_tag)
+        await _emit({"type": "model_loading", "model": model_tag, "backend": "ollama", "percent": None})
+        # Empty prompt = load only. num_ctx must match what the real request
+        # sends, otherwise Ollama reloads the model again on that request.
+        await client.generate(
+            model=model_tag, prompt="", keep_alive=OLLAMA_KEEP_ALIVE,
+            options={"num_ctx": params["num_ctx"]},
+        )
+        await _emit({"type": "model_loaded", "model": model_tag, "seconds": round(time.monotonic() - started, 1)})
+    except Exception as e:
+        log_event("preload_chat_model_failed", model=model_tag, error=str(e))
+
+
 from mcp_agent.snapshots import _snapshot_before_write, list_file_snapshots, restore_file_snapshot
 from mcp_agent.tool_wrappers import (
     _add_regex_warning,

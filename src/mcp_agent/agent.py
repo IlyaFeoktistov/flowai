@@ -77,7 +77,7 @@ import model_params
 import settings  # noqa: E402
 from ui.console import debug_print  # noqa: E402
 from mcp_agent import prompts  # noqa: E402
-from mcp_agent.agent_builder import _get_agent  # noqa: E402
+from mcp_agent.agent_builder import _get_agent, preload_chat_model  # noqa: E402
 from mcp_agent.ask_user_tool import _ask_decisions  # noqa: E402
 from mcp_agent.compaction import is_context_overflow_error  # noqa: E402
 from mcp_agent.debug_log import log_event  # noqa: E402
@@ -576,6 +576,7 @@ async def stream_chat(messages: list[dict], on_event=None, mid_turn_queue=None) 
     on_event = _track_delegate_tokens(_suppress_during_subagent_tools(on_event))
     _delegate_on_event.set(on_event)
 
+    await preload_chat_model(on_event)
     agent, model, judge_model, tools_by_name, read_history, compact_research = await _get_agent()
     # Свежий тред на каждый вызов (см. _get_agent) — модель не помнит прошлые
     # ходы, так что дедуп чтений файлов (_dedupe_read_tool) должен начинаться

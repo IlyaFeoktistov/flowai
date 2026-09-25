@@ -331,6 +331,10 @@ async def stream_chat(messages: list[dict], on_event=None):
         yield "⚠️ Нет сообщений для обработки."
         return
 
+    # Before the router: classify_intent is the first model call of the turn,
+    # and it would otherwise do the (silent, loop-blocking) load itself.
+    from mcp_agent.agent_builder import preload_chat_model
+    await preload_chat_model(on_event)
     flags = await classify_intent(messages)
     log_event("pipeline_route", **flags)
 

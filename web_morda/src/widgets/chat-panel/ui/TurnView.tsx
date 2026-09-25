@@ -96,7 +96,11 @@ function TurnFooter({ turn }: { turn: Turn }) {
   const tok = turn.stats ? turn.stats.tokensOut : estimateTokens(turn.items)
   if (tok === 0 && elapsedSec < 1) return null
 
-  const label = !turn.complete && phrase ? `${phrase} · ` : ''
+  const loading = turn.modelLoading && !turn.modelLoading.done ? turn.modelLoading : null
+  const loadingLabel = loading
+    ? `загружаю модель ${loading.model} в память${loading.percent !== null ? `… ~${loading.percent}%` : '…'} · `
+    : ''
+  const label = !turn.complete ? loadingLabel || (phrase ? `${phrase} · ` : '') : ''
   // delegateTokensIn — сумма по всем вызовам сабагента (каждый заново шлёт
   // всю историю), поэтому показываем сгенерированное и пик окна контекста.
   const delegateOut = turn.stats?.delegateTokensOut ?? 0
@@ -106,6 +110,9 @@ function TurnFooter({ turn }: { turn: Turn }) {
     <div className="turn-footer">
       {label}
       {tok} tok · {formatDuration(elapsedSec)}
+      {turn.modelLoading?.done && turn.modelLoading.seconds !== undefined && (
+        <span className="turn-footer-dim"> · модель загружена за {Math.round(turn.modelLoading.seconds)} с</span>
+      )}
       {delegateOut > 0 && (
         <span className="turn-footer-dim">
           {' '}

@@ -895,6 +895,17 @@ class StreamDisplay:
         elif t == "stats":
             self.pending_stats = event
 
+        # ── MODEL LOADING (agent_builder.preload_chat_model) ──
+        elif t == "model_loading":
+            pct = event.get("percent")
+            self._phase_label = (
+                f"загружаю модель {event.get('model', '')} в память"
+                + (f"… ~{pct}%" if pct is not None else "…")
+            )
+        elif t == "model_loaded":
+            console.print(f"[bright_black]  ✓ модель {event.get('model', '')} загружена за {event.get('seconds', 0):.0f} с[/]")
+            self._phase_label = f"{random.choice(_THINKING_PHRASES)}..."
+
         # ── CONTEXT OVERFLOW RECOVERY ────────────────────
         elif t == "context_compacting":
             what = "сжимаю историю диалога" if event.get("level") == 1 else "отбрасываю старую историю"

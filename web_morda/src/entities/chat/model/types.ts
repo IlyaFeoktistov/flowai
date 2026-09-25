@@ -88,6 +88,9 @@ export interface Turn {
   stats?: TurnStats
   // null — история только что сжата, реальное заполнение неизвестно до следующего вызова
   context?: ContextUsage | null
+  // Загрузка весов чат-модели перед ходом (agent_builder.preload_chat_model):
+  // percent — реальная оценка только у llama.cpp, у Ollama null.
+  modelLoading?: { model: string; percent: number | null; seconds?: number; done: boolean }
 }
 
 export interface HistoryMessage {

@@ -112,11 +112,11 @@ Ollama-путь считает per-запросно:
   - num_keep (см. agent_builder._ChatOllamaWithNumKeep) — здесь становится
     статичным значением при СТАРТЕ сервера (--keep), не пересчитывается на
     каждый вызов модели.
-  - show_thinking/reasoning (Ollama's think=...) — тоже фиксируется при
-    старте через --chat-template-kwargs, переключение в /settings во время
-    работы уже запущенного экспериментального сервера не подхватится без
-    перезапуска (ensure_running перезапускает сервер только при смене
-    МОДЕЛИ, не при смене этого параметра — см. ensure_running).
+  - show_thinking — дефолт сервера (--reasoning) задаётся при старте и
+    следует только настройке show_thinking (её смена перезапускает сервер);
+    thinking конкретного вызова (судья, голосовой режим — без него)
+    передаётся per-request через chat_template_kwargs.enable_thinking, см.
+    agent_builder._build_chat_model.
   - keep_alive/автовыгрузка Ollama — не применимо, жизненным циклом
     процесса управляет этот модуль (start/stop/ensure_running), а не демон
     Ollama.
@@ -477,6 +477,7 @@ def ensure_running(
     num_ctx: int = 65536,
     show_thinking: bool = False,
     wait_seconds: float = 120.0,
+    on_progress=None,
 ) -> tuple[bool, str]:
     """Запускает llama-server (если ещё не запущен с ТЕМИ ЖЕ model_tag/
     num_ctx/show_thinking — смена любого из них перезапускает процесс,
@@ -637,11 +638,16 @@ def ensure_running(
     finally:
         log_file.close()  # child inherited its own fd on Popen; safe to close ours
 
+    blob_size = blob_path.stat().st_size
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         if _proc.poll() is not None:
             return _fail(f"процесс завершился сам (код {_proc.returncode}) — {_tail_log()}")
+        if on_progress is not None:
+            on_progress(_load_progress(_proc.pid, blob_size))
         if _health_check(port):
+            if on_progress is not None:
+                on_progress(1.0)
             _proc_config = (model_tag, num_ctx, show_thinking)
             _write_state(_proc.pid, port, model_tag, num_ctx, show_thinking)
             return True, "started"
@@ -649,6 +655,33 @@ def ensure_running(
 
     stop_server()
     return _fail(f"не поднялся за {wait_seconds:.0f}с (health-check не отвечает) — {_tail_log()}")
+
+
+def _load_progress(pid: int, blob_size: int) -> float | None:
+    """Estimated weight-loading progress 0..1 from bytes the server really
+    moved: loading has two phases — the mmap'ed CPU share faulting into RSS,
+    then the GPU share streamed through read() (rchar) — each reaching
+    roughly the blob size, so their sum over 2x the blob grows monotonically
+    to ~0.9 by the time the server turns healthy. None if /proc is unreadable
+    (the UI then shows no percentage rather than a made-up one)."""
+    try:
+        with open(f"/proc/{pid}/io") as f:
+            rchar = next(int(l.split()[1]) for l in f if l.startswith("rchar:"))
+        with open(f"/proc/{pid}/status") as f:
+            rss = next(int(l.split()[1]) * 1024 for l in f if l.startswith("VmRSS:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+    if blob_size <= 0:
+        return None
+    return min(0.99, (rss + rchar) / (2 * blob_size))
+
+
+def is_serving(model_tag: str, num_ctx: int, show_thinking: bool, port: int = DEFAULT_PORT) -> bool:
+    """True if a server with exactly this config already answers — i.e.
+    ensure_running would return immediately without loading anything."""
+    if is_running() and _proc_config == (model_tag, num_ctx, show_thinking):
+        return True
+    return _health_check(port) and _adoptable_state(port, model_tag, num_ctx, show_thinking) is not None
 
 
 def _tail_log(n_lines: int = 3) -> str:
