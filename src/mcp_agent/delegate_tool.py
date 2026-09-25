@@ -484,7 +484,11 @@ def build_delegate_tool(
 
     def _resolve(subagent_type: str):
         agents = discover_agents(repo_path, _ALLOWED_TOOLS)
-        spec = agents.get((subagent_type or "explore").strip())
+        wanted = (subagent_type or "explore").strip()
+        # Case-insensitive + Claude Code's own type names, so skills written
+        # for Claude Code ("general-purpose", "Explore", "Plan") just work.
+        wanted = _TYPE_ALIASES.get(wanted.lower(), wanted)
+        spec = agents.get(wanted) or next((a for n, a in agents.items() if n.lower() == wanted.lower()), None)
         if spec is None:
             return None, f"Error: unknown subagent_type {subagent_type!r}. Available: {', '.join(agents)}."
         if spec.can_mutate(available) and work_mode.current_work_mode.get() == work_mode.PLAN:
@@ -495,7 +499,10 @@ def build_delegate_tool(
         return spec, None
 
     @tool
-    async def agent(description: str, prompt: str, subagent_type: str = "explore", run_in_background: bool = False) -> str:
+    async def agent(
+        description: str, prompt: str, subagent_type: str = "explore",
+        run_in_background: bool = False, model: str = "",
+    ) -> str:
         """Launch a sub-agent on the same model with its OWN context window and
         step budget. `subagent_type` picks what it can do — the available
         types and when to use each are listed in the system prompt (explore:
@@ -509,7 +516,9 @@ def build_delegate_tool(
         returns immediately with an agent_id and you keep working; get the
         report later with agent_result(agent_id) — always collect it before
         your final answer. Sub-agents share one model: how many run at the
-        same time is limited by the user's settings, extra ones wait."""
+        same time is limited by the user's settings, extra ones wait.
+        `model` is accepted for compatibility and ignored — every sub-agent
+        runs on the one local model."""
         spec, error = _resolve(subagent_type)
         if error:
             return error
@@ -554,6 +563,9 @@ def build_delegate_tool(
         return f"[agent {entry['type']}: {entry['label']}]\n{result}"
 
     return [agent, agent_result]
+
+
+_TYPE_ALIASES = {"general-purpose": "general", "general_purpose": "general"}
 
 
 # One semaphore per process, sized by settings.parallel_slots — how many

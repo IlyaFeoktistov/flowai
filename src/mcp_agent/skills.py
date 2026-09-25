@@ -80,6 +80,25 @@ def _search_roots(repo_path: str | None) -> list[tuple[Path, str]]:
     return roots
 
 
+def _first_paragraph(body: str, limit: int = 300) -> str:
+    # Fallback description for a skill written without frontmatter (a local
+    # model often skips it): without one the skill is listed but never
+    # matched to a task.
+    lines: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("```"):
+            if lines:
+                break
+            continue
+        if not stripped:
+            if lines:
+                break
+            continue
+        lines.append(stripped)
+    return " ".join(" ".join(lines).split())[:limit]
+
+
 def _parse(path: Path, source: str) -> Skill | None:
     try:
         text = path.read_text(encoding="utf-8")
@@ -100,7 +119,7 @@ def _parse(path: Path, source: str) -> Skill | None:
         meta = {}
     default_name = path.parent.name if path.name == "SKILL.md" else path.stem
     name = str(meta.get("name") or default_name).strip()
-    description = " ".join(str(meta.get("description") or "").split())
+    description = " ".join(str(meta.get("description") or "").split()) or _first_paragraph(body)
     tools = meta.get("allowed-tools") or meta.get("allowed_tools")
     if isinstance(tools, str):
         tools = [t.strip() for t in tools.split(",")]
@@ -148,8 +167,10 @@ def render_skill(skill: Skill, args: str = "") -> str:
         body = body.replace("$ARGUMENTS", args)
         args = ""
     parts = [
-        f'Skill "{skill.name}" loaded. Follow these instructions for the current task. '
-        f"Paths in them are relative to the skill's base directory: {skill.base_dir}",
+        f'Skill "{skill.name}" loaded. Follow these instructions for the current task; '
+        "relative paths in them are relative to the skill's base directory.",
+        # Exact wording Claude Code uses — skills written for it look for this line.
+        f"Base directory for this skill: {skill.base_dir}",
         "",
         body,
     ]
@@ -158,10 +179,22 @@ def render_skill(skill: Skill, args: str = "") -> str:
     return "\n".join(parts)
 
 
+def _authoring_hint(repo_path: str | None) -> str:
+    # Always present, with the real absolute paths: without it a model asked
+    # to "write yourself a skill" searches the disk (or flowAI's own repo)
+    # for examples instead of calling flowai_guide.
+    project = f"{Path(repo_path) / '.flowai' / 'skills'}/<name>/SKILL.md (this project — the default) or " if repo_path else ""
+    return (
+        "To write a new skill for yourself: " + project
+        + f"{user_skills_dir()}/<name>/SKILL.md (every project, only if the user asks). "
+        "Call flowai_guide first for the exact format (frontmatter name/description is required)."
+    )
+
+
 def skills_prompt_block(repo_path: str | None) -> str:
     skills = discover_skills(repo_path)
     if not skills:
-        return ""
+        return "\n\n## Skills\n" + _authoring_hint(repo_path)
     lines = [
         "\n\n## Skills",
         "The skills below are ready-made instructions for specific kinds of "
@@ -175,6 +208,7 @@ def skills_prompt_block(repo_path: str | None) -> str:
     ]
     for skill in skills.values():
         lines.append(f"- {skill.name}: {skill.description or '(no description)'}")
+    lines.append(_authoring_hint(repo_path))
     return "\n".join(lines)
 
 

@@ -58,3 +58,11 @@ def test_expand_slash_command(tmp_path, monkeypatch):
     assert allowed == frozenset({"read_file"})
     assert skills.expand_slash_command("/unknown", str(tmp_path)) is None
     assert skills.expand_slash_command("plain text", str(tmp_path)) is None
+
+
+def test_skill_without_frontmatter_gets_first_paragraph_as_description(tmp_path):
+    skill_dir = tmp_path / ".flowai" / "skills" / "count"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# count\n\nCounts lines in .py files.\n\n## Steps\n1. run wc\n")
+    found = skills.discover_skills(str(tmp_path))["count"]
+    assert found.description == "Counts lines in .py files."
