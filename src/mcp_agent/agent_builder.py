@@ -12,6 +12,7 @@ chat_model (voice_mode) без пересоздания подпроцессов
 _get_agent/_get_tools ниже.
 """
 import asyncio
+import logging
 import os
 import re
 
@@ -42,6 +43,13 @@ from mcp_agent.compaction import _CompactResearchMiddleware, _DropStaleReadsMidd
 from mcp_agent.config import build_mcp_connections, TOOLS_REQUIRING_APPROVAL
 from mcp_agent.debug_log import log_event
 from mcp_agent import plan_bash
+
+# MCP tools open a stdio session per call; on close the mcp library kills the
+# server's process group, and when the server already exited on its own it
+# logs a WARNING ("Process group termination failed ... No such process")
+# straight into the chat — nothing failed, the process is simply gone. Real
+# kill failures are logged at ERROR and still show.
+logging.getLogger("mcp.os.posix.utilities").setLevel(logging.ERROR)
 from mcp_agent.delegate_tool import _DelegateNudgeMiddleware, build_delegate_tool
 from mcp_agent.web_read_tool import build_web_read_tool
 from mcp_agent import skills as md_skills

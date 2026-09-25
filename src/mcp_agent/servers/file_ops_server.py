@@ -240,9 +240,9 @@ async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str
     Rejects binary files (images, compiled artifacts, .db, ...) and anything
     over 10MB outright — narrow with offset/limit or use bash's grep/head/
     tail on a huge file instead of trying to read it whole. A whole-file read
-    (no limit given) is also rejected up front if the file is large enough
-    that the result would just come back truncated — pass limit= for large
-    files instead of omitting it."""
+    (no limit given) of a file too large for one result returns its
+    beginning — as many whole lines as fit — and says which line to continue
+    from; pass offset/limit (or grep_search) for the rest."""
     path = path.strip()
     if not path:
         return "Error: path is required"
@@ -256,14 +256,6 @@ async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str
             f"Error: {path!r} is {size / (1024 * 1024):.1f}MB — over the "
             f"{_MAX_READABLE_FILE_BYTES // (1024 * 1024)}MB limit for a single "
             "read. Narrow with offset/limit, or use bash with grep/head/tail."
-        )
-    if limit is None and size > _MAX_READ_CHARS_UNBOUNDED:
-        return (
-            f"Error: {path!r} is {size} bytes — reading it whole would exceed "
-            f"the {_MAX_READ_CHARS_UNBOUNDED}-character output cap and come "
-            "back truncated from the middle anyway. Pass limit= (optionally "
-            "with offset=) to read it in a bounded window, or use grep_search "
-            "to jump straight to the relevant lines."
         )
     if _is_binary_file(path):
         return (
@@ -280,12 +272,31 @@ async def read_file(path: str, offset: int = 0, limit: int | None = None) -> str
     total = len(lines)
     start = max(0, offset)
     end = total if limit is None else min(total, start + max(0, limit))
+    # No limit and too big for one result: the output cap would cut the
+    # middle out anyway, so return the leading lines that fit instead of an
+    # error that costs the model a round trip to re-ask with limit=.
+    capped_line = False
+    budget = _MAX_READ_CHARS_UNBOUNDED - 400  # room for the header/footer lines
+    if limit is None and sum(len(line) for line in lines[start:end]) > budget:
+        used, end = 0, start
+        while end < total and used + len(lines[end]) <= budget:
+            used += len(lines[end])
+            end += 1
+        if end == start:  # a single line longer than the cap (minified code)
+            capped_line = True
+            end = start + 1
     selected = "".join(lines[start:end])
+    if capped_line:
+        selected = selected[:budget] + "\n... (line truncated — too long to show whole)"
     if not selected:
         return f"(empty — file has {total} lines, offset={offset} is past the end)" if start >= total else "(empty file)"
     result = f"(lines {start + 1}-{end} of {total} total)\n{selected}"
     if end < total:
-        result += f"\n... ({total - end} more lines — increase limit or offset to see the rest)"
+        if limit is None:
+            result += (f"\n... ({total - end} more lines — the file is too large to read whole; "
+                       f"continue with offset={end} and a limit, or use grep_search to find the relevant lines)")
+        else:
+            result += f"\n... ({total - end} more lines — increase limit or offset to see the rest)"
     return result
 
 
