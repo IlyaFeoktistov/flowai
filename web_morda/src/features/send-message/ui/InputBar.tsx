@@ -25,8 +25,12 @@ export function InputBar({
   onSend,
   onStop,
   context,
+  workMode,
+  onWorkModeChange,
 }: {
   context: { tokens: number; limit: number | null } | null
+  workMode: 'plan' | 'build'
+  onWorkModeChange: (mode: 'plan' | 'build') => void
   streaming: boolean
   pendingCount: number
   lastAnswerText: string | null
@@ -191,12 +195,30 @@ export function InputBar({
           </button>
         )}
       </div>
+      <div className="input-bar-meta">
+        <div className="work-mode-toggle" role="group" aria-label="Режим работы">
+          <button
+            className={workMode === 'plan' ? 'active plan' : ''}
+            onClick={() => onWorkModeChange('plan')}
+            title="Только чтение и план, правки заблокированы. План сохранится в .flowai/plans/"
+          >
+            План
+          </button>
+          <button
+            className={workMode === 'build' ? 'active' : ''}
+            onClick={() => onWorkModeChange('build')}
+            title="Агент правит код"
+          >
+            Build
+          </button>
+        </div>
       {context && (
         <div className={'context-usage' + (context.limit && context.tokens / context.limit >= 0.8 ? ' high' : '')}>
           контекст {(context.tokens / 1000).toFixed(1)}k
           {context.limit ? ` / ${Math.round(context.limit / 1000)}k (${Math.floor((context.tokens * 100) / context.limit)}%)` : ''}
         </div>
       )}
+      </div>
     </div>
   )
 }

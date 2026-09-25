@@ -9,10 +9,12 @@ export function Chat({
   entries,
   onRespondPermission,
   onRespondAskUser,
+  onRunPlan,
 }: {
   entries: ConversationEntry[]
   onRespondPermission: (id: string, answer: 'y' | 'a' | 'n') => void
   onRespondAskUser: (id: string, answer: string) => void
+  onRunPlan?: (planFileName: string) => void
 }) {
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -45,6 +47,7 @@ export function Chat({
               turn={entry}
               onRespondPermission={onRespondPermission}
               onRespondAskUser={onRespondAskUser}
+              onRunPlan={onRunPlan}
             />
           ),
         )}

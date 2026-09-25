@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getSession } from '@/entities/session'
 import type { SessionMessage } from '@/entities/session'
-import type { AskUserOption, ConnectionStatus, ConversationEntry, Turn, TurnItem } from './types'
+import type { AskUserOption, ConnectionStatus, ConversationEntry, Turn, TurnItem, WorkMode } from './types'
 
 let idSeed = 0
 const nextId = () => `${Date.now().toString(36)}-${idSeed++}`
@@ -204,6 +204,9 @@ function replayTurn(
       case 'context_compressed':
         turn = { ...turn, context: null }
         break
+      case 'plan_saved':
+        turn = { ...turn, planPath: event.path as string }
+        break
       case 'model_loaded':
         turn = { ...turn, modelLoading: { model: event.model as string, percent: 100, seconds: event.seconds as number, done: true } }
         break
@@ -268,6 +271,10 @@ export function useChatSocket() {
   // текущий) — чисто информационная штука для UI, не влияет на порядок/
   // доставку (это делает сервер, см. main.py's inbound/mid_turn_queue).
   const [pendingCount, setPendingCount] = useState(0)
+  // plan/build живёт на сервере per-connection (main.py) — тут зеркало для
+  // UI; ref — чтобы после переподключения восстановить режим на сервере.
+  const [workMode, setWorkModeState] = useState<WorkMode>('build')
+  const workModeRef = useRef<WorkMode>('build')
 
   const wsRef = useRef<WebSocket | null>(null)
   const currentTurnIdRef = useRef<string | null>(null)
@@ -311,9 +318,19 @@ export function useChatSocket() {
     }
 
     function handleEvent(event: Record<string, unknown> & { type: string }) {
+      if (event.type === 'mode_changed') {
+        workModeRef.current = event.mode as WorkMode
+        setWorkModeState(event.mode as WorkMode)
+        return
+      }
+      if (event.type === 'command_handled') {
+        setPendingCount((n) => Math.max(0, n - 1))
+        return
+      }
       if (event.type === 'session_started') {
         const id = event.session_id as string
         setSessionId(id)
+        if (workModeRef.current === 'plan') ws.send(JSON.stringify({ type: 'set_mode', mode: 'plan' }))
         if (pendingSendRef.current) {
           const text = pendingSendRef.current
           pendingSendRef.current = null
@@ -522,6 +539,9 @@ export function useChatSocket() {
           case 'context_compressed':
             return mapTurnItem(prev, turnId, (t) => ({ ...t, context: null }))
 
+          case 'plan_saved':
+            return mapTurnItem(prev, turnId, (t) => ({ ...t, planPath: event.path as string }))
+
           case 'model_loading':
             return mapTurnItem(prev, turnId, (t) => ({
               ...t,
@@ -577,6 +597,13 @@ export function useChatSocket() {
     },
     [connect, sessionId],
   )
+
+  const setWorkMode = useCallback((mode: WorkMode) => {
+    workModeRef.current = mode
+    setWorkModeState(mode)
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'set_mode', mode }))
+  }, [])
 
   const stopCurrentTurn = useCallback(() => {
     wsRef.current?.send(JSON.stringify({ type: 'stop' }))
@@ -654,6 +681,8 @@ export function useChatSocket() {
       startNewChat,
       openSession,
       contextUsage,
+      workMode,
+      setWorkMode,
     }),
     [
       entries,
@@ -670,6 +699,8 @@ export function useChatSocket() {
       startNewChat,
       openSession,
       contextUsage,
+      workMode,
+      setWorkMode,
     ],
   )
 }

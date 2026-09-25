@@ -90,6 +90,8 @@ export interface Turn {
   context?: ContextUsage | null
   // Загрузка весов чат-модели перед ходом (agent_builder.preload_chat_model):
   // percent — реальная оценка только у llama.cpp, у Ollama null.
+  // plan-режим: куда сохранён план этого хода (mcp_agent/work_mode.py)
+  planPath?: string
   modelLoading?: { model: string; percent: number | null; seconds?: number; done: boolean }
 }
 
@@ -101,5 +103,7 @@ export interface HistoryMessage {
 }
 
 export type ConversationEntry = HistoryMessage | Turn
+
+export type WorkMode = 'plan' | 'build'
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'open' | 'closed'

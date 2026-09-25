@@ -342,3 +342,21 @@
 .diff-file {
   color: var(--text-faint);
 }
+
+.turn-plan-saved {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  font-size: 13px;
+}
+.turn-plan-saved code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}

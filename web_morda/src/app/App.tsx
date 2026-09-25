@@ -173,7 +173,12 @@ function App() {
       />
 
       <main className="chat-panel">
-        <Chat entries={chat.entries} onRespondPermission={chat.respondPermission} onRespondAskUser={chat.respondAskUser} />
+        <Chat
+          entries={chat.entries}
+          onRespondPermission={chat.respondPermission}
+          onRespondAskUser={chat.respondAskUser}
+          onRunPlan={(file) => chat.sendMessage(`/build ${file}`)}
+        />
         <InputBar
           streaming={chat.isStreaming}
           pendingCount={chat.pendingCount}
@@ -181,6 +186,8 @@ function App() {
           onSend={chat.sendMessage}
           onStop={chat.stopCurrentTurn}
           context={chat.contextUsage}
+          workMode={chat.workMode}
+          onWorkModeChange={chat.setWorkMode}
         />
       </main>
 

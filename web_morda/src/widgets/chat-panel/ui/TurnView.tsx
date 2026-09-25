@@ -417,11 +417,14 @@ export function TurnView({
   turn,
   onRespondPermission,
   onRespondAskUser,
+  onRunPlan,
 }: {
   turn: Turn
   onRespondPermission: (id: string, answer: 'y' | 'a' | 'n') => void
   onRespondAskUser: (id: string, answer: string) => void
+  onRunPlan?: (planFileName: string) => void
 }) {
+  const planFile = turn.planPath?.split('/').pop()
   return (
     <div className="turn">
       <div className="msg msg-user">
@@ -439,6 +442,18 @@ export function TurnView({
           />
         ))}
         {!turn.complete && <span className="turn-live-dot" aria-label="генерирует" />}
+        {turn.planPath && planFile && (
+          <div className="turn-plan-saved">
+            <span>
+              📝 План сохранён: <code>{turn.planPath}</code>
+            </span>
+            {onRunPlan && (
+              <button className="btn btn-primary" onClick={() => onRunPlan(planFile)}>
+                Выполнить план
+              </button>
+            )}
+          </div>
+        )}
       </div>
       <TurnFooter turn={turn} />
     </div>

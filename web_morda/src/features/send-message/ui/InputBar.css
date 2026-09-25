@@ -78,12 +78,39 @@
   margin: 0 auto 10px;
 }
 
-.context-usage {
+.input-bar-meta {
   max-width: 760px;
   margin: 6px auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.context-usage {
   font-size: 12px;
   color: var(--text-faint);
-  text-align: right;
+}
+.work-mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.work-mode-toggle button {
+  background: transparent;
+  border: 0;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+.work-mode-toggle button.active {
+  background: var(--bg-inset);
+  color: var(--text);
+}
+.work-mode-toggle button.active.plan {
+  color: var(--accent-1);
 }
 .context-usage.high {
   color: var(--danger);
