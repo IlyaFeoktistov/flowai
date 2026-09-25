@@ -241,6 +241,14 @@ def _detect_git_status(repo_path: str) -> str | None:
     )
 
 
+def _agents_block(repo_path: str) -> str:
+    """Sub-agent types for the `agent` tool (mcp_agent/subagents.py) — only
+    the main agent has that tool, so only its prompts list them."""
+    from mcp_agent.roles import MAIN_INVESTIGATION_TOOL_NAMES
+    from mcp_agent.subagents import agents_prompt_block, discover_agents
+    return agents_prompt_block(discover_agents(repo_path, frozenset(MAIN_INVESTIGATION_TOOL_NAMES)))
+
+
 def _build_system_prompt(repo_path: str) -> str:
     """repo_path зашивается прямо в промпт вместо того, чтобы модель угадывала
     его для repo_path/path-параметров git- и filesystem-тулов. Без этого
@@ -272,18 +280,19 @@ def _build_system_prompt(repo_path: str) -> str:
         "task is to FIND/LOCATE something in the code (where is X defined/"
         "called, does Y already exist) or to ANALYZE/INVESTIGATE/EXPLAIN "
         "how something works (how does X work, what calls Y, review this "
-        "area for bugs), your FIRST move is delegate(task) with the whole "
-        "question — not a grep_search/glob_search call yourself first and "
-        "delegate only if that alone doesn't finish it. This applies even "
+        "area for bugs), your FIRST move is agent(subagent_type=\"explore\") "
+        "with the whole question — not a grep_search/glob_search call "
+        "yourself first and a sub-agent only if that alone doesn't finish "
+        "it. This applies even "
         "to a small, already-familiar path inside this session's own "
         "working directory — narrowness is not an exception while this "
-        "setting is ON. Only skip delegate for work that ISN'T a "
+        "setting is ON. Only skip the explore agent for work that ISN'T a "
         "find/analyze task to begin with (writing new code, running a "
         "command, answering from what's already in this conversation) or "
         "for a single already-known exact file+line you're about to "
         "read/edit with no searching involved. Never call those search "
         "tools directly yourself while this override is on — always go "
-        "through delegate instead.\n"
+        "through an explore agent instead.\n"
         if settings.get("always_delegate_search") else ""
     )
     prompt = _SYSTEM_PROMPT_TEMPLATE.format(
@@ -298,6 +307,7 @@ def _build_system_prompt(repo_path: str) -> str:
             + flowai_md
         )
     prompt += skills_prompt_block(repo_path)
+    prompt += _agents_block(repo_path)
     # Пересчитываем оценку токенов system-промпта (используется в usage-стате,
     # см. _SYSTEM_PROMPT_TOKENS_ESTIMATE ниже) с учётом реального размера —
     # FLOWAI.md может ощутимо увеличить промпт по сравнению со статическим
@@ -383,10 +393,15 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "all.\n"
     "- The REAL definition/every usage, before a rename/refactor: lsp, "
     "not a grep_search spelling guess.\n"
-    "- Also reach for delegate (beyond what its own description already "
-    "covers) for an unfamiliar large codebase/monorepo you don't already "
-    "have located, or when you'd otherwise burn more than 2-3 tool calls "
-    "yourself on a small, already-familiar path.\n"
+    "- Sub-agents (the agent tool, types listed under 'Sub-agent types' "
+    "below): an explore agent for an unfamiliar large codebase/monorepo "
+    "you don't already have located, or when you'd otherwise burn more "
+    "than 2-3 tool calls yourself on a small, already-familiar path; a "
+    "plan agent to design a non-trivial change; a general agent for a "
+    "self-contained piece of work (e.g. 'write tests for module X') you "
+    "can hand off whole. Run independent ones with run_in_background=true "
+    "and collect them with agent_result — but they share ONE model, so "
+    "only do that when the work really is independent.\n"
     "- A genuine judgment call, or whether to build something that "
     "doesn't exist yet: ask_user (see the judgment-call rule below for "
     "when).\n"
@@ -837,6 +852,7 @@ def _build_optimized_system_prompt(repo_path: str) -> str:
             + flowai_md
         )
     prompt += skills_prompt_block(repo_path)
+    prompt += _agents_block(repo_path)
     _SYSTEM_PROMPT_TOKENS_ESTIMATE = len(prompt) // 4
     return prompt
 

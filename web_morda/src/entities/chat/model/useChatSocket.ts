@@ -6,10 +6,15 @@ import type { AskUserOption, ConnectionStatus, ConversationEntry, Turn, TurnItem
 let idSeed = 0
 const nextId = () => `${Date.now().toString(36)}-${idSeed++}`
 
-// delegate_tool.py names sub-calls "delegate → <real tool name>" — nest
-// those under the delegate card that spawned them instead of showing them
-// as flat siblings (see docs/web-ui.md).
-const DELEGATE_CHILD_RE = /^delegate → (.+)$/
+// delegate_tool.py names a sub-agent's calls "agent → <real tool name>" and
+// tags them with the agent's label (its `description`) — nest them under
+// the agent card that spawned them instead of showing flat siblings.
+const DELEGATE_CHILD_RE = /^agent → (.+)$/
+
+function agentLabel(args: unknown): string {
+  const a = (args ?? {}) as Record<string, unknown>
+  return String(a.description || a.prompt || '').split(/\s+/).join(' ').trim().slice(0, 80)
+}
 
 function mapTurnItem(entries: ConversationEntry[], turnId: string, fn: (t: Turn) => Turn): ConversationEntry[] {
   return entries.map((e) => (e.kind === 'turn' && e.id === turnId ? fn(e) : e))
@@ -38,28 +43,38 @@ function updateLastOfKind<K extends TurnItem['kind']>(
   return turn
 }
 
-function pushDelegateChild(turn: Turn, id: string, name: string, args: unknown): Turn {
-  for (let i = turn.items.length - 1; i >= 0; i--) {
-    const item = turn.items[i]
-    if (item.kind === 'tool' && item.name === 'delegate' && item.status === 'running') {
-      const items = [...turn.items]
-      items[i] = { ...item, children: [...(item.children ?? []), { id, name, args, status: 'running' }] }
-      return { ...turn, items }
+function pushDelegateChild(turn: Turn, id: string, name: string, args: unknown, label?: string): Turn {
+  // A background agent's own tool call has already returned by the time its
+  // sub-calls stream in, so match the parent by label first, then fall back
+  // to the latest still-running agent card.
+  const findParent = (match: (item: Extract<TurnItem, { kind: 'tool' }>) => boolean) => {
+    for (let i = turn.items.length - 1; i >= 0; i--) {
+      const item = turn.items[i]
+      if (item.kind === 'tool' && item.name === 'agent' && match(item)) return i
     }
+    return -1
   }
-  // Не нашли открытый delegate-родитель (не должно происходить) — не
+  let index = label ? findParent((item) => agentLabel(item.args) === label) : -1
+  if (index === -1) index = findParent((item) => item.status === 'running')
+  if (index !== -1) {
+    const items = [...turn.items]
+    const parent = items[index] as Extract<TurnItem, { kind: 'tool' }>
+    items[index] = { ...parent, children: [...(parent.children ?? []), { id, name, args, status: 'running' }] }
+    return { ...turn, items }
+  }
+  // Родитель не найден (например, фоновый агент из прошлого хода) — не
   // теряем событие молча, показываем плоско.
-  return pushItem(turn, { kind: 'tool', id, name: `delegate → ${name}`, args, status: 'running' })
+  return pushItem(turn, { kind: 'tool', id, name: `agent → ${name}`, args, status: 'running' })
 }
 
-function updateDelegateChild(turn: Turn, id: string, result: string): Turn {
+function updateDelegateChild(turn: Turn, id: string, result: string, diff?: string): Turn {
   for (let i = turn.items.length - 1; i >= 0; i--) {
     const item = turn.items[i]
     if (item.kind === 'tool' && item.children?.some((c) => c.id === id)) {
       const items = [...turn.items]
       items[i] = {
         ...item,
-        children: item.children!.map((c) => (c.id === id ? { ...c, status: 'done', result } : c)),
+        children: item.children!.map((c) => (c.id === id ? { ...c, status: 'done', result, diff } : c)),
       }
       return { ...turn, items }
     }
@@ -134,7 +149,7 @@ function replayTurn(
         const id = event.id as string
         const match = DELEGATE_CHILD_RE.exec(name)
         if (match) {
-          turn = pushDelegateChild(turn, id, match[1], event.args)
+          turn = pushDelegateChild(turn, id, match[1], event.args, event.agent as string | undefined)
         } else {
           turn = pushItem(turn, {
             kind: 'tool',
@@ -142,7 +157,7 @@ function replayTurn(
             name,
             args: event.args,
             status: 'running',
-            ...(name === 'delegate' ? { children: [] } : {}),
+            ...(name === 'agent' ? { children: [] } : {}),
           })
         }
         break
@@ -152,7 +167,7 @@ function replayTurn(
         const id = event.id as string
         const match = DELEGATE_CHILD_RE.exec(name)
         if (match) {
-          turn = updateDelegateChild(turn, id, event.result as string)
+          turn = updateDelegateChild(turn, id, event.result as string, event.diff as string | undefined)
         } else {
           turn = updateItem(turn, id, (i) =>
             i.kind === 'tool'
@@ -446,7 +461,7 @@ export function useChatSocket() {
             const id = event.id as string
             const match = DELEGATE_CHILD_RE.exec(name)
             if (match) {
-              return mapTurnItem(prev, turnId, (t) => pushDelegateChild(t, id, match[1], event.args))
+              return mapTurnItem(prev, turnId, (t) => pushDelegateChild(t, id, match[1], event.args, event.agent as string | undefined))
             }
             return mapTurnItem(prev, turnId, (t) =>
               pushItem(t, {
@@ -455,7 +470,7 @@ export function useChatSocket() {
                 name,
                 args: event.args,
                 status: 'running',
-                ...(name === 'delegate' ? { children: [] } : {}),
+                ...(name === 'agent' ? { children: [] } : {}),
               }),
             )
           }
@@ -464,7 +479,7 @@ export function useChatSocket() {
             const id = event.id as string
             const match = DELEGATE_CHILD_RE.exec(name)
             if (match) {
-              return mapTurnItem(prev, turnId, (t) => updateDelegateChild(t, id, event.result as string))
+              return mapTurnItem(prev, turnId, (t) => updateDelegateChild(t, id, event.result as string, event.diff as string | undefined))
             }
             return mapTurnItem(prev, turnId, (t) =>
               updateItem(t, id, (i) =>

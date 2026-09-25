@@ -656,7 +656,7 @@ async def main() -> None:
             if cmd == "/plan":
                 app.set_work_mode(work_mode.PLAN)
                 if not cmd_args:
-                    console.print("[dim]  ⏸ режим план: агент только читает и составляет план, правки заблокированы. "
+                    console.print("[dim]  режим plan: агент только читает и составляет план, правки заблокированы. "
                                   "План сохранится в .flowai/plans/, выполнить — /build[/]\n")
                     return
                 user_input = cmd_args
@@ -669,7 +669,7 @@ async def main() -> None:
                     latest = work_mode.latest_plan(os.getcwd())
                     hint = f" Последний сохранённый план: {latest} — /build {latest.name} выполнит его." if latest else ""
                     if not cmd_args:
-                        console.print(f"[dim]  ▶ режим build.{escape(hint)}[/]\n")
+                        console.print(f"[dim]  режим build.{escape(hint)}[/]\n")
                         return
                 if _pending_plan_path is not None:
                     console.print(f"\n[green bold] You ›[/] /build {escape(cmd_args)}[dim]  (план: {escape(str(_pending_plan_path))})[/]\n")

@@ -290,6 +290,14 @@ _state: dict = {
     # fetch+сравнение, без pull) читают/пишут эти же два ключа.
     "last_update_check": None,
     "update_commits_behind": 0,
+    # Сколько запросов одна загруженная чат-модель обслуживает одновременно
+    # (слоты llama-server, -np) — для агентов (mcp_agent/delegate_tool.py),
+    # которые могут работать параллельно основному. Второй инстанс модели
+    # НЕ поднимается никогда: каждый слот сверх первого стоит только своего
+    # KV-cache окна num_ctx, а скорость генерации делится между запросами.
+    # Дефолт 1 — ровно та же память, что без агентов вообще. На Ollama-пути
+    # это настройка самого демона (OLLAMA_NUM_PARALLEL), отсюда не меняется.
+    "parallel_slots":   int(os.getenv("PARALLEL_SLOTS", "1")),
     # Пользовательские параметры генерации по моделям: {model_tag: {key: value}}
     # — см. model_params.py (слои дефолтов и что каждый ключ значит).
     "model_params":     {},
@@ -303,7 +311,7 @@ _PERSIST_KEYS = {
     "imggen_steps", "imggen_guidance", "imggen_strength", "imggen_width", "imggen_height",
     "imggen_prompt_prefix", "imggen_negative_prompt", "imggen_enhance_prompt", "recap_enabled",
     "gen3d_enabled", "gen3d_target_faces", "gen3d_hunyuan_profile", "gen3d_skin_source",
-    "gen_agent_tools", "compact_history_enabled", "model_params",
+    "gen_agent_tools", "compact_history_enabled", "model_params", "parallel_slots",
     "last_update_check", "update_commits_behind",
     "debug",
 }

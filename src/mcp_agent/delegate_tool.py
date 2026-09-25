@@ -1,59 +1,32 @@
 """
-delegate — последовательный сабагент для многофайлового расследования.
+agent / agent_result — sub-agents in the Claude Code style (types and custom
+agents: mcp_agent/subagents.py), replacing the old read-only `delegate`.
 
-Реальная цена того, что ВСЁ расследование идёт в ОДНОМ общем контексте с
-ОДНИМ общим бюджетом шагов (RECURSION_LIMIT): при достаточно длинной цепочке
-зависимостей (например Job -> Service -> Repository -> Persister ->
-UnitStarter) агент может закончить шаги ещё до готового ответа.
+Every sub-agent runs on the SAME resident model object as the main agent —
+never a second model instance: this machine's RAM/VRAM holds one copy of the
+chat model, not two. What varies is how many sub-agents may generate at the
+same time — settings.parallel_slots (default 1), which is also the number of
+llama-server slots (expert_streaming.py's -np): with 1, runs are strictly
+sequential and a background run simply queues behind the main agent's own
+requests on the one model (slower, never more memory); with N, up to N run
+at once and the model's throughput is shared between them.
 
-Параллельных сабагентов здесь НЕТ и не будет: qwen3-coder:30b — 18 GB
-(`ollama list`), WSL этой машины реально даёт процессам ~23 GB RAM
-(`free -h`) — второй одновременно загруженный инстанс той же модели (не
-говоря о другой) в этот бюджет не помещается. delegate поэтому —
-ПОСЛЕДОВАТЕЛЬНЫЙ вызов: он переиспользует уже резидентную модель (тот же
-объект `model`, тот же keep_alive/тег, что и у основного агента — просто
-ещё один ainvoke, ровно как self_heal.py уже делает лишний вызов на judge
-после каждого круга), выполняется полностью, и только потом возвращает
-управление основному циклу.
+A foreground call blocks the calling agent until the report is back, like a
+normal tool. run_in_background=True returns an agent_id immediately — the
+main agent keeps working and collects the report with agent_result().
 
-Раньше это было ТОЛЬКО предположением в этом комментарии, ничем не
-закреплённым в коде — langgraph/prebuilt/tool_node.py исполняет ВСЕ
-tool_calls одного AIMessage через asyncio.gather разом, так что если
-модель за один раунд решит вызвать delegate несколько раз (наблюдалось
-живьём: 3 одновременных вызова), они реально стартовали бы конкурентно.
-own_read_history/compact_research (см. build_delegate_tool ниже) —
-ОБЩЕЕ на все вызовы состояние, которое каждый delegate() очищает при
-входе, полагаясь именно на строгую последовательность — при реальной
-конкурентности один вызов мог стереть кэш другого посреди его работы.
-_delegate_lock ниже — настоящее принуждение к тому, что до сих пор было
-только описано словами: если модель всё же запустит несколько delegate
-разом, они физически дождутся друг друга по очереди (FIFO у asyncio.Lock),
-а не тронут общее состояние одновременно.
+Writing sub-agents (general, or a custom agent whose tools include writes)
+use the main agent's already-wrapped tools (snapshot before write, fresh-read
+check) and get the permission dialogs via writer_middleware — the same
+approvals the user would see for the main agent.
 
-Тулы у сабагента — READ-ONLY подмножество (_ALLOWED_TOOLS): без bash,
-без записи файлов, без git-мутаций. Это осознанное упрощение, а не
-временная заглушка — сабагент здесь только для разведки ("как оно
-устроено", "где реально определено", "что вызывает что"), не для внесения
-изменений. Из этого следует и то, что ему не нужны
-HumanInTheLoopMiddleware/ask_user: ни один тул в его наборе не требует
-approval, а сам он не может ничего спросить у пользователя — задача (task)
-должна быть самодостаточной, сабагент не видит остального разговора.
-
-compact_research (_CompactResearchMiddleware, mcp_agent/compaction.py) —
-без неё длинное расследование (много раундов read_file/grep_search/
-search_code_semantic) накапливает историю, которую НИКТО не сжимает: у
-внешнего агента compact_research есть, у сабагента не было. Многораундовое
-расследование без неё реально может упереться в 400 "request exceeds the
-available context size" ещё до готового ответа. Тот же judge_model, что и
-у внешнего агента (передаётся в build_delegate_tool) — не отдельная
-загрузка весов. is_context_overflow_error (та же детекция, что
-agent.py:_stream_round) — страховка НА СЛУЧАЙ, если даже компакция не
-спасла (см. delegate() ниже): raw sticky-контент (read_file/grep_search/
-glob_search — см. compaction.py:STICKY_TOOL_NAMES) компакция принципиально
-не трогает, так что чисто от нескольких больших честно прочитанных файлов
-упереться в потолок всё ещё можно.
+compact_research (_CompactResearchMiddleware) per run keeps a long
+investigation from overflowing the window; is_context_overflow_error is the
+fallback when even that isn't enough (raw read_file/grep_search results are
+never compacted).
 """
 import asyncio
+import contextvars
 import uuid
 from contextvars import ContextVar
 
@@ -66,7 +39,7 @@ from langgraph.errors import GraphRecursionError
 
 from mcp_agent.ask_user_tool import _ToolErrorGuardMiddleware
 from mcp_agent.compaction import _CompactResearchMiddleware, _summarize_research, is_context_overflow_error
-from mcp_agent.message_utils import _DedupeToolResultsMiddleware, _tool_text
+from mcp_agent.message_utils import _DedupeToolResultsMiddleware, _tool_artifact_diagnostics, _tool_artifact_diff, _tool_text
 from mcp_agent.model_config import DEBUG, DELEGATE_RECURSION_LIMIT, TOOL_OUTPUT_CHAR_CAP
 from mcp_agent.roles import MAIN_INVESTIGATION_TOOL_NAMES
 from mcp_agent.self_heal import (
@@ -76,6 +49,8 @@ from mcp_agent.self_heal import (
 )
 from mcp_agent.tool_wrappers import _dedupe_read_tool
 from mcp_agent.web_read_tool import build_web_read_tool
+from mcp_agent import work_mode
+from mcp_agent.subagents import NEVER_FOR_SUBAGENTS, discover_agents
 import settings
 from ui.console import debug_print
 
@@ -98,25 +73,7 @@ _MAX_LEAK_RECOVERIES = 2
 # MAIN_INVESTIGATION_TOOL_NAMES — фиксированный (без per-turn флагов
 # router.py, которых у основного агента нет) read-only+web набор, БЕЗ shell —
 # держит верным собственный системный промпт этого файла ниже ("no shell").
-_ALLOWED_TOOLS = MAIN_INVESTIGATION_TOOL_NAMES
-
-_DELEGATE_SYSTEM_PROMPT = (
-    "You are a focused research sub-agent, delegated ONE specific "
-    "investigation by another agent. You have READ-ONLY tools — no writes, "
-    "no shell, no git mutations — and you cannot ask the user anything, so "
-    "treat the task you were given as the ONLY information you have.\n\n"
-    "You have your OWN step budget, separate from whoever delegated this to "
-    "you — spend it efficiently: don't re-read a file you already read this "
-    "session, don't retry a search with a slightly different guessed regex "
-    "when the exact string is right there in what you already read, and "
-    "prefer lsp (goToDefinition/findReferences) over guessing a symbol's "
-    "location by pattern-matching its name.\n\n"
-    "When you have enough to answer, STOP and write a complete, concrete "
-    "final answer with exact file paths and line numbers, so the caller can "
-    "verify without re-reading everything you already read. If you run out "
-    "of steps before finishing, say plainly what you found and what's still "
-    "unknown — never guess to fill the gap."
-)
+_ALLOWED_TOOLS = frozenset(MAIN_INVESTIGATION_TOOL_NAMES)
 
 # Промпт может дважды явно советовать звать delegate для многофайлового
 # расследования, а модель всё равно не вызывает его ни разу за несколько
@@ -150,7 +107,7 @@ class _DelegateNudgeMiddleware(AgentMiddleware):
         if already_nudged:
             return await handler(request)
 
-        used_delegate = any(isinstance(m, ToolMessage) and m.name == "delegate" for m in messages)
+        used_delegate = any(isinstance(m, ToolMessage) and m.name in _SUBAGENT_TOOLS for m in messages)
         if used_delegate:
             return await handler(request)
 
@@ -166,10 +123,11 @@ class _DelegateNudgeMiddleware(AgentMiddleware):
         nudge = HumanMessage(content=(
             f"(System note: you've made a lot of read/search calls in this "
             f"investigation — {explore_count} so far — without ever using "
-            "delegate. If there's still more ground to cover, STOP reading "
-            "files yourself: call delegate with a complete, self-contained "
-            "description of what's left to investigate, and continue from "
-            "its summary instead of reading more files manually.)"
+            "a sub-agent. If there's still more ground to cover, STOP reading "
+            "files yourself: call agent(subagent_type=\"explore\") with a "
+            "complete, self-contained description of what's left to "
+            "investigate, and continue from its report instead of reading "
+            "more files manually.)"
         ))
         return await handler(request.override(messages=list(messages) + [nudge]))
 
@@ -204,7 +162,7 @@ current_on_event: ContextVar = ContextVar("delegate_on_event", default=None)
 # просто без рваных чужих текстовых фрагментов поверх. Общее для основного
 # stream_chat (agent.py) и пайплайна (stage_runner.py) — оба реально зовут
 # delegate/делят один `model`.
-_SUBAGENT_TOOLS = frozenset({"delegate"})
+_SUBAGENT_TOOLS = frozenset({"agent", "agent_result"})
 
 
 def _suppress_during_subagent_tools(on_event):
@@ -229,7 +187,7 @@ def _suppress_during_subagent_tools(on_event):
     return wrapped
 
 
-async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -> tuple[dict, int, int, bool]:
+async def _run_subagent_streaming(sub_agent, conversation: list, config: dict, label: str = "") -> tuple[dict, int, int, bool, int]:
     """Замена sub_agent.ainvoke(...) с тем же возвращаемым значением (dict с
     ключом "messages"), но эмитящая tool_start/tool_end наружу через
     current_on_event ПО МЕРЕ того, как сабагент реально вызывает свои тулы —
@@ -290,102 +248,103 @@ async def _run_subagent_streaming(sub_agent, conversation: list, config: dict) -
                     for tc in m.tool_calls:
                         await on_event({
                             "type": "tool_start",
-                            "name": f"delegate → {tc['name']}",
+                            "name": f"agent → {tc['name']}",
                             "args": tc.get("args", {}),
                             "id": tc.get("id"),
+                            "agent": label,
                         })
                 elif isinstance(m, ToolMessage):
                     # Match the model's own output cap instead of a smaller flat cutoff — see agent.py's tool_end.
-                    await on_event({
+                    event = {
                         "type": "tool_end",
-                        "name": f"delegate → {m.name}",
+                        "name": f"agent → {m.name}",
                         "result": _tool_text(m.content)[:TOOL_OUTPUT_CHAR_CAP],
                         "id": m.tool_call_id,
-                    })
+                        "agent": label,
+                    }
+                    # A writing sub-agent's edits show their diff too.
+                    diff = _tool_artifact_diff(getattr(m, "artifact", None))
+                    if diff is not None:
+                        event["diff"] = diff
+                    diagnostics = _tool_artifact_diagnostics(getattr(m, "artifact", None))
+                    if diagnostics is not None:
+                        event["diagnostics"] = diagnostics
+                    await on_event(event)
             prev_len = len(msgs)
     except GraphRecursionError:
         hit_recursion_limit = True
     return final_state, tokens_in, tokens_out, hit_recursion_limit, peak_context
 
 
-def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model=None):
-    """Собирает delegate как closure над уже поднятыми model/tools этой
-    сессии — никакой второй подгрузки весов, никакого нового MCP-сервера.
-    Вызывается из agent_builder._build_agent, где и model, judge_model и
-    tools уже есть в области видимости. judge_model — тот же самый,
-    которым внешний агент судит свои self-heal раунды (_build_chat_model
-    с format="json", reasoning=False), не отдельная модель под сабагент —
-    используется здесь ТОЛЬКО для _CompactResearchMiddleware, той же
-    комбинации, что уже проверена в agent_builder.py:_build_role_agent.
+def build_delegate_tool(
+    model, tools: list, raw_read_file_tool=None, judge_model=None, *,
+    repo_path: str | None = None, tracked_read_file_tool=None, writer_middleware=None,
+):
+    """Builds the `agent` + `agent_result` tools as closures over the model
+    and tools this session already has — no second weight load, no new MCP
+    server. Returns [agent, agent_result].
 
-    raw_read_file_tool — read_file ДО того, как agent_builder.py обернул
-    его в _dedupe_read_tool с ОБЩИМ read_history внешней роли. Заново
-    оборачиваем его тут с СОБСТВЕННЫМ, изолированным read_history —
-    delegate — свежий, отдельный sub-agent разговор; если бы он делил
-    read_history с внешней ролью, более раннее чтение файла, сделанное
-    ВНЕШНИМ агентом (до вызова delegate), заставило бы первое же чтение
-    ТОГО ЖЕ пути внутри delegate попасть в "(You already read `path`...
-    reuse that earlier result)" — а реального результата, который можно
-    бы переиспользовать, у delegate нет: то чтение было в ДРУГОМ
-    разговоре. Модели тогда нечем ответить кроме как выдумать анализ,
-    выглядящий как разбор файла, который она на самом деле не видела."""
-    # Cleared at the start of every delegate() call below (same convention
-    # as the outer role's read_history.clear() at the start of every
-    # stream_chat) — otherwise this would just move the SAME cross-
-    # conversation leak one level down: a SECOND delegate() call later in
-    # the same session would hit "(You already read...)" stubs left by the
-    # FIRST call's own, now-finished conversation. delegate() calls are
-    # strictly sequential (module docstring), never concurrent, so
-    # clearing on entry is safe.
-    own_read_history: dict = {}
-    delegate_tools = [t for t in tools if t.name in _ALLOWED_TOOLS]
-    if raw_read_file_tool is not None:
-        wrapped_read_file = _dedupe_read_tool(raw_read_file_tool, own_read_history)
-        delegate_tools = [wrapped_read_file if t.name == "read_file" else t for t in delegate_tools]
-    # web_read (web_read_tool.py) isn't an MCP tool, so the `t.name in
-    # _ALLOWED_TOOLS` filter above can never have picked it up from `tools`
-    # — added directly instead, using the SAME `model` this sub-agent
-    # itself runs on (no second load). _ALLOWED_TOOLS (roles.py:
-    # MAIN_INVESTIGATION_TOOL_NAMES) includes "web_read" unconditionally,
-    # so this is not gated on anything per-call.
-    delegate_tools.append(build_web_read_tool(model))
-    delegate_tools_by_name = {t.name: t for t in delegate_tools}
-    # See module docstring — without this, a long enough investigation
-    # (many read_file/grep_search/search_code_semantic rounds) accumulates
-    # an ever-growing, never-compacted history and can hit a real 400
-    # "exceeds the available context size" before ever producing an
-    # answer. clear_cache() runs at the start of every delegate() call
-    # below, same reason own_read_history.clear() does.
-    compact_research = _CompactResearchMiddleware(judge_model)
-    sub_agent = create_agent(
-        model,
-        delegate_tools,
-        system_prompt=_DELEGATE_SYSTEM_PROMPT,
-        middleware=[_ToolErrorGuardMiddleware(), _DedupeToolResultsMiddleware(), compact_research],
-        checkpointer=InMemorySaver(),
-    )
+    tools — the main agent's tool objects (already wrapped: snapshot before
+    write, fresh-read check, read-cache invalidation — so a writing
+    sub-agent's edits get exactly the same safety net as the main agent's).
+    read_file is the one exception: every sub-agent run gets its OWN
+    dedupe history (raw_read_file_tool / tracked_read_file_tool re-wrapped
+    per run) — sharing the main agent's would answer the sub-agent's first
+    read of a file with "you already read this", pointing at content it
+    never saw (a different conversation). tracked_read_file_tool also
+    records the read in the fresh-read tracker, which write_file/edit_file
+    require — used for agents that may write.
 
-    # Forces the sequential-only guarantee the module docstring already
-    # claimed but never enforced — see there for why a real conflict is
-    # possible, not just a wasted VRAM slot. One lock per built delegate
-    # tool (i.e. per session), held for the ENTIRE body of a call: if the
-    # model fires several delegate calls in one round, they queue here in
-    # FIFO order and run one at a time, exactly like a single call would.
-    _delegate_lock = asyncio.Lock()
+    writer_middleware — factory for the middleware a sub-agent that can
+    mutate things needs (permission prompts, out-of-project write check,
+    plugin hooks, plan-mode guard); supplied by agent_builder, which owns
+    those classes (importing them here would be circular).
 
-    async def _run_delegate(task: str) -> str:
-        own_read_history.clear()
-        compact_research.clear_cache()
+    judge_model — the same one the main agent judges its rounds with, used
+    only for _CompactResearchMiddleware."""
+    available = {t.name for t in tools} | {"web_read"}
+    background: dict[str, dict] = {}
+
+    def _tools_for(spec) -> list:
+        names = (available if spec.tools is None else spec.tools & available) - NEVER_FOR_SUBAGENTS
+        own_read_history: dict = {}
+        selected = [t for t in tools if t.name in names and t.name != "read_file"]
+        if "read_file" in names:
+            base = tracked_read_file_tool if (spec.can_mutate(available) and tracked_read_file_tool is not None) else raw_read_file_tool
+            if base is None:
+                base = next((t for t in tools if t.name == "read_file"), None)
+            if base is not None:
+                selected.append(_dedupe_read_tool(base, own_read_history))
+        if "web_read" in names:
+            selected.append(build_web_read_tool(model))
+        return selected
+
+    def _build_sub_agent(spec):
+        # Built per run (cheap: no model load, tools already exist) — each
+        # run needs its own compaction cache and read history, and runs may
+        # now overlap (parallel_slots > 1, or background runs).
+        sub_tools = _tools_for(spec)
+        compact_research = _CompactResearchMiddleware(judge_model)
+        middleware = [_ToolErrorGuardMiddleware()]
+        if spec.can_mutate(available) and writer_middleware is not None:
+            middleware += writer_middleware()
+        middleware += [_DedupeToolResultsMiddleware(), compact_research]
+        sub_agent = create_agent(
+            model, sub_tools, system_prompt=spec.system_prompt,
+            middleware=middleware, checkpointer=InMemorySaver(),
+        )
+        return sub_agent, {t.name: t for t in sub_tools}
+
+    async def _run_agent(spec, task: str, label: str) -> str:
+        sub_agent, sub_tools_by_name = _build_sub_agent(spec)
         conversation = [HumanMessage(content=task)]
         final_text = ""
         tokens_in_total = tokens_out_total = 0
         peak_context = 0
 
         async def _emit_token_usage() -> None:
-            # Reported ONCE, right before delegate() actually returns —
-            # not per-round — so the outer loop's running counter jumps by
-            # this call's real total exactly when the visible tool_end for
-            # "delegate" fires, not piecemeal mid-investigation.
+            # Reported once, right before the run returns, so the outer
+            # counter jumps by this run's real total when its result lands.
             on_event = current_on_event.get()
             if on_event and (tokens_in_total or tokens_out_total):
                 await on_event({
@@ -401,12 +360,12 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
         # между попытками.
         for _ in range(_MAX_LEAK_RECOVERIES + 1):
             config = {
-                "configurable": {"thread_id": f"delegate-{uuid.uuid4().hex[:8]}"},
+                "configurable": {"thread_id": f"agent-{uuid.uuid4().hex[:8]}"},
                 "recursion_limit": DELEGATE_RECURSION_LIMIT,
             }
             try:
                 result, round_tokens_in, round_tokens_out, hit_recursion_limit, round_peak = await _run_subagent_streaming(
-                    sub_agent, conversation, config
+                    sub_agent, conversation, config, label
                 )
                 tokens_in_total += round_tokens_in
                 tokens_out_total += round_tokens_out
@@ -427,7 +386,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
                     "Sub-agent's own investigation grew too large for the "
                     "model's context window before it could finish (too many "
                     "large files/wide searches in one investigation). Split "
-                    "the task into narrower delegate() calls covering one "
+                    "the task into narrower agent() calls covering one "
                     "part of the investigation each, or investigate the "
                     "remainder yourself."
                 )
@@ -437,7 +396,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
             if hit_recursion_limit:
                 # Steps ran out mid-investigation — the sub-agent never got
                 # to write its own considered final answer (see
-                # _DELEGATE_SYSTEM_PROMPT). _summarize_research (same
+                # the sub-agent's system prompt). _summarize_research (same
                 # digest-writer compact_research above uses periodically)
                 # gets ONE extra shot at turning whatever raw
                 # read_file/grep_search/... results DID accumulate into a
@@ -454,7 +413,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
                         "— but here's a dense summary of what it found before "
                         f"running out:\n\n{digest}\n\nTreat this as partial and "
                         "unverified (the sub-agent itself never confirmed these "
-                        "are its real conclusions). Delegate again with a "
+                        "are its real conclusions). Call agent again with a "
                         "narrower task to fill the gaps, or investigate the "
                         "remainder yourself."
                     )
@@ -465,7 +424,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
                     f"Sub-agent used its full {DELEGATE_RECURSION_LIMIT}-step "
                     "budget without reaching a final answer. Either delegate "
                     "again with a narrower task, or investigate the remainder "
-                    "yourself — don't delegate the exact same task again."
+                    "yourself — don't hand the exact same task over again."
                 )
 
             final = messages[-1] if messages else None
@@ -500,7 +459,7 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
 
             result_parts = []
             for call in leaked_calls:
-                call_result = await _execute_leaked_tool_call(delegate_tools_by_name, call["name"], call["args"])
+                call_result = await _execute_leaked_tool_call(sub_tools_by_name, call["name"], call["args"])
                 result_parts.append(f"`{call['name']}` result:\n{call_result}")
             conversation = conversation + [
                 AIMessage(content=final_text),
@@ -519,31 +478,96 @@ def build_delegate_tool(model, tools: list, raw_read_file_tool=None, judge_model
             f"Its last output was:\n\n{final_text}"
         )
 
+    async def _run_limited(spec, task: str, label: str) -> str:
+        async with _slot_semaphore():
+            return await _run_agent(spec, task, label)
+
+    def _resolve(subagent_type: str):
+        agents = discover_agents(repo_path, _ALLOWED_TOOLS)
+        spec = agents.get((subagent_type or "explore").strip())
+        if spec is None:
+            return None, f"Error: unknown subagent_type {subagent_type!r}. Available: {', '.join(agents)}."
+        if spec.can_mutate(available) and work_mode.current_work_mode.get() == work_mode.PLAN:
+            return None, (
+                f"Error: '{spec.name}' can modify files, and this turn is in PLAN mode (read-only). "
+                "Use explore or plan instead, and put the change into your plan."
+            )
+        return spec, None
+
     @tool
-    async def delegate(task: str) -> str:
-        """Delegate an open-ended, multi-file investigation to a fresh
-        sub-agent with its OWN context window and its OWN step budget,
-        separate from this conversation's. Use this instead of digging
-        through the codebase yourself when a question needs tracing
-        something across MANY files/layers (e.g. "how does X's retry logic
-        actually work end to end" spanning a Job -> Service -> Repository ->
-        Persister chain) — that kind of investigation can burn most of THIS
-        conversation's own step budget on file reads alone, and if THAT
-        budget runs out mid-investigation the whole turn is lost with
-        nothing to show for it.
+    async def agent(description: str, prompt: str, subagent_type: str = "explore", run_in_background: bool = False) -> str:
+        """Launch a sub-agent on the same model with its OWN context window and
+        step budget. `subagent_type` picks what it can do — the available
+        types and when to use each are listed in the system prompt (explore:
+        read-only investigation, plan: read-only implementation plan,
+        general: does a whole task including edits). The sub-agent does NOT
+        see this conversation and can't ask the user anything: `prompt` must
+        be a complete, self-contained task with all the context it needs.
+        `description` — 3-5 words naming the task (shown to the user).
 
-        The sub-agent reports back ONE text summary with concrete
-        file:line citations — you still decide what to do with it, it does
-        not take any action itself. It is READ-ONLY (no writes/bash/git
-        mutations) and can't ask the user anything — write `task` as a
-        complete, self-contained question with whatever context it needs;
-        it does not see the rest of this conversation. Calling this several
-        times in one turn is fine — each call runs to completion before the
-        next one starts, and each result is labeled with its own task so
-        you can tell them apart."""
-        async with _delegate_lock:
-            result = await _run_delegate(task)
-        label = " ".join(task.split())[:80]
-        return f"[delegate: {label}]\n{result}"
+        Returns the sub-agent's final report. With run_in_background=true it
+        returns immediately with an agent_id and you keep working; get the
+        report later with agent_result(agent_id) — always collect it before
+        your final answer. Sub-agents share one model: how many run at the
+        same time is limited by the user's settings, extra ones wait."""
+        spec, error = _resolve(subagent_type)
+        if error:
+            return error
+        label = " ".join((description or prompt).split())[:80]
+        if not run_in_background:
+            result = await _run_limited(spec, prompt, label)
+            return f"[agent {spec.name}: {label}]\n{result}"
 
-    return delegate
+        # A fresh Context, not a copy of the caller's: LangChain passes the
+        # parent run's callbacks through contextvars, and inheriting them
+        # would stream this sub-agent's tokens into the MAIN agent's output
+        # while the main agent keeps generating. Only the vars the run
+        # actually needs are carried over.
+        agent_id = uuid.uuid4().hex[:6]
+        ctx = contextvars.Context()
+        ctx.run(current_on_event.set, current_on_event.get())
+        ctx.run(work_mode.current_work_mode.set, work_mode.current_work_mode.get())
+        task = asyncio.get_running_loop().create_task(_run_limited(spec, prompt, label), context=ctx)
+        background[agent_id] = {"task": task, "type": spec.name, "label": label}
+        return (
+            f"Started background agent {agent_id} ({spec.name}: {label}). Keep working; "
+            f"call agent_result(agent_id=\"{agent_id}\") to get its report before your final answer."
+        )
+
+    @tool
+    async def agent_result(agent_id: str, wait: bool = True) -> str:
+        """Get the report of a background agent started with
+        agent(..., run_in_background=true). wait=true blocks until it
+        finishes; wait=false returns right away saying whether it's done."""
+        entry = background.get(agent_id.strip())
+        if entry is None:
+            known = ", ".join(background) or "none"
+            return f"Error: no background agent {agent_id!r}. Known: {known}."
+        task = entry["task"]
+        if not task.done() and not wait:
+            return f"Agent {agent_id} ({entry['type']}: {entry['label']}) is still running."
+        try:
+            result = await asyncio.shield(task)
+        except Exception as e:
+            result = f"Agent failed: {e}"
+        background.pop(agent_id, None)
+        return f"[agent {entry['type']}: {entry['label']}]\n{result}"
+
+    return [agent, agent_result]
+
+
+# One semaphore per process, sized by settings.parallel_slots — how many
+# sub-agents may generate at once on the single resident model. Rebuilt only
+# when the setting changes and nothing holds it.
+_semaphore: asyncio.Semaphore | None = None
+_semaphore_size = 0
+
+
+def _slot_semaphore() -> asyncio.Semaphore:
+    global _semaphore, _semaphore_size
+    from expert_streaming import MAX_PARALLEL_SLOTS
+    size = max(1, min(int(settings.get("parallel_slots") or 1), MAX_PARALLEL_SLOTS))
+    if _semaphore is None or (size != _semaphore_size and _semaphore._value == _semaphore_size):
+        _semaphore = asyncio.Semaphore(size)
+        _semaphore_size = size
+    return _semaphore

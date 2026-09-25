@@ -35,8 +35,8 @@ PLAN_ALLOWED_TOOLS = frozenset({
     "search_dialog_history", "list_episodic_sessions", "read_episodic_session",
     "web_search", "fetch", "web_read", "search_external_sources",
     "get_knowledge", "list_memory", "flowai_guide", "skill", "ask_user",
-    # delegate's sub-agent only has read-only tools (delegate_tool._ALLOWED_TOOLS)
-    "delegate", "analyze_image", "list_file_snapshots", "list_deleted_paths",
+    # agent: writing sub-agent types are refused in plan mode (delegate_tool._resolve)
+    "agent", "agent_result", "analyze_image", "list_file_snapshots", "list_deleted_paths",
     "bash", "bash_bg", "bash_bg_check", "bash_bg_list",  # bash: read-only commands only, see PlanModeMiddleware
 })
 

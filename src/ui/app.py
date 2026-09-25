@@ -1124,9 +1124,9 @@ class FlowAIApp:
             wrap_lines=True,
             style="class:footer-input",
             get_line_prefix=lambda line_no, wrap_count: (
-                [("class:footer-prompt", "› ")]
+                self._prompt_prefix()
                 if line_no == 0 and wrap_count == 0 else
-                [("class:footer-prompt", "  ")]
+                [("class:footer-prompt", " " * len(self._prompt_prefix()[0][1]))]
             ),
         )
 
@@ -1211,7 +1211,7 @@ class FlowAIApp:
         hints_win = VSplit([
             Window(content=hints_ctrl, height=1, style="class:footer"),
             Window(
-                content=FormattedTextControl(self._context_text_with_mode),
+                content=FormattedTextControl(self._context_text),
                 height=1, dont_extend_width=True, style="class:footer",
             ),
         ])
@@ -1268,9 +1268,8 @@ class FlowAIApp:
             "footer-context":                   "#89b4fa",
             "footer-steer":                     "#a6adc8 italic",
             "footer-flash":                     "ansigreen bold",
-            "footer-mode-plan":                 "bg:#f9e2af #1e1e2e bold",
-            "footer-mode-build":                "bg:#fab387 #1e1e2e bold",
-            "footer-mode-agentic":              "#6c7086",
+            "footer-prompt-plan":               "#f9e2af bold",
+            "footer-prompt-build":              "#fab387 bold",
             "footer-divider-build":             "#fab387",
             "footer-context-high":              "#f38ba8 bold",
             "auto-suggestion":                  "#6c7086 italic",
@@ -1825,16 +1824,14 @@ class FlowAIApp:
             return "class:footer-divider-build"
         return "class:footer-divider"
 
-    def _context_text_with_mode(self):
-        # plan/build exists only in the основной mode; the агентный one has
-        # its own stages, so it's labelled as such instead.
+    def _prompt_prefix(self):
+        """Input prompt: the mode is part of it ("build › " / "plan › "), so
+        it's visible exactly where you type. The агентный mode has no
+        plan/build — plain "› "."""
         if not self._main_agent_mode_active():
-            parts = [("class:footer-mode-agentic", " агентный ")]
-        elif self.work_mode == "plan":
-            parts = [("class:footer-mode-plan", " ⏸ plan ")]
-        else:
-            parts = [("class:footer-mode-build", " ▶ build ")]
-        return parts + [("", " ")] + list(self._context_text())
+            return [("class:footer-prompt", "› ")]
+        style = "class:footer-prompt-plan" if self.work_mode == "plan" else "class:footer-prompt-build"
+        return [(style, f"{self.work_mode} › ")]
 
     def add_pending_steer(self, text: str) -> None:
         self._pending_steers.append(text)

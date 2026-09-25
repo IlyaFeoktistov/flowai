@@ -147,25 +147,28 @@ def _shorten(val, limit: int = 80) -> str:
 # "name(args)" one-liner for any tool not explicitly covered below, so a new
 # or uncommon tool still shows something reasonable instead of nothing.
 def _tool_line_prefix(header: str) -> str:
-    """Indent + bullet for a tool_start/tool_end header line. delegate's own
-    sub-agent tool calls arrive named "delegate → read_file" etc.
-    (delegate_tool.py) — without this they printed at the SAME left column
-    as every top-level tool, so several delegate() calls' own activity (or
-    just a delegate call sitting among the outer agent's own tools) blurred
-    into one flat, un-scannable column. Extra indent + a distinct bullet
-    (↳ instead of ●) makes which lines belong to a delegate call visible at
-    a glance instead of only readable by parsing the "delegate → " text."""
+    """Indent + bullet for a tool_start/tool_end header line. A sub-agent's
+    own tool calls arrive named "agent → read_file" etc. (delegate_tool.py)
+    — extra indent + a distinct bullet (↳ instead of ●) shows which lines
+    belong to a sub-agent instead of one flat column mixed with the main
+    agent's own tools."""
     return "      ↳" if " → " in header else "  ●"
 
 
 def _format_tool_call(name: str, args: dict) -> str:
     if " → " in name:
-        # delegate's own sub-calls (delegate_tool.py: "delegate → grep_search")
+        # a sub-agent's own sub-calls (delegate_tool.py: "agent → grep_search")
         # — recurse on the REAL inner tool name so it gets the same friendly
         # Russian phrasing as a top-level call, instead of falling through
         # to the generic name(args) fallback below for every single one.
         parent, _, inner_name = name.partition(" → ")
         return f"{parent} → {_format_tool_call(inner_name, args)}"
+    if name == "agent":
+        kind = args.get("subagent_type") or "explore"
+        what = args.get("description") or _shorten(args.get("prompt", ""), 60)
+        return f"агент {kind}: {what}" + (" (в фоне)" if args.get("run_in_background") else "")
+    if name == "agent_result":
+        return f"жду отчёт агента {args.get('agent_id', '?')}"
     if name == "read_file":
         path = args.get("path", "?")
         offset = args.get("offset") or 0
@@ -836,7 +839,9 @@ class StreamDisplay:
             # instead (agent.py plumbs it from ToolMessage.artifact). Fall
             # back to `result` for anything that still puts a diff there.
             diff_text = event.get("diff") or result
-            diffish = _format_file_edit_result(name, pending_args, diff_text) if name in _FILE_EDIT_TOOL_NAMES and diff_text else None
+            # "agent → edit_file" — a writing sub-agent's edit shows its diff too.
+            base_name = name.rpartition(" → ")[2]
+            diffish = _format_file_edit_result(base_name, pending_args, diff_text) if base_name in _FILE_EDIT_TOOL_NAMES and diff_text else None
             # Same carrier as diff — write_file/edit_file's new-diagnostics
             # list (file_ops_server.py's LSP-diagnostics-after-edit feature).
             # Only needed in the `diffish` branch below: there, `result`
@@ -846,7 +851,7 @@ class StreamDisplay:
             # silently never reach the terminal at all. The plain-`result`
             # branch doesn't need it — the summary is already part of the
             # text it renders line-by-line.
-            diag_list = event.get("diagnostics") if name in _FILE_EDIT_TOOL_NAMES else None
+            diag_list = event.get("diagnostics") if base_name in _FILE_EDIT_TOOL_NAMES else None
             diag_line = (
                 f"[yellow]     ⚠ Найдено {len(diag_list)} новых диагностических "
                 f"проблем{'ы' if len(diag_list) == 1 else ''} — см. текст результата тула[/]"
@@ -1064,7 +1069,7 @@ class StreamDisplay:
                 # and what it actually generated instead.
                 delegate_peak = self.pending_stats.get("delegate_peak_context", 0)
                 stats_ansi += (
-                    f" \033[2m(делегат: сгенерировал {delegate_out} tok"
+                    f" \033[2m(агенты: сгенерировали {delegate_out} tok"
                     + (f", контекст до {_fmt_k(delegate_peak)}" if delegate_peak else "")
                     + ")\033[0m"
                 )

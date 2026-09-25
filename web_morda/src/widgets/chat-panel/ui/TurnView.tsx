@@ -116,7 +116,7 @@ function TurnFooter({ turn }: { turn: Turn }) {
       {delegateOut > 0 && (
         <span className="turn-footer-dim">
           {' '}
-          (делегат: сгенерировал {delegateOut} tok{delegatePeak > 0 && `, контекст до ${(delegatePeak / 1000).toFixed(1)}k`})
+          (агенты: сгенерировали {delegateOut} tok{delegatePeak > 0 && `, контекст до ${(delegatePeak / 1000).toFixed(1)}k`})
         </span>
       )}
     </div>
@@ -164,6 +164,9 @@ function ToolBody({ argsLabel, argsText, result }: { argsLabel: string; argsText
 
 function ToolChildRow({ child }: { child: ToolChild }) {
   const argsText = formatArgs(child.args)
+  if (child.diff) {
+    return <DiffItem item={{ kind: 'tool', id: child.id, name: child.name, args: child.args, result: child.result, diff: child.diff, status: child.status }} />
+  }
   return (
     <details className="turn-tool turn-tool-child">
       <summary>
@@ -176,22 +179,26 @@ function ToolChildRow({ child }: { child: ToolChild }) {
   )
 }
 
-// delegate — не обычный тул: сам вызов сворачиваемый (как любой другой), а
-// под ним ВСЕГДА видно, какие sub-tool-calls он сделал (delegate_tool.py's
-// "delegate → X" события, см. entities/chat's pushDelegateChild) — то, ради
+// agent — не обычный тул: сам вызов сворачиваемый (как любой другой), а
+// под ним ВСЕГДА видно, какие вызовы сделал сабагент (delegate_tool.py's
+// "agent → X" события, см. entities/chat's pushDelegateChild) — то, ради
 // чего это отдельный компонент, а не ToolItem с доп. пропом.
 function DelegateItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
   const argsText = formatArgs(item.args)
+  const args = (item.args ?? {}) as Record<string, unknown>
   return (
     <div className="turn-delegate">
       <details className="turn-tool">
         <summary>
           <span className={'tool-dot' + (item.status === 'running' ? ' running' : '')} />
           <IconTool />
-          <span className="tool-name">delegate</span>
-          {argsText && <span className="tool-args-preview">{argsText.slice(0, 80).replace(/\s+/g, ' ')}</span>}
+          <span className="tool-name">агент {String(args.subagent_type || 'explore')}</span>
+          <span className="tool-args-preview">
+            {String(args.description || args.prompt || '').slice(0, 80)}
+            {args.run_in_background ? ' · в фоне' : ''}
+          </span>
         </summary>
-        <ToolBody argsLabel="Задача" argsText={argsText} result={item.result} />
+        <ToolBody argsLabel="Задача" argsText={String(args.prompt ?? argsText)} result={item.result} />
       </details>
       {item.children && item.children.length > 0 && (
         <ul className="delegate-children">
@@ -247,7 +254,7 @@ function DiffItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
 }
 
 function ToolItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
-  if (item.name === 'delegate') return <DelegateItem item={item} />
+  if (item.name === 'agent') return <DelegateItem item={item} />
   if (item.diff) return <DiffItem item={item} />
   const argsText = formatArgs(item.args)
   return (

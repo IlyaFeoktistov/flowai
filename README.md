@@ -658,7 +658,8 @@ flowAI/
 │   │   ├── stage_runner.py     — retry-механика ОДНОЙ стадии пайплайна (общая для всех ролей)
 │   │   ├── compaction.py       — сжатие истории/исследования при приближении к num_ctx
 │   │   ├── self_heal.py        — детерминированные verdict-проверки, судья, разбор leaked tool-calls
-│   │   ├── delegate_tool.py    — сабагент delegate для больших/незнакомых деревьев кода
+│   │   ├── delegate_tool.py    — тулы agent/agent_result: сабагенты (explore/plan/general/свои), фон, лимит потоков
+│   │   ├── subagents.py        — типы сабагентов и свои агенты из .flowai/agents/, ~/.flowai/agents/
 │   │   ├── build_cache.py      — общий get-or-build-with-freshness-key кеш (снял 4 копипасты)
 │   │   ├── knowledge.py        — общая логика knowledge-хранилища (общая для agent.py и
 │   │   │                         servers/knowledge_server.py, без похода через MCP-подпроцесс)

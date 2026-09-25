@@ -438,7 +438,7 @@ async def _stream_round(
 # попытками), и в _investigation_signals (auto-capture knowledge ниже) —
 # один и тот же набор "это разведка", а не два независимых, которые могут
 # разъехаться при следующем добавленном тул-имени.
-_READ_TOOL_NAMES = ("read_file", "grep_search", "glob_search", "search_code_semantic", "lsp", "delegate")
+_READ_TOOL_NAMES = ("read_file", "grep_search", "glob_search", "search_code_semantic", "lsp", "agent", "agent_result")
 
 
 def _round_call_info(round_msgs: list) -> dict[str, tuple[str, dict]]:

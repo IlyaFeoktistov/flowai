@@ -170,6 +170,7 @@ VENDOR_DIR = FLOWAI_ROOT / "vendor" / "llama-expert-streaming"
 SERVER_BINARY = VENDOR_DIR / "build" / "bin" / "llama-server"
 
 DEFAULT_PORT = 8090
+MAX_PARALLEL_SLOTS = 8
 DEFAULT_HOST = "127.0.0.1"
 
 # Ollama хранит блобы под /usr/share/ollama/.ollama (систем-юнит) ИЛИ
@@ -296,7 +297,7 @@ _proc: subprocess.Popen | None = None
 # num_ctx-only settings change (e.g. testing 32768 vs 65536) with the SAME
 # model_tag used to be silently ignored — is_running()/this tag matched, so
 # ensure_running kept serving the OLD context instead of restarting.
-_proc_config: tuple[str, int, bool] | None = None
+_proc_config: tuple[str, int, bool, int] | None = None
 
 # agent_builder._build_chat_model calls ensure_running TWICE per agent build
 # (main model, then judge_model — same model_tag) — without this, a failure
@@ -341,11 +342,11 @@ def live_state() -> dict | None:
     return state
 
 
-def _write_state(pid: int, port: int, model_tag: str, num_ctx: int, show_thinking: bool) -> None:
+def _write_state(pid: int, port: int, model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1) -> None:
     try:
         _STATE_PATH.write_text(json.dumps({
             "pid": pid, "port": port, "model_tag": model_tag,
-            "num_ctx": num_ctx, "show_thinking": show_thinking,
+            "num_ctx": num_ctx, "show_thinking": show_thinking, "parallel": parallel,
         }))
     except OSError:
         pass  # best-effort — worst case, the NEXT process to find this port occupied fails loud instead of adopting it
@@ -368,7 +369,7 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _adoptable_state(port: int, model_tag: str, num_ctx: int, show_thinking: bool) -> dict | None:
+def _adoptable_state(port: int, model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1) -> dict | None:
     """None unless _STATE_PATH names a server that's (a) still alive by its
     own recorded pid and (b) configured EXACTLY like what THIS call is
     asking for — same guard the module already applies to its OWN _proc via
@@ -381,8 +382,8 @@ def _adoptable_state(port: int, model_tag: str, num_ctx: int, show_thinking: boo
         state = json.loads(_STATE_PATH.read_text())
     except (OSError, ValueError):
         return None
-    if (state.get("port"), state.get("model_tag"), state.get("num_ctx"), state.get("show_thinking")) != (
-        port, model_tag, num_ctx, show_thinking
+    if (state.get("port"), state.get("model_tag"), state.get("num_ctx"), state.get("show_thinking"), state.get("parallel", 1)) != (
+        port, model_tag, num_ctx, show_thinking, parallel
     ):
         return None
     pid = state.get("pid")
@@ -478,6 +479,7 @@ def ensure_running(
     show_thinking: bool = False,
     wait_seconds: float = 120.0,
     on_progress=None,
+    parallel: int = 1,
 ) -> tuple[bool, str]:
     """Запускает llama-server (если ещё не запущен с ТЕМИ ЖЕ model_tag/
     num_ctx/show_thinking — смена любого из них перезапускает процесс,
@@ -510,7 +512,11 @@ def ensure_running(
             "`python3 setup.py --only expert-streaming`"
         )
 
-    if is_running() and _proc_config == (model_tag, num_ctx, show_thinking):
+    # Capped: each slot is a full num_ctx KV cache — a typo like 40 must not
+    # take the machine down.
+    parallel = max(1, min(int(parallel), MAX_PARALLEL_SLOTS))
+    config = (model_tag, num_ctx, show_thinking, parallel)
+    if is_running() and _proc_config == config:
         return True, "already running"
 
     if _last_failure is not None:
@@ -522,7 +528,7 @@ def ensure_running(
     # Popen below), so a mismatched config is usually a server an EARLIER
     # flowai run started; it's still ours to replace, not a foreign process.
     # A matching one is left alone and adopted below.
-    if _adoptable_state(port, model_tag, num_ctx, show_thinking) is None:
+    if _adoptable_state(port, model_tag, num_ctx, show_thinking, parallel) is None:
         stop_server(include_adopted=True)
     else:
         stop_server()
@@ -555,11 +561,11 @@ def ensure_running(
     # just loaded from the same shared SQLite file. That's "already running"
     # in every way that matters, not a stale/foreign process to fail on.
     if _health_check(port):
-        adopted = _adoptable_state(port, model_tag, num_ctx, show_thinking)
+        adopted = _adoptable_state(port, model_tag, num_ctx, show_thinking, parallel)
         if adopted is not None:
             # _proc stays None on purpose — we didn't start this process, so
             # stop_server() must never try to kill it.
-            _proc_config = (model_tag, num_ctx, show_thinking)
+            _proc_config = config
             return True, f"already running (started by another flowai process, pid {adopted['pid']})"
         pids = _find_port_holder_pids(port)
         if pids:
@@ -586,14 +592,14 @@ def ensure_running(
     cmd = [
         str(SERVER_BINARY),
         "-m", str(blob_path),
-        "-c", str(num_ctx),
-        # -np 1 — по умолчанию (-1 = auto) сервер сам завёл 4 параллельных
-        # слота (подтверждено живым /slots на этой машине), каждый со своим
-        # куском KV-cache, хотя agent_builder.py никогда не шлёт больше
-        # одного запроса одновременно на этот сервер — 3 неиспользуемых
-        # слота отъедали VRAM/RAM, которые autofit мог бы отдать под hot-store
-        # экспертов вместо этого.
-        "-np", "1",
+        # -c is the TOTAL context split evenly across slots, so each of the
+        # `parallel` slots gets its own full num_ctx window — one model in
+        # memory, one extra KV cache per extra slot (see settings.parallel_slots).
+        "-c", str(num_ctx * parallel),
+        # -np = settings.parallel_slots (default 1), never the server's own
+        # auto (-1 = 4 slots): every unused slot holds its own KV-cache that
+        # autofit could otherwise give to the model's weights on the GPU.
+        "-np", str(parallel),
         # НЕ передавать -ngl здесь — с явным "-ngl 999" рядом autofit
         # безусловно бросает
         # "-ehs -1 autofit aborted (explicit -ngl/-ncmoe or fit error);
@@ -648,8 +654,8 @@ def ensure_running(
         if _health_check(port):
             if on_progress is not None:
                 on_progress(1.0)
-            _proc_config = (model_tag, num_ctx, show_thinking)
-            _write_state(_proc.pid, port, model_tag, num_ctx, show_thinking)
+            _proc_config = config
+            _write_state(_proc.pid, port, model_tag, num_ctx, show_thinking, parallel)
             return True, "started"
         time.sleep(0.5)
 
@@ -676,12 +682,12 @@ def _load_progress(pid: int, blob_size: int) -> float | None:
     return min(0.99, (rss + rchar) / (2 * blob_size))
 
 
-def is_serving(model_tag: str, num_ctx: int, show_thinking: bool, port: int = DEFAULT_PORT) -> bool:
+def is_serving(model_tag: str, num_ctx: int, show_thinking: bool, parallel: int = 1, port: int = DEFAULT_PORT) -> bool:
     """True if a server with exactly this config already answers — i.e.
     ensure_running would return immediately without loading anything."""
-    if is_running() and _proc_config == (model_tag, num_ctx, show_thinking):
+    if is_running() and _proc_config == (model_tag, num_ctx, show_thinking, max(1, min(int(parallel), MAX_PARALLEL_SLOTS))):
         return True
-    return _health_check(port) and _adoptable_state(port, model_tag, num_ctx, show_thinking) is not None
+    return _health_check(port) and _adoptable_state(port, model_tag, num_ctx, show_thinking, max(1, min(int(parallel), MAX_PARALLEL_SLOTS))) is not None
 
 
 def _tail_log(n_lines: int = 3) -> str:

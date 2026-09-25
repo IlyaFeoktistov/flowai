@@ -23,6 +23,7 @@ cli`/`import mcp_agent`/...).
 
 - `mcp_agent/agent.py` — main agentic loop (voice_mode/`pipeline_mode=off`); `mcp_agent/pipeline.py` — the default (`pipeline_mode=on`) Analyzer→Planner→Coder→Verifier pipeline
 - `mcp_agent/plugins.py` — plugin loader: global plugins (slash commands, MCP servers, hooks) under `<repo root>/plugins/`, plus manifest-free per-project skills/hooks under `<open project>/.flowai/{skills,hooks}/`; `mcp_agent/plugin_hooks.py` — the post_file_edit/pre_commit hook middleware; `examples/plugins/hello-world/` and `examples/project-skills-hooks/` — reference examples; see `docs/plugins.md` for the full mechanism
+- `mcp_agent/delegate_tool.py` + `mcp_agent/subagents.py` — Claude Code-style sub-agents: `agent(description, prompt, subagent_type, run_in_background)`/`agent_result`, built-in explore/plan/general + custom `.flowai/agents/*.md`; all on the one resident model, concurrency = `settings.parallel_slots` (llama-server `-np`, default 1) — never a second model instance
 - `mcp_agent/skills.py` — Claude Code-style `SKILL.md` skills (`<project>/.flowai/skills/`, `~/.flowai/skills/`, `plugins/*/skills/`): name+description listed in the system prompt, body loaded via the `skill` tool or `/<name>`
 - `tools/` — tool handlers: bash_exec, file_ops, web_search, read_page, image_gen, memory
 - `ui/` — terminal UI: stream display, prompt_toolkit input, Rich console

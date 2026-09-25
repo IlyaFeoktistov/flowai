@@ -175,6 +175,7 @@ def _build_chat_model(
         # llama-server and reloaded the weights twice.
         ok, msg = expert_streaming.ensure_running(
             model_tag, num_ctx=params["num_ctx"], show_thinking=bool(settings.get("show_thinking")),
+            parallel=settings.get("parallel_slots") or 1,
         )
         if ok:
             extra_body = {
@@ -285,7 +286,8 @@ async def preload_chat_model(on_event=None) -> None:
     try:
         if settings.get("expert_streaming_enabled") and expert_streaming.is_built():
             thinking = bool(settings.get("show_thinking"))
-            if await asyncio.to_thread(expert_streaming.is_serving, model_tag, params["num_ctx"], thinking):
+            parallel = settings.get("parallel_slots") or 1
+            if await asyncio.to_thread(expert_streaming.is_serving, model_tag, params["num_ctx"], thinking, parallel):
                 return
             await _emit({"type": "model_loading", "model": model_tag, "backend": "llama.cpp", "percent": None})
             last_pct: list[int | None] = [None]
@@ -300,7 +302,7 @@ async def preload_chat_model(on_event=None) -> None:
 
             ok, _msg = await asyncio.to_thread(
                 expert_streaming.ensure_running, model_tag,
-                num_ctx=params["num_ctx"], show_thinking=thinking, on_progress=_progress,
+                num_ctx=params["num_ctx"], show_thinking=thinking, on_progress=_progress, parallel=parallel,
             )
             if ok:
                 await _emit({"type": "model_loaded", "model": model_tag, "seconds": round(time.monotonic() - started, 1)})
@@ -427,6 +429,10 @@ async def _build_tools(repo_path: str | None = None):
     # file_ops_server.py.
     read_mtimes: dict = {}
     tools = [_track_read_mtime_tool(t, read_mtimes) if t.name == "read_file" else t for t in tools]
+    # For sub-agents that may write (delegate_tool.py): their own read_file
+    # must still feed read_mtimes, or their write_file/edit_file would be
+    # refused as "not read yet". Dedupe is added per sub-agent run there.
+    tracked_read_file_tool = next((t for t in tools if t.name == "read_file"), None)
     tools = [_dedupe_read_tool(t, read_history) if t.name == "read_file" else t for t in tools]
     tools = [_require_fresh_read_tool(t, read_mtimes) if t.name in ("write_file", "edit_file") else t for t in tools]
     tools = [_wrap_read_invalidation(t, read_history) for t in tools]
@@ -461,7 +467,7 @@ async def _build_tools(repo_path: str | None = None):
         debug_print(f"[dim][MCP-AGENT] Loaded {len(tools)} tools: {[t.name for t in tools]}[/]")
     log_event("tools_loaded", names=[t.name for t in tools])
 
-    return tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, raw_read_file_tool
+    return tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, raw_read_file_tool, tracked_read_file_tool
 
 
 async def _get_tools(repo_path: str | None = None):
@@ -854,6 +860,42 @@ class _PlanModeMiddleware(AgentMiddleware):
         )
 
 
+class _SubagentApprovalMiddleware(AgentMiddleware):
+    """Permission dialogs for a writing sub-agent (delegate_tool.py). The
+    main agent gets them through HumanInTheLoopMiddleware's graph interrupt,
+    which agent.py resumes — a sub-agent's graph runs inside a tool call and
+    nobody resumes its interrupts, so it asks directly through the same
+    tools/confirm.ask_permission the interrupt path ends up in (same "always
+    allow" memory, same ask_permissions switch)."""
+
+    async def awrap_tool_call(self, request, handler):
+        name = request.tool_call["name"]
+        if name not in TOOLS_REQUIRING_APPROVAL:
+            return await handler(request)
+        from tools.confirm import ask_permission
+        from mcp_agent.ask_user_tool import _action_and_detail
+        action, detail = _action_and_detail(name, request.tool_call.get("args") or {})
+        if await ask_permission(action, detail):
+            return await handler(request)
+        return ToolMessage(
+            content="Rejected by the user — do not retry this call; report what you wanted to do instead.",
+            name=name, tool_call_id=request.tool_call["id"], status="error",
+        )
+
+
+def _subagent_writer_middleware(resolved_repo_path: str) -> list:
+    """Safety middleware for a sub-agent that can modify things — the same
+    guards the main agent has (_base_agent_middleware), with the approval
+    step done in-process instead of via a graph interrupt."""
+    return [
+        plugins.SkillToolRestrictionMiddleware(),
+        _PlanModeMiddleware(),
+        _SubagentApprovalMiddleware(),
+        _OutOfProjectWriteApprovalMiddleware(resolved_repo_path),
+        PluginHookMiddleware(resolved_repo_path),
+    ]
+
+
 class _NoBashSelfFixMiddleware(AgentMiddleware):
     """Every role with both bash and real write tools (coder, quick_fix)
     or bash alone with no write tools at all (verifier) must still make
@@ -1004,7 +1046,7 @@ def _base_agent_middleware(
 
 
 async def _build_agent(repo_path: str | None = None):
-    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, raw_read_file_tool = await _get_tools(repo_path)
+    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, raw_read_file_tool, tracked_read_file_tool = await _get_tools(repo_path)
 
     # Модель берётся из settings.py ("тяжёлая модель" — chat_model), а не из
     # отдельных SPIKE_*-переменных, как было раньше (см. историю: этот файл
@@ -1166,7 +1208,14 @@ async def _build_agent(repo_path: str | None = None):
     # judge_model passed into delegate — see build_delegate_tool's own
     # docstring on why (compact_research, same judge_model as this agent's
     # own self-heal, not a second one).
-    agent_tools = [] if voice_mode else [build_delegate_tool(model, full_tools, raw_read_file_tool, judge_model), build_web_read_tool(model)] + tools
+    agent_tools = [] if voice_mode else [
+        *build_delegate_tool(
+            model, full_tools, raw_read_file_tool, judge_model,
+            repo_path=resolved_repo_path, tracked_read_file_tool=tracked_read_file_tool,
+            writer_middleware=lambda: _subagent_writer_middleware(resolved_repo_path),
+        ),
+        build_web_read_tool(model),
+    ] + tools
     # SKILL.md skills (mcp_agent/skills.py) — the tool only exists when
     # there's at least one skill, so its schema doesn't cost tokens for nothing.
     if not voice_mode and md_skills.discover_skills(resolved_repo_path):
@@ -1263,7 +1312,7 @@ async def _build_role_agent(role: str, tool_names: frozenset[str], repo_path: st
     Никакой voice_mode-развилки здесь нет: роли пайплайна не участвуют в
     голосовом режиме — тот идёт по основному _get_agent (пустой tools=[],
     отдельный _build_voice_system_prompt)."""
-    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, _raw_read_file_tool = await _get_tools(repo_path)
+    tools, tools_by_name, read_history, resolved_repo_path, plugin_tool_names, _raw_read_file_tool, _tracked_read_file_tool = await _get_tools(repo_path)
 
     MAIN_MODEL = settings.get("chat_model")
 
@@ -1405,6 +1454,7 @@ async def _get_role_agent(role: str, tool_names: frozenset[str], repo_path: str 
     current_value = (
         current_model, repo_path or os.getcwd(),
         settings.get("expert_streaming_enabled"), tuple(sorted(model_params.effective(current_model).items())),
+        settings.get("parallel_slots"),
         md_skills.fingerprint(repo_path or os.getcwd()),
     )
 
@@ -1443,6 +1493,7 @@ async def _get_agent(repo_path: str | None = None):
         current_model, settings.get("voice_mode"), repo_path or os.getcwd(), work_mode.current_work_mode.get(),
         settings.get("optimized_tools"), settings.get("always_delegate_search"),
         settings.get("expert_streaming_enabled"), tuple(sorted(model_params.effective(current_model).items())),
+        settings.get("parallel_slots"),
         md_skills.fingerprint(repo_path or os.getcwd()),
     )
 

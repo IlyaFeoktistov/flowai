@@ -10,6 +10,7 @@ export interface ToolChild {
   name: string
   args: unknown
   result?: string
+  diff?: string
   status: 'running' | 'done'
 }
 
@@ -28,9 +29,9 @@ export type TurnItem =
       result?: string
       diff?: string
       status: 'running' | 'done'
-      // delegate → X sub-calls (delegate_tool.py) nest here instead of
+      // "agent → X" sub-calls (delegate_tool.py) nest here instead of
       // showing up as sibling tool cards — only ever populated when
-      // name === 'delegate'.
+      // name === 'agent'.
       children?: ToolChild[]
     }
   | { kind: 'plan'; id: string; steps: string[]; doneIndexes: number[]; currentIndex: number | null }

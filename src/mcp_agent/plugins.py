@@ -148,8 +148,8 @@ class SkillTask:
             return self.task
         return (
             "(This looks like a broad, read-only investigation spanning "
-            "many files — if delegate() is available, prefer calling it "
-            "for this right away instead of investigating step by step "
+            "many files — if the agent tool is available, hand it to an "
+            "explore agent right away instead of investigating step by step "
             "yourself.)\n\n" + self.task
         )
 

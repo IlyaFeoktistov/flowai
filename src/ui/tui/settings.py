@@ -71,6 +71,16 @@ _GEN3D_PROFILE_PRESETS = [
     (3, "чуть быстрее (~3%), но пик VRAM почти вдвое выше"),
 ]
 
+# Слоты llama-server на ОДНОЙ загруженной модели (settings.parallel_slots) —
+# каждый слот сверх первого = ещё один KV-cache окна num_ctx в памяти, а
+# скорость генерации делится между одновременными запросами.
+_PARALLEL_PRESETS = [
+    (1, "дефолт — агенты по очереди, память как без них"),
+    (2, "два запроса одновременно — +1 KV-cache окна num_ctx, скорость делится"),
+    (3, "+2 KV-cache окна num_ctx — только при запасе RAM/VRAM"),
+    (4, "+3 KV-cache окна num_ctx — риск нехватки памяти"),
+]
+
 # key -> (заголовок экрана выбора, список пресетов, тип для "своего значения")
 _PRESET_CONFIGS = {
     "imggen_guidance": ("guidance scale",           _GUIDANCE_PRESETS,  float),
@@ -80,6 +90,7 @@ _PRESET_CONFIGS = {
     "gen3d_target_faces":   ("gen_model целевой полигонаж", _GEN3D_FACES_PRESETS, int),
     "gen3d_skin_source":    ("gen_model источник скиннинга (--rig)", _GEN3D_SKIN_SOURCE_PRESETS, str),
     "gen3d_hunyuan_profile": ("gen_model профиль offload", _GEN3D_PROFILE_PRESETS, int),
+    "parallel_slots":  ("параллельные потоки (одна модель, N слотов)", _PARALLEL_PRESETS, int),
 }
 
 
@@ -90,8 +101,9 @@ _ITEMS = [
     ("агентный режим", "pipeline_mode", "toggle"),
     ("простые ответы без тулов", "casual_answers_enabled", "toggle"),
     ("оптимизированные тулы", "optimized_tools", "toggle"),
-    ("делегировать поиск кода", "always_delegate_search", "toggle"),
-    ("подсказка delegate", "delegate_nudge_enabled", "toggle"),
+    ("поиск кода через агента", "always_delegate_search", "toggle"),
+    ("параллельные потоки",  "parallel_slots",   "preset"),
+    ("подсказка про агентов", "delegate_nudge_enabled", "toggle"),
     ("expert-streaming backend", "expert_streaming_enabled", "toggle"),
     ("параметры модели",  "_model_params",    "model_params"),
     ("размышления",       "show_thinking",    "toggle"),
@@ -139,7 +151,7 @@ _TOGGLE_HINTS = {
     "pipeline_mode":          "Router→Analyzer→Planner→Coder→Verifier",
     "casual_answers_enabled": "прямой ответ без верификации (Требуется pipeline_mode)",
     "always_delegate_search": "всегда, даже мелкий — не только большие деревья",
-    "delegate_nudge_enabled": "после долгой разведки",
+    "delegate_nudge_enabled": "предложить explore-агента после долгой разведки",
     "expert_streaming_enabled": "MoE expert-кэш (Требуется собранный expert-streaming)",
     "optimized_tools":        "по одному тулу на смысл, для всех агентов",
     "show_thinking":          "цепочка мыслей модели",
