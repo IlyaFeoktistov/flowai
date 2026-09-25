@@ -22,18 +22,17 @@ def test_discovery_and_frontmatter(tmp_path, monkeypatch):
 
 
 def test_flat_md_file_is_a_skill(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     d = tmp_path / "home" / ".flowai" / "skills"
     d.mkdir(parents=True)
+    monkeypatch.setattr(skills, "user_skills_dir", lambda: d)
     (d / "review.md").write_text("---\ndescription: flat\n---\nDo the review.\n")
     found = skills.discover_skills(str(tmp_path / "proj"))
     assert found["review"].description == "flat" and found["review"].source == "user"
 
 
 def test_project_skill_shadows_user_skill(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     user_dir = tmp_path / "home" / ".flowai" / "skills" / "x"
+    monkeypatch.setattr(skills, "user_skills_dir", lambda: user_dir.parent)
     user_dir.mkdir(parents=True)
     (user_dir / "SKILL.md").write_text("---\ndescription: user\n---\nuser body\n")
     _write(tmp_path, "x", "---\ndescription: project\n---\nproject body\n")

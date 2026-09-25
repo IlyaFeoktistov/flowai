@@ -1,3 +1,4 @@
+import pytest
 """Small shared helpers for building synthetic LangChain messages in tests
 — every test file that exercises verdict/guidance functions or tool-call
 lookups needs the same two constructors (an AIMessage with tool_calls, a
@@ -29,3 +30,13 @@ def write_round(path="x.py", write_ok=True, bash_ok=None, final_text="done"):
         ]
     msgs.append(AIMessage(content=final_text))
     return msgs
+
+
+@pytest.fixture(autouse=True)
+def _no_real_user_skills(tmp_path, monkeypatch):
+    """mcp_agent/skills.py also scans ~/.flowai/skills and
+    ~/.config/flowai/skills — point both at an empty temp dir so skills the
+    developer has installed never leak into test results."""
+    from mcp_agent import skills
+    monkeypatch.setattr(skills, "user_skills_dir", lambda: tmp_path / "_user_skills")
+    monkeypatch.setattr(skills, "_xdg_user_skills_dir", lambda: tmp_path / "_xdg_user_skills")

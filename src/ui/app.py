@@ -1057,7 +1057,10 @@ class FlowAIApp:
         )
 
         # Divider between output and footer
-        divider = Window(height=1, char="─", style="class:footer-divider")
+        # The two lines framing the input turn orange in build mode — the mode
+        # where the agent edits files — so it's visible at a glance, not only
+        # from the footer label.
+        divider = Window(height=1, char="─", style=self._input_divider_style)
 
         # Stats window (always reserved to keep output area stable).
         stats_ctrl = self._stats_control()
@@ -1214,7 +1217,7 @@ class FlowAIApp:
         ])
 
         # Float completion menu
-        divider2 = Window(height=1, char="─", style="class:footer-divider")
+        divider2 = Window(height=1, char="─", style=self._input_divider_style)
 
         # См. _hide_input_bar выше — не рисуем реальный input_win, когда
         # печатать в него бессмысленно (perm-диалог, ask_user-список без
@@ -1266,6 +1269,9 @@ class FlowAIApp:
             "footer-steer":                     "#a6adc8 italic",
             "footer-flash":                     "ansigreen bold",
             "footer-mode-plan":                 "bg:#f9e2af #1e1e2e bold",
+            "footer-mode-build":                "bg:#fab387 #1e1e2e bold",
+            "footer-mode-agentic":              "#6c7086",
+            "footer-divider-build":             "#fab387",
             "footer-context-high":              "#f38ba8 bold",
             "auto-suggestion":                  "#6c7086 italic",
             "completion-menu.completion":              "bg:#1e1e2e #cdd6f4",
@@ -1810,12 +1816,25 @@ class FlowAIApp:
         self.flash_hint("режим: план — только чтение и план, без правок" if self.work_mode == "plan"
                         else "режим: build — агент правит код")
 
+    def _main_agent_mode_active(self) -> bool:
+        import settings as _s
+        return bool(_s.get("voice_mode") or not _s.get("pipeline_mode"))
+
+    def _input_divider_style(self) -> str:
+        if self.work_mode == "build" and self._main_agent_mode_active():
+            return "class:footer-divider-build"
+        return "class:footer-divider"
+
     def _context_text_with_mode(self):
-        parts = []
-        if self.work_mode == "plan":
-            parts.append(("class:footer-mode-plan", " ⏸ план "))
-            parts.append(("", " "))
-        return parts + list(self._context_text())
+        # plan/build exists only in the основной mode; the агентный one has
+        # its own stages, so it's labelled as such instead.
+        if not self._main_agent_mode_active():
+            parts = [("class:footer-mode-agentic", " агентный ")]
+        elif self.work_mode == "plan":
+            parts = [("class:footer-mode-plan", " ⏸ plan ")]
+        else:
+            parts = [("class:footer-mode-build", " ▶ build ")]
+        return parts + [("", " ")] + list(self._context_text())
 
     def add_pending_steer(self, text: str) -> None:
         self._pending_steers.append(text)
