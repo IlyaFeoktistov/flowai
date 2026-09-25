@@ -71,3 +71,22 @@ def test_original_read_only_diagnostics_still_allowed(command):
 ])
 def test_original_mutation_paths_still_denied(command):
     assert _is_read_only_bash_command(command) is False
+
+
+@pytest.mark.parametrize("command", [
+    'git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo "master"',
+    "git diff master...HEAD | head -200",
+    "git log --oneline -5 && git status",
+    'grep -rn "a|b" src',
+    "awk '{print $1}' f",
+])
+def test_read_only_pipelines_and_harmless_redirects_allowed(command):
+    assert _is_read_only_bash_command(command) is True
+
+
+@pytest.mark.parametrize("command", [
+    "echo x > f", "cat a >> b", "echo $(rm x)", 'echo "`rm x`"', "ls & rm x",
+    "git diff | tee out", "awk '{print > \"x\"}' f", "ls; rm x", 'echo "$HOME"', "(cd x)",
+])
+def test_writes_and_substitutions_in_pipelines_denied(command):
+    assert _is_read_only_bash_command(command) is False

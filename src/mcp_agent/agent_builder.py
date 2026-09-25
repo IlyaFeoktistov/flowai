@@ -673,6 +673,7 @@ _READ_ONLY_BASH_ALLOWLIST = {
 _READ_ONLY_GIT_SUBCOMMANDS = {
     "status", "log", "diff", "show", "branch", "rev-parse", "ls-files",
     "blame", "describe", "tag", "remote", "shortlog",
+    "symbolic-ref", "merge-base", "rev-list", "cat-file", "for-each-ref", "name-rev",
 }
 
 # ollama's OWN metadata (analyzer's system prompt explicitly recommends
@@ -768,9 +769,70 @@ def _is_read_only_bash_command(command: str) -> bool:
     command = command.strip()
     if not command:
         return False
-    if _READ_ONLY_BASH_METACHARS.search(command):
+    segments = _split_read_only_pipeline(command)
+    if segments is None:
         return False
+    return all(_is_read_only_simple_command(seg) for seg in segments)
 
+
+# Redirections that only discard/merge output — `git ... 2>/dev/null` is
+# how models routinely probe; rejecting it made them conclude that even
+# `git diff` is forbidden.
+_HARMLESS_REDIRECT = re.compile(r"(?<!\S)(?:[12]?>|&>)\s*/dev/null(?!\S)|(?<!\S)2>&1(?!\S)")
+
+
+def _split_read_only_pipeline(command: str) -> list[str] | None:
+    """Splits on |, ||, &&, ; outside quotes. None if the command uses
+    anything else the shell would interpret — redirection to a file,
+    substitution ($, backticks, also inside double quotes), subshells,
+    background &, newlines. Single-quoted text is literal and never split."""
+    command = _HARMLESS_REDIRECT.sub(" ", command)
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            current.append(ch)
+        elif quote == '"':
+            if ch in "$`":
+                return None
+            if ch == "\\" and i + 1 < len(command):
+                current.append(command[i:i + 2])
+                i += 2
+                continue
+            if ch == '"':
+                quote = ""
+            current.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            current.append(ch)
+        elif command.startswith(("&&", "||"), i):
+            segments.append("".join(current))
+            current = []
+            i += 2
+            continue
+        elif ch in "|;":
+            segments.append("".join(current))
+            current = []
+        elif _READ_ONLY_BASH_METACHARS.match(ch):
+            return None
+        else:
+            current.append(ch)
+        i += 1
+    if quote:
+        return None
+    segments.append("".join(current))
+    segments = [seg.strip() for seg in segments]
+    if any(not seg for seg in segments):
+        return None
+    return segments
+
+
+def _is_read_only_simple_command(command: str) -> bool:
     tokens = command.split()
     first = tokens[0].rsplit("/", 1)[-1]
     rest = tokens[1:]
@@ -790,8 +852,11 @@ def _is_read_only_bash_command(command: str) -> bool:
 
     if first not in _READ_ONLY_BASH_ALLOWLIST:
         return False
-    # sed/awk's own in-place edit flags — the ONLY way these two allowlisted
-    # commands can still write to disk.
+    # awk programs are quoted, so the shell-level checks above never see
+    # their own output redirection/pipes/system() calls.
+    if first == "awk" and any(x in command for x in (">", "|", "system")):
+        return False
+    # sed/awk's own in-place edit flags.
     return " -i " not in f" {command} " and "--in-place" not in command
 
 
@@ -850,12 +915,23 @@ class _PlanModeMiddleware(AgentMiddleware):
             allowed = _is_read_only_bash_command(str((request.tool_call.get("args") or {}).get("command", "")))
         if allowed:
             return await handler(request)
-        return ToolMessage(
-            content=(
+        if name in ("bash", "bash_bg"):
+            content = (
+                "Denied in PLAN mode: this particular command is not recognized as "
+                "read-only. Read-only commands still work — git diff/log/show/"
+                "status/rev-parse, cat, grep, ls, find, head, wc..., also chained "
+                "with | && || and with 2>/dev/null. Not allowed: writing to files "
+                "(>, >>, tee), $(...)/backticks, installs, mutating git. Rephrase "
+                "the command, or describe the change in your answer instead."
+            )
+        else:
+            content = (
                 f"Denied: '{name}' is not available in PLAN mode — this turn is "
                 "read-only research, it never writes files or runs mutating "
                 "commands. Describe the change in your answer instead."
-            ),
+            )
+        return ToolMessage(
+            content=content,
             name=name,
             tool_call_id=request.tool_call["id"],
             status="error",
