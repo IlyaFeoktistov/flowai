@@ -193,8 +193,49 @@ function DelegateItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
   )
 }
 
+function diffLineClass(line: string): string {
+  if (line.startsWith('@@')) return 'diff-hunk'
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-file'
+  if (line.startsWith('+')) return 'diff-add'
+  if (line.startsWith('-')) return 'diff-del'
+  return ''
+}
+
+// write_file/edit_file: дифф приходит отдельным полем события (file_ops_server.py
+// кладёт его в structuredContent, модели он не отдаётся) — показываем его
+// вместо короткого "Updated ..." и раскрытым сразу, как в терминале.
+function DiffItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
+  const path = (item.args as Record<string, unknown> | undefined)?.path
+  const lines = (item.diff ?? '').replace(/\n$/, '').split('\n')
+  const added = lines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length
+  const removed = lines.filter((l) => l.startsWith('-') && !l.startsWith('---')).length
+  return (
+    <details className="turn-tool" open>
+      <summary>
+        <span className="tool-dot" />
+        <IconTool />
+        <span className="tool-name">{item.name}</span>
+        <span className="tool-args-preview">
+          {String(path ?? '')} <span className="diff-add">+{added}</span> <span className="diff-del">-{removed}</span>
+        </span>
+      </summary>
+      <div className="turn-tool-body">
+        <pre className="code-block diff-block">
+          {lines.map((l, i) => (
+            <div key={i} className={diffLineClass(l)}>
+              {l || ' '}
+            </div>
+          ))}
+        </pre>
+        {item.result && item.result.includes('\n') && <pre className="code-block">{item.result}</pre>}
+      </div>
+    </details>
+  )
+}
+
 function ToolItem({ item }: { item: Extract<TurnItem, { kind: 'tool' }> }) {
   if (item.name === 'delegate') return <DelegateItem item={item} />
+  if (item.diff) return <DiffItem item={item} />
   const argsText = formatArgs(item.args)
   return (
     <details className="turn-tool">

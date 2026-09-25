@@ -326,3 +326,19 @@
      а точки тулов сидят с отступом (border+padding их summary). */
   margin-left: 13px;
 }
+
+.diff-block div {
+  white-space: pre;
+}
+.diff-add {
+  color: var(--success);
+}
+.diff-del {
+  color: var(--danger);
+}
+.diff-hunk {
+  color: var(--accent-2);
+}
+.diff-file {
+  color: var(--text-faint);
+}

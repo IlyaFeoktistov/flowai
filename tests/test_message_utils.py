@@ -164,3 +164,14 @@ def test_thrashing_hint_is_scoped_to_loop_prone_tools_only():
     out = _dedupe_identical_tool_results(msgs)
     tool_msgs = [m for m in out if hasattr(m, "tool_call_id")]
     assert tool_msgs[-1].content == "Error: still not found"
+
+
+def test_tool_artifact_diff_reads_typeddict_artifact():
+    # langchain-mcp-adapters' MCPToolArtifact is a TypedDict — a plain dict
+    # at runtime, not an object with a structured_content attribute.
+    from mcp_agent.message_utils import _tool_artifact_diagnostics, _tool_artifact_diff
+    artifact = {"structured_content": {"diff": "@@ -1 +1 @@\n-a\n+b\n", "diagnostics": [{"line": 1}]}}
+    assert _tool_artifact_diff(artifact) == "@@ -1 +1 @@\n-a\n+b\n"
+    assert _tool_artifact_diagnostics(artifact) == [{"line": 1}]
+    assert _tool_artifact_diff(None) is None
+    assert _tool_artifact_diff({"structured_content": None}) is None

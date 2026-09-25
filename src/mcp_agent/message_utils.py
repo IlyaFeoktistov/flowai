@@ -115,15 +115,24 @@ def _tool_text(content: Any) -> str:
     return str(content)
 
 
+def _artifact_structured_content(artifact: Any) -> Any:
+    """langchain-mcp-adapters' MCPToolArtifact is a TypedDict — a plain dict
+    at runtime, so attribute access never finds structured_content; the
+    getattr fallback covers any object-shaped artifact."""
+    if isinstance(artifact, dict):
+        return artifact.get("structured_content")
+    return getattr(artifact, "structured_content", None)
+
+
 def _tool_artifact_diff(artifact: Any) -> str | None:
     """write_file/edit_file (file_ops_server.py) carry their diff in the MCP
     tool's structuredContent rather than in the text content the model sees
     (see file_ops_server.py's _text_result — the model gets a short
     confirmation only, to avoid paying tokens to see back a diff it already
     knows it just made). langchain-mcp-adapters exposes structuredContent as
-    ToolMessage.artifact.structured_content. UI-only — this must never be
+    ToolMessage.artifact["structured_content"]. UI-only — this must never be
     fed into anything the model reads."""
-    structured = getattr(artifact, "structured_content", None)
+    structured = _artifact_structured_content(artifact)
     if isinstance(structured, dict):
         diff = structured.get("diff")
         if isinstance(diff, str):
@@ -137,7 +146,7 @@ def _tool_artifact_diagnostics(artifact: Any) -> list | None:
     the edit introduced new LSP diagnostics — UI-only, never fed to the
     model (it already saw a text summary of the same list in its own
     tool-result text, see file_ops_server.py's _diagnostics_summary)."""
-    structured = getattr(artifact, "structured_content", None)
+    structured = _artifact_structured_content(artifact)
     if isinstance(structured, dict):
         diagnostics = structured.get("diagnostics")
         if isinstance(diagnostics, list):
