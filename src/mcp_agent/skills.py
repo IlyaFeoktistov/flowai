@@ -3,7 +3,7 @@ Markdown skills in the Claude Code format: a directory with a SKILL.md
 whose YAML frontmatter names and describes it, and whose body is the
 instructions the model follows when the skill is used.
 
-    <dir>/<name>/SKILL.md
+    <dir>/<name>/SKILL.md     (or a single flat <dir>/<name>.md)
     ---
     name: release-notes            (optional, defaults to the directory name)
     description: Draft release notes from the git log since the last tag.
@@ -98,7 +98,8 @@ def _parse(path: Path, source: str) -> Skill | None:
             body = after.partition("\n")[2]
     if not isinstance(meta, dict):
         meta = {}
-    name = str(meta.get("name") or path.parent.name).strip()
+    default_name = path.parent.name if path.name == "SKILL.md" else path.stem
+    name = str(meta.get("name") or default_name).strip()
     description = " ".join(str(meta.get("description") or "").split())
     tools = meta.get("allowed-tools") or meta.get("allowed_tools")
     if isinstance(tools, str):
@@ -114,7 +115,9 @@ def discover_skills(repo_path: str | None = None) -> dict[str, Skill]:
     for root, source in _search_roots(repo_path):
         if not root.is_dir():
             continue
-        for skill_md in sorted(root.glob("*/SKILL.md")):
+        # <name>/SKILL.md (Claude Code layout, room for the skill's own
+        # files) or a single flat <name>.md.
+        for skill_md in sorted(root.glob("*/SKILL.md")) + sorted(root.glob("*.md")):
             skill = _parse(skill_md, source)
             if skill is not None and skill.name not in found:
                 found[skill.name] = skill

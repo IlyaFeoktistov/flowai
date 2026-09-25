@@ -21,6 +21,15 @@ def test_discovery_and_frontmatter(tmp_path, monkeypatch):
     assert found["nofront"].allowed_tools is None
 
 
+def test_flat_md_file_is_a_skill(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    d = tmp_path / "home" / ".flowai" / "skills"
+    d.mkdir(parents=True)
+    (d / "review.md").write_text("---\ndescription: flat\n---\nDo the review.\n")
+    found = skills.discover_skills(str(tmp_path / "proj"))
+    assert found["review"].description == "flat" and found["review"].source == "user"
+
+
 def test_project_skill_shadows_user_skill(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
